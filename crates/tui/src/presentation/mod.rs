@@ -70,9 +70,9 @@ use flow_steps::{
 
 use session_commands::{
     ActiveSessionCommand, SessionCommandCompletion, SessionCommandLane, adopt_session_command_lane,
-    begin_session_command, deliver_carried_outcome, drain_session_completions,
-    drain_session_refresh, project_controller_sessions, session_name_for,
-    sync_overlay_session_roots, sync_runtime_sessions,
+    begin_session_command, begin_session_rename, deliver_carried_outcome,
+    drain_session_completions, drain_session_refresh, project_controller_sessions,
+    session_name_for, sync_overlay_session_roots, sync_runtime_sessions,
 };
 #[cfg(test)]
 use session_commands::{
@@ -1036,6 +1036,11 @@ struct AgentContext {
 }
 
 enum SessionBackendCompletion {
+    Rename {
+        session: SessionId,
+        request_id: usagi_core::domain::id::RequestId,
+        completions: Completions,
+    },
     Create {
         token: PendingToken,
         /// Name the user asked for. A create that outlives its composition is
@@ -1550,6 +1555,7 @@ struct HomeFrameMaterial {
     /// overlay is open. Keying off the message avoids an unreachable "error
     /// overlay without a message" branch.
     create_error: Option<String>,
+    rename_session: Option<crate::usecase::application::controller::RenameSessionForm>,
     /// The terminal-launch failure dialog's safe message.
     terminal_launch_error: Option<String>,
     /// The Agent-launch failure dialog's safe message.
@@ -2346,6 +2352,7 @@ fn resolve_workspace_help_context(state: WorkspaceHelpState) -> KeyHelpContext {
             Overlay::Environment => KeyHelpContext::WorkspaceEnvironmentEditor,
             Overlay::Roles => KeyHelpContext::RolesEditor,
             Overlay::CreateSession => KeyHelpContext::CreateSession,
+            Overlay::RenameSession => KeyHelpContext::RenameSession,
             Overlay::Decisions if state.decision_answer_open => KeyHelpContext::DecisionAnswer,
             Overlay::Decisions => KeyHelpContext::DecisionList,
             Overlay::CleanupQueue => KeyHelpContext::CleanupQueue,
@@ -2963,6 +2970,17 @@ fn remember_project_deck(loader: &mut dyn WorkspaceLoader, deck: &mut WorkspaceD
     }
 }
 
+/// The loading label for the `position`-th of `total` deck workspaces. Every
+/// workspace of a multi-workspace deck shows its count, and a lone one shows
+/// none, so no position appears without the total it counts towards.
+fn deck_opening_label(position: usize, total: usize) -> String {
+    if total > 1 {
+        format!("Opening workspace {position} / {total}…")
+    } else {
+        "Opening workspace…".to_owned()
+    }
+}
+
 fn prepare_workspace_deck(
     term: &mut dyn Terminal,
     loader: &mut dyn WorkspaceLoader,
@@ -2974,10 +2992,15 @@ fn prepare_workspace_deck(
             "a project deck needs at least one workspace",
         ));
     };
-    let primary = open_workspace_responsive(term, loader, first_path, "Opening workspace 1…")?;
+    let primary = open_workspace_responsive(
+        term,
+        loader,
+        first_path,
+        &deck_opening_label(1, paths.len()),
+    )?;
     let mut snapshots = vec![primary.clone()];
     for (index, path) in remaining_paths.iter().enumerate() {
-        let label = format!("Opening workspace {} / {}…", index + 2, paths.len());
+        let label = deck_opening_label(index + 2, paths.len());
         snapshots.push(open_workspace_responsive(term, loader, path, &label)?);
     }
     activate_workspace_responsive(

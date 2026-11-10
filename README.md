@@ -73,8 +73,8 @@ AGY は Closeup の `agent -m agy` で選択でき、role の system context と
 [Antigravity CLI の互換範囲](document/02-architecture.md#antigravity-cli-の互換範囲)を参照してください。
 macOS では daemon が [ユーザー用の service context](document/05-daemon.md#macos-の-service-context) を使い、
 logout 後も端末の OS ユーザー情報・DNS の参照先を保持します。
-よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録できます。
-保存中も操作でき、登録・解除の結果は session 一覧のお気に入りマーカーへ反映されます。
+よく使う session は [Switch モード](document/03-tui.md#home-と-target) でお気に入りに登録でき、表示名も変更できます。
+お気に入りは保存中も操作でき、登録・解除の結果は session 一覧のお気に入りマーカーへ反映されます。
 Agent 同士は [handoff・message](document/07-mcp.md#同じ-session-の-agent-間通信) でやり取りします。
 MCP で作成した session の Agent も、[背景観測](document/03-tui.md#home-frame-loop-と背景観測-lane)でワークスペースを切り替えずに表示へ反映されます。
 MCP を接続する Agent には、起動時に人への質問を [user decision](document/10-session-roles.md#tools-fragment) で送り、TUI で回答できるよう指示します。
@@ -84,6 +84,7 @@ Agent は保留中の質問と未受信の回答を一覧から回収でき、�
 質問には比較表・テキスト図・推奨案と理由を添えられ、複数選択にも TUI のチェック操作で回答できます。選択件数の指定や、選択肢ごとのメリット・注意点の表示にも対応しています。選択への補足コメントや、送信前の確認画面も利用できます。
 選択肢は余白と行の強調で読みやすく表示し、上下キーでコメント・自由入力まで移動できます。長文は現在の表示位置から PgUp/PgDn で読み進められます。画面下部には回答件数と必要な操作を控えめに表示します。詳しい表示と操作は [TUI の仕様](document/03-tui.md#home-と-target) を参照してください。
 質問モーダルの本文はドラッグして選択・コピーでき、自由入力や補足コメントへ貼り付けられます。
+モーダル下部に範囲コピーの操作案内を表示します。
 折り返しや省略表示でも絵文字を途中で分割せず、低い画面でもコピー結果が本文を隠しません。
 比較表の列に絵文字が収まらない場合は、見出し付きの項目表示へ切り替えて全文を表示します。
 実装範囲と入口面の全体像は [プロジェクト概要](document/01-overview.md) を参照してください。
@@ -109,6 +110,7 @@ Agent の停止・本体更新・daemon 切替・同じ会話での再開をま�
 導入済み binary へ切り替える場合は `usagi daemon restart --restart-agents` を使います。
 同じ会話への再開では、人への確認依頼と回答、委譲元への完了通知も引き継ぎます。
 同じ会話での作業再開と再開できない場合の扱いは [daemon の Agent 更新](document/05-daemon.md#daemon-restart-による-agent-integration-更新) を参照してください。
+中断タブの再開エラーと再試行の扱いは [TUI の明示 resume](document/03-tui.md#明示-resume-の検証) を参照してください。
 
 対応環境と必要なツール、導入先の指定、ソースからのビルド、更新、shell 補完は
 [インストールと更新](document/12-installation.md) を参照してください。

@@ -398,14 +398,13 @@ fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor(
         Key::Click { column: 0, row: 0 },
         decision_pointer(PointerKind::Drag, viewport.left, viewport.top),
         decision_pointer(PointerKind::Up, viewport.left, viewport.top),
-        Key::TerminalCopy { fallback: vec![3] },
     ] {
         assert!(selection.handle_input(&key, &mut term));
     }
     assert_eq!(term.copied, [] as [String; 0]);
     let mut painted = decision_selection_frame(&runtime, 24, 80);
     selection.paint(&mut painted, 80);
-    assert!(painted.join("\n").contains("no decision text is selected"));
+    assert!(painted.join("\n").contains("Copy shortcut"));
     for key in [Key::Tab, Key::Paste("Pasted comment".into())] {
         assert!(!selection.handle_input(&key, &mut term));
         assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
@@ -434,6 +433,48 @@ fn decision_selection_consumes_stray_gestures_and_leaves_answer_paste_to_editor(
             .freeform(),
         "Pasted answer"
     );
+    // Without a selection, copying in the editor or confirmation preserves the clipboard.
+    for key in [Key::Other, Key::Enter] {
+        assert_eq!(runtime.handle_key(key), [] as [Effect; 0]);
+        selection.sync(
+            &decision_selection_frame(&runtime, 24, 80),
+            24,
+            80,
+            runtime.state().decision_overlay(),
+        );
+        assert!(selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+        assert_eq!(term.copied, [] as [String; 0]);
+    }
+    assert!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .unwrap()
+            .confirmation()
+            .is_some()
+    );
+    // Copying without a selection in the list also leaves the clipboard alone.
+    for _ in 0..2 {
+        let _ = runtime.handle_key(Key::Escape);
+    }
+    assert!(
+        runtime
+            .state()
+            .decision_overlay()
+            .unwrap()
+            .editor()
+            .is_none()
+    );
+    selection.sync(
+        &decision_selection_frame(&runtime, 24, 80),
+        24,
+        80,
+        runtime.state().decision_overlay(),
+    );
+    assert!(selection.handle_input(&Key::TerminalCopy { fallback: vec![3] }, &mut term));
+    assert_eq!(term.copied, [] as [String; 0]);
 }
 
 #[test]

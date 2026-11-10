@@ -129,6 +129,7 @@ pub struct EventPump<S, R> {
     pending_terminal: VecDeque<Event>,
     /// A second Escape encountered during lookahead has not been decoded yet.
     pending_escape: Option<Event>,
+    pending_mouse: Option<MouseReport>,
     legacy_unix_control_aliases: bool,
 }
 
@@ -147,6 +148,7 @@ where
             next_tick_at: now.saturating_add(tick_interval),
             pending_terminal: VecDeque::new(),
             pending_escape: None,
+            pending_mouse: None,
             legacy_unix_control_aliases: false,
         }
     }
@@ -206,6 +208,16 @@ where
         if let Some(event) = self.pending_terminal.pop_front() {
             return Ok(Some(event));
         }
+        if self.pending_mouse.is_some() {
+            return recover_mouse_report(
+                &mut self.source,
+                &mut self.pending_terminal,
+                &mut self.pending_escape,
+                &mut self.pending_mouse,
+                timeout,
+            );
+        }
+        let poll_deadline = self.source.now() + timeout;
         let event = if let Some(escape) = self.pending_escape.take() {
             escape
         } else {
@@ -215,13 +227,20 @@ where
             event
         };
         if event == Event::Key(KeyEvent::new(CrosstermKeyCode::Esc, KeyModifiers::NONE)) {
+            self.pending_mouse = Some(MouseReport {
+                escape: Some(event),
+                deadline: self.source.now() + MOUSE_REPORT_GRACE,
+                buffered: VecDeque::new(),
+                report: String::new(),
+            });
+            let remaining = poll_deadline.saturating_duration_since(self.source.now());
             return recover_mouse_report(
                 &mut self.source,
                 &mut self.pending_terminal,
                 &mut self.pending_escape,
-                event,
-            )
-            .map(Some);
+                &mut self.pending_mouse,
+                remaining,
+            );
         }
         Ok(Some(event))
     }
@@ -303,35 +322,65 @@ where
     }
 }
 
-/// Recover only a complete SGR mouse report. Other Escape sequences,
-/// literal text, paste, and incomplete candidates are replayed unchanged.
+/// A candidate survives poll/frame boundaries. Only a lone Escape is released
+/// after the grace period; its next event can still start a delayed mouse tail.
+struct MouseReport {
+    escape: Option<Event>,
+    deadline: Instant,
+    buffered: VecDeque<Event>,
+    report: String,
+}
+
+/// Recover only a complete SGR mouse report. Time passing is not evidence that
+/// a partial control sequence is text. Replay only when input disproves it.
 fn recover_mouse_report(
     source: &mut dyn CrosstermEventSource,
     pending_terminal: &mut VecDeque<Event>,
     pending_escape: &mut Option<Event>,
-    escape: Event,
-) -> io::Result<Event> {
-    let deadline = source.now() + MOUSE_REPORT_GRACE;
-    let mut buffered = VecDeque::new();
-    let mut report = String::new();
-    for _ in 0..MOUSE_REPORT_MAX_CHARS {
-        let timeout = deadline.saturating_duration_since(source.now());
+    pending_mouse: &mut Option<MouseReport>,
+    timeout: Duration,
+) -> io::Result<Option<Event>> {
+    let mut candidate = pending_mouse.take().expect("mouse candidate exists");
+    let poll_deadline = source.now() + timeout;
+    while candidate.report.len() < MOUSE_REPORT_MAX_CHARS {
+        let now = source.now();
+        let grace = candidate.deadline.saturating_duration_since(now);
+        // Consuming a partial prefix is not a completed poll. Continue waiting
+        // for the remainder of this call's budget so `next` cannot emit early
+        // ticks and move its schedule arbitrarily far into the future.
+        let wait = poll_deadline.saturating_duration_since(now);
+        let timeout = if candidate.report.is_empty() && !grace.is_zero() {
+            grace
+        } else {
+            wait.max(grace)
+        };
         let event = match poll_source(source, timeout) {
             Ok(Some(event)) => event,
-            Ok(None) => break,
+            Ok(None) => {
+                // Keep a bounded prefix while letting backend events and ticks
+                // run. A late tail must never be replayed as ordinary typing.
+                let escape = if candidate.report.is_empty() {
+                    candidate.escape.take()
+                } else {
+                    None
+                };
+                candidate.deadline = source.now();
+                *pending_mouse = Some(candidate);
+                return Ok(escape);
+            }
             Err(error) => {
-                pending_terminal.push_back(escape);
-                pending_terminal.extend(buffered);
+                pending_terminal.extend(candidate.escape);
+                pending_terminal.extend(candidate.buffered);
                 return Err(error);
             }
         };
-        if event == escape {
+        if event == Event::Key(KeyEvent::new(CrosstermKeyCode::Esc, KeyModifiers::NONE)) {
             // Replay the first Escape and its text before trying this new
             // Escape. Its mouse tail remains in the source for decoding.
             *pending_escape = Some(event);
             break;
         }
-        buffered.push_back(event.clone());
+        candidate.buffered.push_back(event.clone());
         let Event::Key(KeyEvent {
             code: CrosstermKeyCode::Char(character),
             modifiers,
@@ -346,15 +395,16 @@ fn recover_mouse_report(
         if !(modifiers.is_empty() || character == 'M' && modifiers == KeyModifiers::SHIFT) {
             break;
         }
-        report.push(character);
-        match sgr_mouse::parse_report(&report) {
-            Ok(Some(mouse)) => return Ok(Event::Mouse(mouse)),
+        candidate.report.push(character);
+        match sgr_mouse::parse_report(&candidate.report) {
+            Ok(Some(mouse)) => return Ok(Some(Event::Mouse(mouse))),
             Ok(None) => {}
             Err(()) => break,
         }
     }
-    pending_terminal.extend(buffered);
-    Ok(escape)
+    pending_terminal.extend(candidate.escape);
+    pending_terminal.extend(candidate.buffered);
+    Ok(pending_terminal.pop_front())
 }
 
 fn poll_source(
@@ -920,59 +970,357 @@ mod tests {
     }
 
     #[test]
-    fn mouse_lookahead_stops_waiting_when_the_injected_deadline_expires() {
-        struct ExpiringSource {
-            events: VecDeque<Event>,
-            now: Instant,
-            timeouts: Vec<Duration>,
-            reads: usize,
+    fn delayed_mouse_fragments_survive_every_split_and_keep_backend_ticks_live() {
+        for report in ["[<65;60;48M", "[<64;42;13M", "[<00065;65535;65535M"] {
+            let events = split_report(report);
+            for split in 1..events.len() {
+                let mut pump = EventPump::new(
+                    FakeSource::with(events[..split].iter().cloned()),
+                    FakeEventBackend::default(),
+                    TICK,
+                    T0,
+                );
+                // A lone Escape remains responsive. Even after releasing it,
+                // remember that the next input may be its delayed mouse tail.
+                if split == 1 {
+                    assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(events[0].clone()));
+                }
+                for frame in 1..=4 {
+                    pump.source.now += MOUSE_REPORT_GRACE * 10;
+                    pump.backend.0.push_back("backend remains live");
+                    assert_eq!(
+                        pump.next(T0 + TICK * frame).unwrap(),
+                        RuntimeEvent::Backend("backend remains live"),
+                        "{report:?} at {split}"
+                    );
+                    assert_eq!(pump.next(T0 + TICK * frame).unwrap(), RuntimeEvent::Tick);
+                }
+                // The blocking phase must still poll with a timeout after the
+                // grace period, rather than spin on an unfinished candidate.
+                assert_eq!(pump.next(T0 + TICK * 4).unwrap(), RuntimeEvent::Tick);
+                assert_eq!(pump.source.timeouts.last(), Some(&TICK));
+                pump.source.events.extend(events[split..].iter().cloned());
+                assert_eq!(
+                    Some(pump.next(T0 + TICK * 4).unwrap()),
+                    adapt_event(Event::Mouse(
+                        sgr_mouse::parse_report(report).unwrap().unwrap()
+                    )),
+                    "{report:?} at {split}"
+                );
+                assert!(pump.pending_mouse.is_none());
+                let typed = Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+                pump.source.events.push_back(typed.clone());
+                assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(typed));
+            }
         }
-        impl CrosstermEventSource for ExpiringSource {
+    }
+
+    #[test]
+    fn a_partial_tail_during_a_blocking_poll_waits_out_the_frame_budget() {
+        struct TimedSource {
+            now: Instant,
+            events: VecDeque<(Instant, Event)>,
+        }
+        impl CrosstermEventSource for TimedSource {
             fn now(&mut self) -> Instant {
                 self.now
             }
-
             fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
-                self.timeouts.push(timeout);
-                Ok(!self.events.is_empty() && (self.reads == 0 || !timeout.is_zero()))
-            }
-
-            fn read(&mut self) -> io::Result<Event> {
-                self.reads += 1;
-                if self.reads == 2 {
-                    self.now += MOUSE_REPORT_GRACE;
+                if let Some((at, _)) = self.events.front()
+                    && *at <= self.now + timeout
+                {
+                    self.now = self.now.max(*at);
+                    return Ok(true);
                 }
-                Ok(self.events.pop_front().unwrap())
+                self.now += timeout;
+                Ok(false)
+            }
+            fn read(&mut self) -> io::Result<Event> {
+                Ok(self.events.pop_front().unwrap().1)
             }
         }
+        let start = Instant::now();
+        let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let mut pump = EventPump::new(
-            ExpiringSource {
-                events: split_report("[<65;42;13M").into(),
-                now: Instant::now(),
-                timeouts: Vec::new(),
-                reads: 0,
+            TimedSource {
+                now: start,
+                events: VecDeque::from([(start, escape.clone())]),
             },
             FakeEventBackend::default(),
             TICK,
             T0,
         );
+        assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(escape));
+        assert_eq!(pump.source.now - start, MOUSE_REPORT_GRACE);
+        pump.source.events.push_back((
+            pump.source.now + Duration::from_millis(5),
+            Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE)),
+        ));
         assert_eq!(
-            pump.next(T0).unwrap(),
-            adapt_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))).unwrap()
+            pump.next(T0 + MOUSE_REPORT_GRACE).unwrap(),
+            RuntimeEvent::Tick
         );
+        assert_eq!(pump.source.now - start, TICK);
+        assert_eq!(pump.pending_mouse.as_ref().unwrap().report, "[");
+
+        // A new Escape and prefix can also arrive during the blocking phase.
+        // Its grace deadline must not produce a tick before the frame deadline,
+        // and the initial wait for Escape counts toward the same frame budget.
+        let mut pump = EventPump::new(
+            TimedSource {
+                now: start,
+                events: VecDeque::from([
+                    (
+                        start + Duration::from_millis(5),
+                        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                    ),
+                    (
+                        start + Duration::from_millis(6),
+                        Event::Key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE)),
+                    ),
+                ]),
+            },
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(pump.next(T0).unwrap(), RuntimeEvent::Tick);
+        assert_eq!(pump.source.now - start, TICK);
+        assert_eq!(pump.pending_mouse.as_ref().unwrap().report, "[");
+    }
+
+    #[test]
+    fn mouse_report_can_arrive_one_character_per_frame() {
+        let mut pump = EventPump::new(FakeSource::default(), FakeEventBackend::default(), TICK, T0);
+        for _ in 0..2 {
+            let events = split_report("[<65;60;48M");
+            for (index, event) in events.iter().enumerate() {
+                pump.source.now += MOUSE_REPORT_GRACE * 10;
+                pump.source.events.push_back(event.clone());
+                let input = pump.next(T0 + TICK * 100).unwrap();
+                if index == 0 {
+                    assert_eq!(Some(input), adapt_event(event.clone()));
+                } else if index + 1 == events.len() {
+                    assert_eq!(
+                        input,
+                        RuntimeEvent::Input(LiveInput::WheelDown {
+                            column: 59,
+                            row: 47,
+                            notches: 1,
+                        })
+                    );
+                } else {
+                    assert_eq!(input, RuntimeEvent::Tick);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn literal_mouse_shaped_text_without_escape_is_preserved() {
+        let events = split_report("[<65;60;48M")[1..].to_vec();
+        let mut pump = EventPump::new(
+            FakeSource::with(events.clone()),
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+        for event in events {
+            assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(event));
+        }
+    }
+
+    #[test]
+    fn delayed_non_mouse_input_is_replayed_in_order_without_a_duplicate_escape() {
+        for tail in [
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::NONE,
+            ))],
+            split_report("[x")[1..].to_vec(),
+            split_report("[<64;0;1M")[1..].to_vec(),
+            vec![Event::Paste("[<65;60;48M".into())],
+            vec![Event::Resize(80, 24)],
+            split_report("[<65;60;48M"),
+        ] {
+            let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            let mut pump = EventPump::new(
+                FakeSource::with([escape.clone()]),
+                FakeEventBackend::default(),
+                TICK,
+                T0,
+            );
+            assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(escape.clone()));
+            pump.source.now += MOUSE_REPORT_GRACE * 10;
+            pump.source.events.extend(tail.clone());
+            if tail[0] == escape {
+                assert_eq!(
+                    pump.next(T0).unwrap(),
+                    RuntimeEvent::Input(LiveInput::WheelDown {
+                        column: 59,
+                        row: 47,
+                        notches: 1,
+                    })
+                );
+            } else {
+                for event in tail {
+                    assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(event));
+                }
+            }
+            assert_eq!(pump.next(T0 + TICK).unwrap(), RuntimeEvent::Tick);
+        }
+    }
+
+    #[cfg(unix)]
+    fn drive_mouse_pty_child() {
+        crossterm::terminal::enable_raw_mode().unwrap();
+        let mut pump = EventPump::new(
+            CrosstermSource::default(),
+            NoBackend::<()>::default(),
+            Duration::from_millis(50),
+            Duration::ZERO,
+        );
+        let start = Instant::now();
+        println!("mouse-test:ready");
+        let mut wheels = 0;
+        while wheels < 2 {
+            match pump.next(start.elapsed()).unwrap() {
+                RuntimeEvent::Input(LiveInput::WheelDown {
+                    column: 59,
+                    row: 47,
+                    notches: 1,
+                }) => {
+                    wheels += 1;
+                    println!("mouse-test:wheel");
+                }
+                RuntimeEvent::Input(LiveInput::Key(key))
+                    if key.code == usagi_tui::usecase::terminal_input::KeyCode::Escape =>
+                {
+                    println!("mouse-test:escape");
+                }
+                RuntimeEvent::Tick => {
+                    let prefix = pump
+                        .pending_mouse
+                        .as_ref()
+                        .map_or("", |candidate| candidate.report.as_str());
+                    println!("mouse-test:tick:{prefix}");
+                }
+                event => println!("mouse-test:input:{event:?}"),
+            }
+        }
+        crossterm::terminal::disable_raw_mode().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_delayed_mouse_fragments_do_not_become_keys() {
+        use std::fs::File;
+        use std::io::{BufRead, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::process::{Command, Stdio};
+        use std::sync::mpsc;
+
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        const CHILD: &str = "USAGI_TEST_DELAYED_MOUSE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            drive_mouse_pty_child();
+            return;
+        }
+
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: openpty initializes the two descriptors; optional terminal
+        // settings are null. Each successful descriptor is owned exactly once.
         assert_eq!(
-            pump.next(T0).unwrap(),
-            adapt_event(Event::Key(KeyEvent::new(
-                KeyCode::Char('['),
-                KeyModifiers::NONE
-            )))
-            .unwrap()
+            unsafe {
+                libc::openpty(
+                    &raw mut master,
+                    &raw mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
         );
-        assert_eq!(
-            pump.source.timeouts,
-            [Duration::ZERO, MOUSE_REPORT_GRACE, Duration::ZERO]
+        let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+        // SAFETY: both File values own live descriptors. The parent master must
+        // not leak into the child test process.
+        for file in [&master, &slave] {
+            assert_eq!(
+                unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) },
+                0
+            );
+        }
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tui_input::tests::real_pty_delayed_mouse_fragments_do_not_become_keys",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .stdin(slave)
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
         );
-        assert_eq!(pump.source.reads, 2);
+        let stdout = child.0.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                // libtest can print the test name before our first line.
+                if let Some(index) = line.find("mouse-test:")
+                    && sender.send(line[index..].to_owned()).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let wait_for = |expected: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let line = receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("child input acknowledgement");
+                if line == expected {
+                    break;
+                }
+                assert!(
+                    !line.starts_with("mouse-test:input:")
+                        && line != "mouse-test:wheel"
+                        && line != "mouse-test:escape",
+                    "unexpected input: {line}"
+                );
+            }
+        };
+        wait_for("mouse-test:ready");
+        // Wait for a tick acknowledging each prefix before writing the next
+        // byte. This forces real tty reads apart and exceeds the grace period
+        // without a scheduler-dependent sleep or a synthetic event source.
+        for _ in 0..2 {
+            master.write_all(b"\x1b").unwrap();
+            wait_for("mouse-test:escape");
+            let report = "[<65;60;48M";
+            for (index, byte) in report.bytes().enumerate() {
+                master.write_all(&[byte]).unwrap();
+                if index + 1 == report.len() {
+                    wait_for("mouse-test:wheel");
+                } else {
+                    wait_for(&format!("mouse-test:tick:{}", &report[..=index]));
+                }
+            }
+        }
+        assert!(child.0.wait().unwrap().success());
+        reader.join().unwrap();
     }
 
     #[test]

@@ -557,8 +557,10 @@ SGR（色・文字属性）だけに限定し、view text に混入した画面�
 端末制御列は描画境界で破棄する。
 
 端末から届く SGR マウス制御列は、先頭の `Esc` と座標部分が別の読み取りに分かれても mouse event として
-扱い、座標を入力欄や Agent の文字入力へ流さない。復元の待機は 32ms、候補の長さは 20 文字を上限とする。
-通常の `Esc`、貼り付け、不完全な候補は元の入力順で処理する。
+扱い、座標を入力欄や Agent の文字入力へ流さない。復元の先読みは 32ms、候補の長さは 20 文字を上限とする。
+待機時間を超えた未完の候補は次の入力周期へ保持し、その間も backend event と tick を処理する。単独の `Esc` は
+先読み後に通知し、遅れて届く座標部分の復元も継続する。候補がマウス制御列でないと判明した場合は、保持した
+入力を元の順序で処理する。貼り付けはマウス制御列として解釈しない。
 
 ## Home と target
 
@@ -612,6 +614,14 @@ Switch の session 行で `f` を押すと、お気に入り登録・解除を�
 保存ファイルとロックファイルは開いた descriptor で通常ファイルと確認してから使い、FIFO・device・directory は通知付きで拒否する。
 FIFO の writer を待たずに拒否するため、workspace を離れるときの worker 終了も妨げない。
 `+ new session` 行、Closeup、前面 modal ではこの shortcut を実行しない。
+
+Switch の利用可能な session 行では、表示名を変更できる（[キーバインド](11-keybindings.md#workspace-画面)）。
+編集フォームは現在の表示名を初期値にし、前後の空白を除いた1〜64文字の名前を保存する。日本語・絵文字・空白を
+使え、制御文字は入力から除く。保存中は編集・二重送信を止め、失敗時は入力を保持して再試行できる。
+保存は背景の session command worker が行い、daemon の最新一覧で対象の固有 ID が利用可能か確認する。
+表示名は repository-local な `state.json` の `session_display_names` に固有 ID ごとに保持するため、再起動後も
+反映され、同名で作り直した別 session には引き継がない。worktree path、Git branch、CLI・MCP の対象名は
+変わらない。新規作成行、Closeup、他の前面 modal からはリネームを開始しない。
 
 ### Switch の右ペインは cursor の preview
 
@@ -672,7 +682,8 @@ freeform を入力・削除・paste した場合は入力欄へ表示を移し�
 pending 一覧・回答 editor・送信前の確認画面の本文は mouse drag で範囲選択でき、離すと表示テキストを OS clipboard に
 コピーする。modal の外枠や背景は含めず、複数行は表示行ごとに改行する。選択範囲はハイライトで残り、OS 標準の copy shortcut
 （macOS: Command+C、Linux: Ctrl+Shift+C、Windows: Ctrl+C）で再コピーできる。コピーの結果は modal 内に表示する。
-結果は本文下の余白へ表示し、本文が1行の端末でも選択内容と操作案内を隠さない。
+範囲未選択で copy shortcut を押しても clipboard は変更しない。本文下の余白に範囲コピー操作のヒントを表示し、
+操作後は結果を表示する。本文が1行の端末でも選択内容と操作案内を隠さない。
 結合文字・肌色修飾・旗・ZWJ を含む絵文字は見た目上の1文字全体をコピーし、ハイライトも途中で分割しない。
 本文の折り返しと図の省略表示も同じ単位で行い、行末で絵文字の一部だけを残さない。収まらない絵文字は次の行へ送り、
 省略表示では1文字全体を省く。ANSI style の境界が文字の途中にあっても省略位置を分割しない。
@@ -2729,6 +2740,8 @@ resume request を作らない。要求は選択中の exact tab の `AgentResum
 
 同じ tab に対する重複操作（double click）は in-flight な operation へ収束し、2 つ目の request も spawn も作らない。
 拒否・失敗は interrupted tab をそのまま残し、provider ID を含まない safe reason と retry 可否だけを表示する。
+daemon が返した拒否理由を表示し、成功・失敗のどちらでも inventory を非同期に再取得する。古い resume source や
+応答を失った起動結果を最新の観測へ反映し、更新後の明示再試行では最新の exact target を使う。自動再試行はしない。
 他の tab、他の history、selection、provider conversation、runtime record は変更しない。
 
 ### surface ごとの表示と操作

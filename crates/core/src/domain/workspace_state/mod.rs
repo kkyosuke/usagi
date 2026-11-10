@@ -29,6 +29,9 @@ pub struct WorkspaceState {
     /// records an explicit clear and prevents legacy notes from reappearing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub session_notes: BTreeMap<SessionId, Scratchpad>,
+    /// User-facing names keyed by session incarnation, independent of checkout names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_display_names: BTreeMap<SessionId, String>,
     /// The note scratchpad attached to the workspace **root** — the same scratch
     /// space sessions carry, but for the workspace itself (the `⌂ root` row).
     /// Empty (the default) is omitted from the file.
@@ -45,6 +48,7 @@ impl WorkspaceState {
         Self {
             sessions: Vec::new(),
             session_notes: BTreeMap::new(),
+            session_display_names: BTreeMap::new(),
             root_notes: Scratchpad::default(),
             updated_at: Utc::now(),
         }

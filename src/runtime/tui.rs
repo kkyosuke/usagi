@@ -2359,7 +2359,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
             Ok(reply) => reply,
             Err(error) => {
                 ErrorLog::record(&tui_error_entry("Agent resume request", &error.to_string()));
-                return Err("provider resume failed; refresh Agent inventory".to_owned());
+                return Err(daemon_error_reason(error));
             }
         };
         let result = match reply {
@@ -3277,6 +3277,9 @@ impl LifecycleSnapshot {
                         notes: Scratchpad::default(),
                         prs: Vec::new(),
                     });
+                if let Some(name) = legacy.session_display_names.get(&session.session_id) {
+                    record.display_name = Some(name.clone());
+                }
                 if let Some(notes) = legacy.session_notes.get(&session.session_id) {
                     record.notes.clone_from(notes);
                 }
@@ -3364,6 +3367,17 @@ fn record_lifecycle_snapshot_error(result: &Result<LifecycleSnapshot, String>) {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_session_completion_contract
 impl SessionCommandPort for DaemonSessionCommandPort {
+    fn rename(
+        &self,
+        workspace: &Workspace,
+        session: SessionId,
+        name: &str,
+    ) -> Result<SessionCommandResult, String> {
+        let snapshot = request_lifecycle_snapshot().map_err(LifecycleRequestError::reason)?;
+        rename_session_display_name(workspace, &snapshot, session, name)?;
+        session_snapshot_result("Session renamed.", &snapshot, workspace)
+    }
+
     fn execute(
         &self,
         workspace: &Workspace,
@@ -3443,6 +3457,29 @@ impl SessionCommandPort for DaemonSessionCommandPort {
             }
         }
     }
+}
+
+/// Verify the incarnation against the daemon before changing only UI metadata.
+fn rename_session_display_name(
+    workspace: &Workspace,
+    snapshot: &LifecycleSnapshot,
+    session: SessionId,
+    name: &str,
+) -> Result<(), String> {
+    if !snapshot.sessions.iter().any(|candidate| {
+        candidate.session_id == session
+            && candidate.lifecycle
+                == usagi_core::domain::session_lifecycle::SessionLifecycle::Available
+    }) {
+        return Err("This session is no longer available.".to_owned());
+    }
+    usagi_tui::usecase::session_rename::save(
+        &WorkspaceStateStore::new(&workspace.path),
+        session,
+        name,
+        Utc::now(),
+    )
+    .map_err(str::to_owned)
 }
 
 /// Validate the daemon-owned final hook that ends a `session create` loading
@@ -7482,6 +7519,51 @@ mod tests {
         assert_eq!(
             daemon_error_reason(ClientError::BuildIdentityUnavailable),
             "exact daemon build identity is unavailable; the current daemon remains running"
+        );
+    }
+
+    #[test]
+    fn session_display_rename_preserves_checkout_identity_and_rejects_stale_targets() {
+        use super::{WorkspaceStateStore, rename_session_display_name};
+        use usagi_core::domain::session_lifecycle::SessionLifecycle;
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new("repo", temporary.path());
+        let mut managed =
+            ManagedSession::new_creating("canonical".into(), OperationId::new(), Utc::now());
+        managed.lifecycle = SessionLifecycle::Available;
+        let id = managed.session_id;
+        let mut snapshot = LifecycleSnapshot {
+            workspace_id: WorkspaceId::new(),
+            root_worktree_id: usagi_core::domain::id::WorktreeId::new(),
+            revision: 2,
+            sessions: vec![managed],
+            agent_resumes: BTreeMap::new(),
+            session_roles: BTreeMap::new(),
+        };
+        rename_session_display_name(&workspace, &snapshot, id, "New name").unwrap();
+        let refreshed = session_snapshot_result("ok", &snapshot, &workspace).unwrap();
+        let records = refreshed.sessions.unwrap();
+        assert_eq!(refreshed.session_ids.unwrap(), vec![id]);
+        assert_eq!(records[0].name, "canonical");
+        assert_eq!(records[0].display_label(), "New name");
+        assert_eq!(
+            records[0].root,
+            temporary.path().join(".usagi/sessions/canonical")
+        );
+        let store = WorkspaceStateStore::new(temporary.path());
+        let saved = store.load().unwrap().unwrap();
+        assert!(
+            rename_session_display_name(&workspace, &snapshot, SessionId::new(), "wrong").is_err()
+        );
+        assert!(rename_session_display_name(&workspace, &snapshot, id, "").is_err());
+        snapshot.sessions[0].lifecycle = SessionLifecycle::Deleting;
+        assert!(rename_session_display_name(&workspace, &snapshot, id, "wrong").is_err());
+        assert_eq!(store.load().unwrap().unwrap(), saved);
+        snapshot.sessions[0].session_id = SessionId::new();
+        snapshot.sessions[0].lifecycle = SessionLifecycle::Available;
+        assert_eq!(
+            snapshot.project(&workspace, &saved)[0].display_label(),
+            "canonical"
         );
     }
 
