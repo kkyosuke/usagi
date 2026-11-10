@@ -900,10 +900,15 @@ fn apply_caller_policy(
     caller_credential: Option<&str>,
 ) {
     if policy == CallerPolicy::SessionCredential {
-        if let Some(credential) = caller_credential {
-            arguments["_caller_credential"] = Value::String(credential.to_owned());
-        } else if let Some(object) = arguments.as_object_mut() {
-            object.remove("_caller_credential");
+        match caller_credential {
+            Some(credential) => {
+                arguments["_caller_credential"] = Value::String(credential.to_owned());
+            }
+            None => {
+                arguments
+                    .as_object_mut()
+                    .and_then(|object| object.remove("_caller_credential"));
+            }
         }
     }
 }
