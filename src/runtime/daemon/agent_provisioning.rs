@@ -4,8 +4,10 @@
 //! materialization. Socket admission, runtime ownership, and background-worker
 //! orchestration remain in the parent composition module.
 
+pub(super) use super::secure_path::read_git_indirection;
 use super::secure_path::{
-    InvalidOwnedDirectory, tighten_owned_directories, validate_owned_directory, validate_owned_path,
+    InvalidOwnedDirectory, ensure_owned_subdirectories, tighten_owned_directories,
+    validate_owned_directory, validate_owned_path,
 };
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
@@ -639,52 +641,44 @@ pub(super) fn session_git_policy(
         Err(_) => return Err(()),
     };
     // A standalone repository needs no external Git grant: its administrative
-    // directory is already contained by the writable checkout. Accept it only
-    // when the selected session directory is the registered workspace itself;
-    // a nested or foreign repository must not become additional authority.
+    // directory is already contained by the writable checkout when the selected
+    // session directory is the registered workspace itself.
     if !marker_metadata.file_type().is_file() {
-        let workspace_root = workspace_root.canonicalize().map_err(|_| ())?;
-        let worktree = worktree.canonicalize().map_err(|_| ())?;
-        return if marker_metadata.file_type().is_dir() && worktree == workspace_root {
-            Ok(None)
-        } else {
-            Err(())
-        };
+        let same_root = workspace_root.canonicalize().map_err(|_| ())?
+            == worktree.canonicalize().map_err(|_| ())?;
+        return (marker_metadata.file_type().is_dir() && same_root)
+            .then_some(None)
+            .ok_or(());
     }
     let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
     let common = session_git_common_dir(worktree)?.ok_or(())?;
-    let expected_common = session_git_common_dir(workspace_root)?.ok_or(())?;
-    if common != expected_common {
+    if common != session_git_common_dir(workspace_root)?.ok_or(())?
+        || git_dir.parent()
+            != Some(
+                common
+                    .join("worktrees")
+                    .canonicalize()
+                    .map_err(|_| ())?
+                    .as_path(),
+            )
+        || read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?
+            != marker.canonicalize().map_err(|_| ())?
+    {
         return Err(());
     }
-    let worktrees = common.join("worktrees").canonicalize().map_err(|_| ())?;
-    if git_dir.parent() != Some(worktrees.as_path()) {
-        return Err(());
-    }
-    let backlink = read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?;
-    if backlink != marker.canonicalize().map_err(|_| ())? {
-        return Err(());
-    }
-
-    validate_owned_directory(&common).map_err(|_| ())?;
-    for relative in [
-        "refs",
-        "refs/heads",
-        "refs/heads/usagi",
-        "logs",
-        "logs/refs",
-        "logs/refs/heads",
-        "logs/refs/heads/usagi",
-    ] {
-        let directory = common.join(relative);
-        if std::fs::symlink_metadata(&directory)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        {
-            std::fs::create_dir(&directory).map_err(|_| ())?;
-        }
-        validate_owned_directory(&directory).map_err(|_| ())?;
-    }
-
+    ensure_owned_subdirectories(
+        &common,
+        &[
+            "refs",
+            "refs/heads",
+            "refs/heads/usagi",
+            "logs",
+            "logs/refs",
+            "logs/refs/heads",
+            "logs/refs/heads/usagi",
+        ],
+    )
+    .map_err(|_| ())?;
     let writable_roots = vec![
         git_dir,
         common.join("objects"),
@@ -695,35 +689,6 @@ pub(super) fn session_git_policy(
         validate_owned_directory(root).map_err(|_| ())?;
     }
     Ok(Some(SessionGitPolicy { writable_roots }))
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
-pub(super) fn read_git_indirection(
-    path: &Path,
-    prefix: Option<&str>,
-    relative_to: &Path,
-) -> Result<PathBuf, ()> {
-    let metadata = std::fs::metadata(path).map_err(|_| ())?;
-    if metadata.len() > 16 * 1024 {
-        return Err(());
-    }
-    let value = std::fs::read_to_string(path).map_err(|_| ())?;
-    let value = value.trim();
-    let value = match prefix {
-        Some(prefix) => value
-            .strip_prefix(prefix)
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-        None => (!value.is_empty()).then_some(value),
-    }
-    .ok_or(())?;
-    let path = PathBuf::from(value);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        relative_to.join(path)
-    };
-    path.canonicalize().map_err(|_| ())
 }
 
 /// Root providers may run the small read-only Git allowlist accepted by
