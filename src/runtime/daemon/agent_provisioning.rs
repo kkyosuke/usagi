@@ -616,14 +616,11 @@ pub(super) struct SessionGitPolicy {
 ///
 /// Linked worktrees keep their index, `HEAD`, commit message and `HEAD` reflog
 /// in a worktree-private administrative directory, but new objects and branch
-/// refs live in the repository's common directory. Granting only the checkout
-/// therefore makes file edits work while every commit fails with `EPERM`.
-/// Granting the whole common directory would also expose `main`, remotes and
-/// repository configuration, so the session receives only its private admin
-/// directory, the shared content-addressed object store, and the `usagi/*`
-/// branch ref / reflog namespaces. The mutable `.git` pointer is not authority:
-/// both its common directory and its private-admin backlink must match the
-/// daemon-selected workspace/worktree pair before any external path is granted.
+/// refs live in the repository's common directory. The session receives only
+/// its private admin directory, the shared content-addressed object store, and
+/// the `usagi/*` branch ref / reflog namespaces. Both its common directory and
+/// its private-admin backlink must match the daemon-selected workspace/worktree
+/// pair before any external path is granted.
 pub(super) fn session_git_policy(
     workspace_root: &Path,
     worktree: &Path,
@@ -639,34 +636,31 @@ pub(super) fn session_git_policy(
         }
         Err(_) => return Err(()),
     };
-    // A standalone repository needs no external Git grant: its administrative
-    // directory is already contained by the writable checkout when the selected
-    // session directory is the registered workspace itself.
     if !marker_metadata.file_type().is_file() {
-        let same_root = workspace_root.canonicalize().map_err(|_| ())?
-            == worktree.canonicalize().map_err(|_| ())?;
-        return (marker_metadata.file_type().is_dir() && same_root)
-            .then_some(None)
-            .ok_or(());
+        let workspace_root = workspace_root.canonicalize().map_err(|_| ())?;
+        let worktree = worktree.canonicalize().map_err(|_| ())?;
+        return if marker_metadata.file_type().is_dir() && worktree == workspace_root {
+            Ok(None)
+        } else {
+            Err(())
+        };
     }
     let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
     let common = session_git_common_dir(worktree)?.ok_or(())?;
-    if common != session_git_common_dir(workspace_root)?.ok_or(())?
-        || git_dir.parent()
-            != Some(
-                common
-                    .join("worktrees")
-                    .canonicalize()
-                    .map_err(|_| ())?
-                    .as_path(),
-            )
-        || read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?
-            != marker.canonicalize().map_err(|_| ())?
-    {
+    let expected_common = session_git_common_dir(workspace_root)?.ok_or(())?;
+    if common != expected_common {
         return Err(());
     }
-    ensure_owned_subdirectories(&common, &["refs/heads/usagi", "logs/refs/heads/usagi"])
-        .map_err(|_| ())?;
+    let worktrees = common.join("worktrees").canonicalize().map_err(|_| ())?;
+    if git_dir.parent() != Some(worktrees.as_path()) {
+        return Err(());
+    }
+    let backlink = read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?;
+    if backlink != marker.canonicalize().map_err(|_| ())? {
+        return Err(());
+    }
+    let subdirs = ["refs/heads/usagi", "logs/refs/heads/usagi"];
+    ensure_owned_subdirectories(&common, &subdirs).map_err(|_| ())?;
     let writable_roots = vec![
         git_dir,
         common.join("objects"),
@@ -677,6 +671,35 @@ pub(super) fn session_git_policy(
         validate_owned_directory(root).map_err(|_| ())?;
     }
     Ok(Some(SessionGitPolicy { writable_roots }))
+}
+
+#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
+pub(super) fn read_git_indirection(
+    path: &Path,
+    prefix: Option<&str>,
+    relative_to: &Path,
+) -> Result<PathBuf, ()> {
+    let metadata = std::fs::metadata(path).map_err(|_| ())?;
+    if metadata.len() > 16 * 1024 {
+        return Err(());
+    }
+    let value = std::fs::read_to_string(path).map_err(|_| ())?;
+    let value = value.trim();
+    let value = match prefix {
+        Some(prefix) => value
+            .strip_prefix(prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        None => (!value.is_empty()).then_some(value),
+    }
+    .ok_or(())?;
+    let path = PathBuf::from(value);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        relative_to.join(path)
+    };
+    path.canonicalize().map_err(|_| ())
 }
 
 /// Root providers may run the small read-only Git allowlist accepted by
@@ -775,25 +798,6 @@ pub(super) fn git_common_dir(workspace_root: &Path) -> Result<PathBuf, ()> {
         return Ok(git_dir);
     }
     read_git_indirection(&common_marker, None, &git_dir)
-}
-
-#[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
-pub(super) fn read_git_indirection(
-    path: &Path,
-    prefix: Option<&str>,
-    relative_to: &Path,
-) -> Result<PathBuf, ()> {
-    if std::fs::metadata(path).map_err(|_| ())?.len() > 16 * 1024 {
-        return Err(());
-    }
-    let value = std::fs::read_to_string(path).map_err(|_| ())?;
-    let value = prefix
-        .map_or(Some(value.trim()), |p| {
-            value.trim().strip_prefix(p).map(str::trim)
-        })
-        .filter(|v| !v.is_empty())
-        .ok_or(())?;
-    relative_to.join(value).canonicalize().map_err(|_| ())
 }
 
 /// Policy paths are daemon-owned inputs.  Validate their identity before user
