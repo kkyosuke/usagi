@@ -1608,9 +1608,9 @@ fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have
     .unwrap();
     let store = UserDecisionStore::new(mcp.data_dir().join("daemon"));
     let options: Vec<_> = (0..32).map(|index| json!({"id":format!("option-{index}"), "label":"Option",
-        "description":"🐇".repeat(2048), "pros":vec!["🐇".repeat(512);4], "cons":vec!["🐇".repeat(512);4]})).collect();
-    let table = json!({"kind":"table", "title":"Data", "columns":vec!["🐇".repeat(512);6],
-        "rows":vec![vec!["🐇".repeat(512);6];16]});
+        "description":"\u{1}".repeat(2048), "pros":vec!["\\".repeat(512);4], "cons":vec!["\\".repeat(512);4]})).collect();
+    let table = json!({"kind":"table", "title":"Data", "columns":vec!["\\".repeat(512);6],
+        "rows":vec![vec!["\\".repeat(512);6];16]});
     let before = fs::read(store.path()).unwrap();
     let rejected = mcp.tool(
         "user_decision_request",

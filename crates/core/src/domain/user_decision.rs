@@ -224,10 +224,7 @@ impl UserDecision {
                 || !safe_line(&option.label, USER_DECISION_OPTION_LABEL_MAX_BYTES)
                 || option.description.as_ref().is_some_and(|description| {
                     description.len() > USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES
-                        || !description.chars().all(|ch| {
-                            ch == '\n'
-                                || super::presentation_text::presentation_character_is_safe(ch)
-                        })
+                        || description.contains('\0')
                 })
                 || !ids.insert(option.id.as_str())
             {
