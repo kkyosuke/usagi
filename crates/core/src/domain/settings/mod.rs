@@ -690,6 +690,7 @@ where
     let token = Option::<String>::deserialize(deserializer)?;
     Ok(match token.as_deref() {
         Some("claude") => Some(DefaultModel::Claude),
+        Some("agy") => Some(DefaultModel::Agy),
         Some("openai") => Some(DefaultModel::OpenAi),
         _ => None,
     })
