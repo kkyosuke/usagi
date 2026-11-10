@@ -790,6 +790,10 @@ impl VtScreen {
 
     fn csi(&mut self, byte: u8, replies: &mut Vec<u8>) {
         match byte {
+            0x1b => {
+                self.params.clear();
+                self.phase = Phase::Escape;
+            }
             0x20..=0x3f if self.params.len() < PARAMS_MAX => self.params.push(byte as char),
             0x20..=0x3f => {
                 self.params.clear();
@@ -804,7 +808,9 @@ impl VtScreen {
     }
 
     fn csi_overflow(&mut self, byte: u8) {
-        if matches!(byte, 0x40..=0x7e) {
+        if byte == 0x1b {
+            self.phase = Phase::Escape;
+        } else if matches!(byte, 0x40..=0x7e) {
             self.phase = Phase::Ground;
         }
     }
@@ -822,6 +828,17 @@ impl VtScreen {
 
     fn dispatch_csi(&mut self, final_byte: char, replies: &mut Vec<u8>) {
         match final_byte {
+            'h' => self.set_private_modes(),
+            'l' => self.reset_private_modes(),
+            // Private (`<`..=`?`) and intermediate (` `..=`/`) CSI sequences
+            // share final bytes with standard ANSI cursor/SGR/erase/scroll
+            // operations (e.g. `CSI > 4 ; 2 m`, `CSI ? 4 m`, `CSI > c`,
+            // `CSI 6 SP q`, `CSI ? u`, `CSI < ... M/m`). Ignore them rather
+            // than misinterpreting their parameters as grid/style mutations.
+            _ if self
+                .params
+                .bytes()
+                .any(|byte| matches!(byte, 0x20..=0x2f | b'<'..=b'?')) => {}
             'A' => self.cursor_row = self.cursor_row.saturating_sub(self.param(0, 1)),
             'B' => self.cursor_row = (self.cursor_row + self.param(0, 1)).min(self.rows - 1),
             'C' => self.cursor_col = (self.cursor_col + self.param(0, 1)).min(self.cols - 1),
@@ -844,10 +861,10 @@ impl VtScreen {
             'S' => self.scroll_up(self.param(0, 1)),
             'T' => self.scroll_down(self.param(0, 1)),
             'm' => self.sgr(),
-            's' => self.save_cursor(),
-            'u' => self.restore_cursor(),
-            'h' => self.set_private_modes(),
-            'l' => self.reset_private_modes(),
+            // ANSI SCP (`CSI s`) and RCP (`CSI u`) take no parameters; with
+            // parameters they are DECSLRM / private extensions.
+            's' if self.params.is_empty() => self.save_cursor(),
+            'u' if self.params.is_empty() => self.restore_cursor(),
             // DSR cursor position report. Coordinates on the wire are
             // one-based and cannot expose this parser's pending-wrap column.
             'n' if self.params == "6" => replies.extend_from_slice(
@@ -1419,18 +1436,38 @@ impl VtScreen {
     pub fn from_checkpoint(cp: &ScreenCheckpoint) -> Result<Self, CheckpointError> {
         let geometry = cp.validated_geometry()?;
         let (rows, cols) = (geometry.rows, geometry.cols);
+        let styles: Vec<String> = cp
+            .styles
+            .iter()
+            .map(|style| SgrState::from_style(style).canonical())
+            .collect();
 
-        let primary = decode_buffer(&cp.primary, rows, cols, &cp.styles)?;
+        let primary = decode_buffer(&cp.primary, rows, cols, &styles)?;
         let alternate = match &cp.alternate {
-            Some(alt) => Some(decode_buffer(alt, rows, cols, &cp.styles)?),
+            Some(alt) => Some(decode_buffer(alt, rows, cols, &styles)?),
             None => None,
         };
 
         let mut screen = Self::new(rows, cols);
         screen.phase = Phase::from_checkpoint(cp.decoder.phase);
-        screen.params.clone_from(&cp.decoder.params);
-        screen.utf8_pending.clone_from(&cp.decoder.utf8_pending);
-        screen.utf8_needed = cp.decoder.utf8_needed as usize;
+        if cp
+            .decoder
+            .params
+            .bytes()
+            .all(|byte| matches!(byte, 0x20..=0x3f))
+        {
+            screen.params.clone_from(&cp.decoder.params);
+        }
+        let needed = cp.decoder.utf8_needed as usize;
+        if let Some((&lead, rest)) = cp.decoder.utf8_pending.split_first()
+            && matches!(needed, 2..=4)
+            && cp.decoder.utf8_pending.len() < needed
+            && utf8_len(lead) == needed
+            && rest.iter().all(|byte| byte & 0xC0 == 0x80)
+        {
+            screen.utf8_pending.clone_from(&cp.decoder.utf8_pending);
+            screen.utf8_needed = needed;
+        }
         screen
             .synchronized_output
             .clone_from(&cp.decoder.synchronized_output);
@@ -2928,6 +2965,20 @@ mod tests {
         let mut cp = valid_checkpoint();
         cp.alternate = Some(cp.primary.clone());
         assert_eq!(reject(&cp), CheckpointError::ActiveBufferMismatch);
+
+        // Non-SGR styles, out-of-phase or non-parameter CSI params, and
+        // inconsistent UTF-8 pending state are sanitized on decode.
+        let mut cp = valid_checkpoint();
+        cp.styles = vec!["\u{1b}]52;c;dGVzdA==\u{07}".to_owned()];
+        cp.decoder.phase = DecoderPhase::Csi;
+        cp.decoder.params = "1;2\u{1b}".to_owned();
+        cp.decoder.utf8_pending = vec![0xe3, 0x81, 0x82];
+        cp.decoder.utf8_needed = 3;
+        let restored = VtScreen::from_checkpoint(&cp).expect("sanitized checkpoint");
+        assert_eq!(restored.cursor_style(), "");
+        assert_eq!(restored.params, "");
+        assert_eq!(restored.utf8_pending, [] as [u8; 0]);
+        assert_eq!(restored.utf8_needed, 0);
     }
 
     #[test]
@@ -3187,5 +3238,16 @@ mod tests {
         assert_ne!(format!("{:?}", ActiveBuffer::Alternate), "");
         assert_ne!(format!("{:?}", DecoderPhase::Csi), "");
         assert_ne!(format!("{:?}", Geometry { rows: 1, cols: 1 }), "");
+    }
+
+    #[test]
+    fn csi_and_csi_overflow_handle_embedded_escape_transition() {
+        let mut screen = VtScreen::new(1, 4);
+        screen.advance(b"\x1b[31\x1b[32mA");
+        let mut overflow = b"\x1b[".to_vec();
+        overflow.extend(std::iter::repeat_n(b'1', 65));
+        overflow.extend_from_slice(b"\x1b[32mB");
+        screen.advance(&overflow);
+        assert_eq!(rows(&screen), vec!["AB"]);
     }
 }
