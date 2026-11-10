@@ -3239,4 +3239,15 @@ mod tests {
         assert_ne!(format!("{:?}", DecoderPhase::Csi), "");
         assert_ne!(format!("{:?}", Geometry { rows: 1, cols: 1 }), "");
     }
+
+    #[test]
+    fn csi_and_csi_overflow_handle_embedded_escape_transition() {
+        let mut screen = VtScreen::new(1, 4);
+        screen.advance(b"\x1b[31\x1b[32mA");
+        let mut overflow = b"\x1b[".to_vec();
+        overflow.extend(std::iter::repeat_n(b'1', 65));
+        overflow.extend_from_slice(b"\x1b[32mB");
+        screen.advance(&overflow);
+        assert_eq!(rows(&screen), vec!["AB"]);
+    }
 }
