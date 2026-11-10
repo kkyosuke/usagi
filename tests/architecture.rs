@@ -293,7 +293,7 @@ fn tui_infrastructure_translates_without_owning_real_io() {
                 let forbidden = [name].into_iter().collect::<BTreeSet<_>>();
                 let mut visitor = DependencyVisitor {
                     forbidden: &forbidden,
-                    required_root: None,
+                    required_root: Some(name),
                     violations: BTreeSet::new(),
                 };
                 visitor.visit_file(&syntax);
@@ -390,7 +390,7 @@ fn source_layers_follow_the_documented_dependency_matrix() {
     ));
     violations.extend(layer_violations(
         &root.join("crates/core/src/usecase"),
-        &["infrastructure"],
+        &["infrastructure", "presentation"],
     ));
     for face in ["daemon", "tui"] {
         violations.extend(layer_violations(
@@ -431,7 +431,7 @@ fn calls_heavy_e2e_lock(statement: &Stmt) -> bool {
     path.path
         .segments
         .last()
-        .is_some_and(|segment| segment.ident == "heavy_e2e_lock")
+        .is_some_and(|segment| segment.ident == "heavy_e2e_lock" || segment.ident == "serial")
 }
 
 #[test]
@@ -447,38 +447,45 @@ fn heavy_e2e_guard_must_be_retained_by_a_local_binding() {
 
 #[test]
 fn shipping_cli_integration_tests_enter_the_shared_e2e_lane_first() {
-    let source = fs::read_to_string(workspace_root().join("tests/cli_tui.rs"))
-        .expect("shipping CLI integration source is readable");
-    let syntax: File = syn::parse_file(&source).expect("shipping CLI integration source parses");
-    let unlocked = syntax
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Fn(function)
-                if function
-                    .attrs
+    for suite in [
+        "tests/cli_tui.rs",
+        "tests/cli_tui_pty.rs",
+        "tests/agent_ipc_e2e.rs",
+    ] {
+        let source = fs::read_to_string(workspace_root().join(suite))
+            .expect("shipping CLI integration source is readable");
+        let syntax: File =
+            syn::parse_file(&source).expect("shipping CLI integration source parses");
+        let unlocked = syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Fn(function)
+                    if function
+                        .attrs
+                        .iter()
+                        .any(|attribute| attribute.path().is_ident("test")) =>
+                {
+                    Some(function)
+                }
+                _ => None,
+            })
+            .filter(|function| {
+                !function
+                    .block
+                    .stmts
                     .iter()
-                    .any(|attribute| attribute.path().is_ident("test")) =>
-            {
-                Some(function)
-            }
-            _ => None,
-        })
-        .filter(|function| {
-            !function
-                .block
-                .stmts
-                .iter()
-                .find(|statement| !matches!(statement, Stmt::Item(_)))
-                .is_some_and(calls_heavy_e2e_lock)
-        })
-        .map(|function| function.sig.ident.to_string())
-        .collect::<Vec<_>>();
+                    .find(|statement| !matches!(statement, Stmt::Item(_)))
+                    .is_some_and(calls_heavy_e2e_lock)
+            })
+            .map(|function| function.sig.ident.to_string())
+            .collect::<Vec<_>>();
 
-    assert!(
-        unlocked.is_empty(),
-        "every tests/cli_tui.rs test must acquire heavy_e2e_lock first: {unlocked:?}"
-    );
+        assert!(
+            unlocked.is_empty(),
+            "every {suite} test must acquire heavy_e2e_lock first: {unlocked:?}"
+        );
+    }
 }
 
 #[test]
