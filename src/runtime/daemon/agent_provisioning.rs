@@ -666,6 +666,25 @@ pub(super) fn session_git_policy(
         return Err(());
     }
 
+    validate_owned_directory(&common).map_err(|_| ())?;
+    for relative in [
+        "refs",
+        "refs/heads",
+        "refs/heads/usagi",
+        "logs",
+        "logs/refs",
+        "logs/refs/heads",
+        "logs/refs/heads/usagi",
+    ] {
+        let directory = common.join(relative);
+        if std::fs::symlink_metadata(&directory)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            std::fs::create_dir(&directory).map_err(|_| ())?;
+        }
+        validate_owned_directory(&directory).map_err(|_| ())?;
+    }
+
     let writable_roots = vec![
         git_dir,
         common.join("objects"),

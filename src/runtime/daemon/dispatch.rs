@@ -1457,6 +1457,12 @@ pub(super) fn dispatch_rollover(
                             reason: error.message,
                         }
                     })?;
+                let all_workspaces_adopted = planned.agents.iter().all(|item| {
+                    bound
+                        .workspaces
+                        .workspace(item.runtime.terminal.workspace_id)
+                        .is_some()
+                });
                 let workspace_root = planned
                     .agents
                     .first()
@@ -1466,7 +1472,9 @@ pub(super) fn dispatch_rollover(
                             .workspace(item.runtime.terminal.workspace_id)
                     })
                     .map(|tenant| tenant.root().to_path_buf());
-                if !planned.agents.is_empty() && workspace_root.is_none() {
+                if !planned.agents.is_empty()
+                    && (!all_workspaces_adopted || workspace_root.is_none())
+                {
                     return Err(
                         usagi_daemon::usecase::authority::routing::RolloverRefusal::AgentRestartRefused {
                             reason: "live Agent workspace is no longer adopted; no Agent was stopped"
@@ -1570,31 +1578,35 @@ pub(super) fn dispatch_rollover(
             // recovery if the handoff failed before W2. The durable transaction and
             // its background worker are the second safety net when this request or
             // its client disappears.
-            let workspace_id = pending.agents[0].agent.target.workspace_id;
             let mut rollback = pending.clone();
-            let restored = bound
-                .workspaces
-                .workspace(workspace_id)
-                .ok_or_else(|| std::io::Error::other("Agent workspace is unavailable"))
-                .and_then(|tenant| {
-                    let recovery_bound = ConnectionWorkspace {
-                        tenant,
-                        workspaces: Arc::clone(&bound.workspaces),
-                    };
-                    restore_pending_daemon_agents(
-                        data_dir,
-                        agent,
-                        &recovery_bound.scope_resolver(),
-                        &mut rollback,
-                        false,
-                    )
+            let all_adopted = rollback
+                .agents
+                .iter()
+                .filter(|item| !item.completed)
+                .all(|item| {
+                    bound
+                        .workspaces
+                        .workspace(item.agent.target.workspace_id)
+                        .is_some()
                 });
+            let restored = if all_adopted {
+                restore_pending_daemon_agents(
+                    data_dir,
+                    agent,
+                    &bound.scope_resolver(),
+                    &mut rollback,
+                    false,
+                )
+            } else {
+                Err(std::io::Error::other("Agent workspace is unavailable"))
+            };
             if let Err(error) = restored {
                 ErrorLog::record(&format!(
                     "daemon rollover pre-commit Agent rollback failed: {error}"
                 ));
-            } else if let Err(error) =
-                clear_pending_daemon_agent_restart(data_dir, &pending.operation_id)
+            } else if rollback.agents.iter().all(|item| item.completed)
+                && let Err(error) =
+                    clear_pending_daemon_agent_restart(data_dir, &pending.operation_id)
             {
                 ErrorLog::record(&format!(
                     "daemon rollover Agent rollback marker cleanup deferred: {error}"
