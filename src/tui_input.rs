@@ -375,6 +375,11 @@ fn recover_mouse_report(
             }
         };
         if event == Event::Key(KeyEvent::new(CrosstermKeyCode::Esc, KeyModifiers::NONE)) {
+            if candidate.escape.is_none() && candidate.buffered.is_empty() {
+                candidate.escape = Some(event);
+                candidate.deadline = source.now() + MOUSE_REPORT_GRACE;
+                continue;
+            }
             // Replay the first Escape and its text before trying this new
             // Escape. Its mouse tail remains in the source for decoding.
             *pending_escape = Some(event);
@@ -1359,6 +1364,33 @@ mod tests {
                 .unwrap()
             );
         }
+
+        // After a lone Escape has already been released, a subsequent Escape
+        // must not return an empty terminal poll and let backend/tick preempt
+        // ready terminal input.
+        let escape = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let mut pump = EventPump::new(
+            FakeSource::with([escape.clone()]),
+            FakeEventBackend::default(),
+            TICK,
+            T0,
+        );
+        assert_eq!(Some(pump.next(T0).unwrap()), adapt_event(escape.clone()));
+        pump.source.now += MOUSE_REPORT_GRACE * 2;
+        pump.source.events.extend(split_report("[<65;66;28M"));
+        pump.backend.0.push_back("after-terminal");
+        assert_eq!(
+            pump.next(T0 + TICK).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelDown {
+                column: 65,
+                row: 27,
+                notches: 1,
+            })
+        );
+        assert_eq!(
+            pump.next(T0 + TICK).unwrap(),
+            RuntimeEvent::Backend("after-terminal")
+        );
     }
 
     #[test]
