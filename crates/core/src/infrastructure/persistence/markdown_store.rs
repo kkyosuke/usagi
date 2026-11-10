@@ -202,10 +202,18 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         };
         let mut files = Vec::new();
         for entry in entries {
-            let path = entry
-                .context(format!("failed to read an entry in {}", self.dir.display()))?
-                .path();
+            let entry =
+                entry.context(format!("failed to read an entry in {}", self.dir.display()))?;
+            let path = entry.path();
             if E::is_entry_file(&path) {
+                let file_type = entry
+                    .file_type()
+                    .context(format!("failed to inspect {}", path.display()))?;
+                anyhow::ensure!(
+                    !file_type.is_symlink(),
+                    "failed to read {}: refusing to follow symlink",
+                    path.display()
+                );
                 files.push(path);
             }
         }
@@ -264,6 +272,13 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     // even though it only needs `path` and `E`.
     #[allow(clippy::unused_self)] // trait 実装と署名を揃えるため、`self` を取る。
     pub(crate) fn read_existing_path(&self, path: &Path) -> Result<E::Entry> {
+        let metadata =
+            fs::symlink_metadata(path).context(format!("failed to read {}", path.display()))?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "failed to read {}: refusing to follow symlink",
+            path.display()
+        );
         let text =
             fs::read_to_string(path).context(format!("failed to read {}", path.display()))?;
         E::Entry::from_markdown(&text)
