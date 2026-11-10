@@ -73,6 +73,8 @@ impl std::fmt::Display for PhaseInputError {
 
 impl std::error::Error for PhaseInputError {}
 
+const MAX_HOOK_PAYLOAD_BYTES: u64 = 1024 * 1024;
+
 /// Converts one documented lifecycle hook invocation into the private daemon
 /// request. The phase argument must be the phase usagi wired to the event which
 /// the payload names, so a report cannot claim a phase for another event.
@@ -92,7 +94,7 @@ pub fn request_from_hook(
     let phase = ReportedPhase::parse_token(phase)
         .filter(|phase| phase.is_reportable())
         .ok_or(PhaseInputError::UnknownPhase)?;
-    let input = serde_json::from_reader::<_, PhaseHookInput>(reader)
+    let input = serde_json::from_reader::<_, PhaseHookInput>(reader.take(MAX_HOOK_PAYLOAD_BYTES))
         .map_err(|_| PhaseInputError::InvalidPayload)?;
     let event = declared_event
         .or(input.hook_event_name.as_deref())
@@ -454,6 +456,14 @@ mod tests {
         assert!(
             serde_json::to_value(request).unwrap()["caller_context"].is_null(),
             "hook credentials must not be inherited through the Agent environment"
+        );
+        let oversized = format!(
+            r#"{{"session_id":"provider-session","padding":"{}","hook_event_name":"Stop"}}"#,
+            "x".repeat(1024 * 1024)
+        );
+        assert_eq!(
+            request_from_hook(&mut Cursor::new(oversized), "ended", None, None).unwrap_err(),
+            PhaseInputError::InvalidPayload
         );
     }
 
