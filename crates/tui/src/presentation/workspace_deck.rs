@@ -579,6 +579,13 @@ impl WorkspaceDeck {
         {
             self.pending_palette = None;
         }
+        if self
+            .pending_output_hit
+            .as_ref()
+            .is_some_and(|hit| hit.path == path)
+        {
+            self.pending_output_hit = None;
+        }
     }
 
     /// Carry one identity-only Garden visit across the workspace composition
@@ -2225,13 +2232,42 @@ mod tests {
 
     #[test]
     fn closing_a_pending_garden_projects_tab_discards_the_visit() {
+        use std::sync::Arc;
+        use usagi_core::domain::id::{DaemonGeneration, TerminalId, TerminalRef, WorktreeId};
+        use usagi_core::usecase::terminal_search::{
+            OutputMatch, SearchTerminalKind, TerminalSearchResult,
+        };
+
         let alpha = snapshot("alpha", "/alpha");
         let beta = snapshot("beta", "/beta");
         let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
         let session = SessionId::new();
         deck.schedule_garden_visit(beta.workspace.path.clone(), session, None);
+        deck.pending_output_hit = Some(output_search::Hit {
+            path: beta.workspace.path.clone(),
+            source: Arc::new(TerminalSearchResult::unavailable(
+                TerminalRef {
+                    daemon_generation: DaemonGeneration::new(),
+                    workspace_id: beta.workspace_id,
+                    session_id: Some(session),
+                    worktree_id: WorktreeId::new(),
+                    terminal_id: TerminalId::new(),
+                },
+                SearchTerminalKind::Agent,
+            )),
+            found: OutputMatch {
+                row: 0,
+                column: 0,
+                before: String::new(),
+                text: "hit".into(),
+                after: String::new(),
+            },
+            query: "hit".into(),
+            label: "beta".into(),
+        });
         deck.close_path(&beta.workspace.path);
         assert_eq!(deck.take_garden_visit(&beta.workspace.path), None);
+        assert!(deck.pending_output_hit.is_none());
     }
 
     #[test]

@@ -289,7 +289,7 @@ pub struct PreviewOverlay {
     /// Absolute projected-row scroll when no search match owns the anchor.
     pub(super) scroll: usize,
     /// Signed projected-row delta from the active search match.
-    match_scroll: Option<isize>,
+    pub(super) match_scroll: Option<isize>,
     pub(super) search: String,
     pub(super) search_editing: bool,
     pub(super) current_match: usize,
@@ -969,6 +969,9 @@ fn update_preview_finder(state: &mut AppState, key: &AppKey) -> Vec<Effect> {
             overlay.lines.clear();
             overlay.scroll = 0;
             overlay.match_scroll = None;
+            overlay.search.clear();
+            overlay.search_editing = false;
+            overlay.current_match = 0;
             overlay.loading = true;
             overlay.error = None;
             let request_id = overlay.begin_request();
@@ -1839,22 +1842,42 @@ mod tests {
             Some("src/lib.rs")
         );
 
-        // 遅れて届いた pane の完了は document を汚さない。
-        let _ = update(
-            &mut state,
-            AppEvent::Backend(BackendEvent::PreviewLoaded {
-                target,
-                request_id: pane_request,
-                path: Some("src/lib.rs".into()),
-                filter: PreviewFileFilter::All,
-                files: Vec::new(),
-                changed: Vec::new(),
-                lines: vec!["stale".into()],
-            }),
-        );
+        // 遅れて届いた pane の完了や別 path / filter の完了は document / pane を汚さない。
+        for (req, p, f) in [
+            (pane_request, Some("src/lib.rs".into()), PreviewFileFilter::All),
+            (reopened, Some("src/main.rs".into()), PreviewFileFilter::All),
+            (reopened, Some("src/lib.rs".into()), PreviewFileFilter::Changed),
+        ] {
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PreviewLoaded {
+                    target,
+                    request_id: req,
+                    path: p.clone(),
+                    filter: f,
+                    files: Vec::new(),
+                    changed: Vec::new(),
+                    lines: vec!["stale".into()],
+                }),
+            );
+            let _ = update(
+                &mut state,
+                AppEvent::Backend(BackendEvent::PreviewError {
+                    target,
+                    request_id: req,
+                    path: p,
+                    filter: f,
+                    error: SafeError {
+                        message: SafeMessage::new("stale"),
+                        error_id: "stale".into(),
+                    },
+                }),
+            );
+        }
         let overlay = state.preview_overlay().unwrap();
         assert_eq!(overlay.lines(), [] as [String; 0]);
         assert_eq!(overlay.pane().lines(), [] as [String; 0]);
+        assert!(overlay.pane().error().is_none());
         assert!(overlay.pane().is_loading());
     }
 }
