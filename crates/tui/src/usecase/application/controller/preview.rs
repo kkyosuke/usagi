@@ -1844,9 +1844,17 @@ mod tests {
 
         // 遅れて届いた pane の完了や別 path / filter の完了は document / pane を汚さない。
         for (req, p, f) in [
-            (pane_request, Some("src/lib.rs".into()), PreviewFileFilter::All),
+            (
+                pane_request,
+                Some("src/lib.rs".into()),
+                PreviewFileFilter::All,
+            ),
             (reopened, Some("src/main.rs".into()), PreviewFileFilter::All),
-            (reopened, Some("src/lib.rs".into()), PreviewFileFilter::Changed),
+            (
+                reopened,
+                Some("src/lib.rs".into()),
+                PreviewFileFilter::Changed,
+            ),
         ] {
             let _ = update(
                 &mut state,

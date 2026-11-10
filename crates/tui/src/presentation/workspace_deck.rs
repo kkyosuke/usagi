@@ -2258,6 +2258,7 @@ mod tests {
             found: OutputMatch {
                 row: 0,
                 column: 0,
+                end_column: 3,
                 before: String::new(),
                 text: "hit".into(),
                 after: String::new(),
