@@ -2206,7 +2206,36 @@ mod tests {
             }),
             Err(ClientError::Unavailable(_))
         ));
-        for invalid_limit in [0_u32, (DEFAULT_MAX_FRAME_BYTES as u32) + 1] {
+        assert!(
+            Scripted {
+                input: Cursor::new(vec![]),
+                ..Scripted::default()
+            }
+            .flush()
+            .is_ok()
+        );
+        let mut broken = Scripted {
+            fail_read: true,
+            fail_write: true,
+            ..Scripted::default()
+        };
+        assert!(broken.read(&mut []).is_err());
+        assert!(broken.flush().is_ok());
+        let mut read_fails = Scripted {
+            fail_read: true,
+            ..Scripted::default()
+        };
+        assert!(read_fails.flush().is_ok());
+    }
+
+    #[test]
+    fn client_rejects_out_of_range_negotiated_max_frame_bytes() {
+        let protocol = ProtocolVersion {
+            generation: 1,
+            revision: 1,
+        };
+        let over_limit = u32::try_from(DEFAULT_MAX_FRAME_BYTES).unwrap() + 1;
+        for invalid_limit in [0_u32, over_limit] {
             let hello = Bootstrap::ServerHello(ServerHello {
                 connection_nonce: "nonce".into(),
                 connection_id: crate::infrastructure::ipc::ConnectionId("connection".into()),
@@ -2233,26 +2262,6 @@ mod tests {
                 Err(ClientError::Protocol(ref error)) if error.code == ErrorCode::ProtocolMismatch
             ));
         }
-        assert!(
-            Scripted {
-                input: Cursor::new(vec![]),
-                ..Scripted::default()
-            }
-            .flush()
-            .is_ok()
-        );
-        let mut broken = Scripted {
-            fail_read: true,
-            fail_write: true,
-            ..Scripted::default()
-        };
-        assert!(broken.read(&mut []).is_err());
-        assert!(broken.flush().is_ok());
-        let mut read_fails = Scripted {
-            fail_read: true,
-            ..Scripted::default()
-        };
-        assert!(read_fails.flush().is_ok());
     }
 }
 
