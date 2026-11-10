@@ -383,9 +383,7 @@ acquire_lock() {
         [ ! -L "$node" ] || fail "update owner node must not be a symlink"
         [ "$node" != "$LOCK_NODE" ] || continue
         if ! lock_owner_alive "$node"; then
-            if mv -- "$node" "$LOCK_DIR/.retired.$$.${node##*/}" 2>/dev/null; then
-                rm -rf -- "$LOCK_DIR/.retired.$$.${node##*/}"
-            fi
+            rm -rf -- "$node"
             continue
         fi
         if ! ticket="$(read_lock_ticket "$node")"; then
@@ -394,6 +392,7 @@ acquire_lock() {
             # its published ticket before diagnosing malformed metadata.
             if ! ticket="$(read_lock_ticket "$node")"; then
                 [ -d "$node" ] || continue
+                [ -e "$node/pid" ] || [ -L "$node/pid" ] || continue
                 fail "invalid update lock ticket"
             fi
         fi
@@ -412,9 +411,7 @@ acquire_lock() {
             [ ! -L "$node" ] || fail "update owner node must not be a symlink"
             [ "$node" != "$LOCK_NODE" ] || continue
             if ! lock_owner_alive "$node"; then
-                if mv -- "$node" "$LOCK_DIR/.retired.$$.${node##*/}" 2>/dev/null; then
-                    rm -rf -- "$LOCK_DIR/.retired.$$.${node##*/}"
-                fi
+                rm -rf -- "$node"
                 continue
             fi
             if [ -f "$node/choosing" ]; then
@@ -423,6 +420,7 @@ acquire_lock() {
             fi
             if ! owner="$(read_lock_ticket "$node")"; then
                 [ -d "$node" ] || continue
+                [ -e "$node/pid" ] || [ -L "$node/pid" ] || continue
                 fail "invalid update lock ticket"
             fi
             if [ "$owner" -lt "$ticket" ]; then
