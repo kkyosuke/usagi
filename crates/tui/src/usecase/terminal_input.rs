@@ -219,8 +219,6 @@ pub enum LiveTerminalAction {
     OpenPullRequests,
     /// Open the active target's file preview (`Ctrl-O v`).
     OpenPreview,
-    /// Open generated files (`Ctrl-O f`).
-    OpenArtifacts,
     /// Open the daemon's pending decisions (`Ctrl-O d`).
     OpenDecisions,
     /// Open the active target's scratchpad (`Ctrl-O s`).
@@ -786,7 +784,7 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
         return key.raw_bytes.clone();
     }
     let mut bytes = match key.code {
-        KeyCode::Char(character) if key.modifiers.control => {
+        KeyCode::Char(character) if key.modifiers.control && character.is_ascii() => {
             vec![(character.to_ascii_uppercase() as u8) & 0x1f]
         }
         KeyCode::Char(character) => character.to_string().into_bytes(),
@@ -808,7 +806,7 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
         KeyCode::Function(number) => function_key_bytes(number),
         KeyCode::Unknown => Vec::new(),
     };
-    if key.modifiers.alt {
+    if key.modifiers.alt && !bytes.is_empty() {
         bytes.insert(0, 0x1b);
     }
     bytes
@@ -2045,6 +2043,24 @@ mod tests {
             KeyEventKind::Press,
         );
         assert_eq!(encode_key(&alt_enter), b"\x1b\r".to_vec());
+        let alt_unknown = KeyEvent::new(
+            KeyCode::Unknown,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_unknown), [] as [u8; 0]);
+        let ctrl_non_ascii = KeyEvent::new(
+            KeyCode::Char('あ'),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&ctrl_non_ascii), "あ".as_bytes());
         let release = KeyEvent::new(
             KeyCode::Function(2),
             Modifiers::default(),

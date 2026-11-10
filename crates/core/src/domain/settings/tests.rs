@@ -585,6 +585,33 @@ fn local_settings_ignore_global_only_and_unknown_workspace_values() {
 }
 
 #[test]
+fn local_default_models_preserve_explicit_overrides_and_absence() {
+    for model in [
+        None,
+        Some(DefaultModel::Claude),
+        Some(DefaultModel::Agy),
+        Some(DefaultModel::OpenAi),
+    ] {
+        let local = LocalSettings {
+            default_model: model,
+            ..LocalSettings::default()
+        };
+        let json = serde_json::to_string(&local).unwrap();
+        let decoded: LocalSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, local);
+        let global = Settings {
+            default_model: DefaultModel::Claude,
+            ..Settings::default()
+        };
+        assert_eq!(
+            global.with_local(&decoded).default_model,
+            model.unwrap_or(DefaultModel::Claude),
+            "only an absent override inherits the global default model"
+        );
+    }
+}
+
+#[test]
 fn local_team_templates_preserve_explicit_overrides_and_absence() {
     for template in [
         None,
