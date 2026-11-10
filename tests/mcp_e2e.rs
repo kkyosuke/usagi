@@ -740,7 +740,7 @@ enabled = false
     let first = mcp.tool(
         "session_delegate_brief",
         &json!({
-            "name":"queued-one",
+            "name":"active-one",
             "role":"coder",
             "brief":"implement the first change",
             "agent":{"runtime":"codex","model":"fixture-codex"}
@@ -750,11 +750,11 @@ enabled = false
     let first = tool_text(&first);
     let returned_sessions = first["created"]["sessions"].as_array().unwrap();
     assert_eq!(returned_sessions.len(), 1);
-    assert_eq!(returned_sessions[0]["name"], "queued-one");
+    assert_eq!(returned_sessions[0]["name"], "active-one");
     let second = mcp.tool(
         "session_delegate_brief",
         &json!({
-            "name":"queued-two",
+            "name":"active-two",
             "role":"coder",
             "brief":"implement the second change",
             "agent":{"runtime":"codex","model":"fixture-codex"}
@@ -768,7 +768,7 @@ enabled = false
             .unwrap()
             .contains("delegation concurrency limit (1) reached")
     );
-    assert!(!mcp.workspace().join(".usagi/sessions/queued-two").exists());
+    assert!(!mcp.workspace().join(".usagi/sessions/active-two").exists());
 }
 
 fn tool_text(response: &serde_json::Value) -> serde_json::Value {

@@ -472,7 +472,7 @@ pub(super) fn dispatch_agent_tool(
                 let _delegation_permit = authorize_delegation(
                     bound,
                     agent,
-                    Some(&caller),
+                    &caller,
                     Some(&serde_json::json!(requested_role)),
                     &operation_id,
                 )

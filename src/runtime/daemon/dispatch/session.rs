@@ -635,7 +635,7 @@ impl Drop for DelegationPermit {
 pub(super) fn authorize_delegation(
     bound: &ConnectionWorkspace,
     agent: &SharedAgentRuntime,
-    caller: Option<&usagi_core::domain::agent::CallerRef>,
+    caller: &usagi_core::domain::agent::CallerRef,
     requested_role: Option<&serde_json::Value>,
     operation_id: &str,
 ) -> Result<DelegationPermit, SessionRuntimeError> {
@@ -653,18 +653,6 @@ pub(super) fn authorize_delegation(
         .lock()
         .map_err(|_| SessionRuntimeError::Storage)?;
     let catalog = sessions.effective_role_catalog()?;
-    let Some(caller) = caller else {
-        if catalog
-            .roles
-            .values()
-            .any(|definition| definition.delegation.is_some())
-        {
-            return Err(SessionRuntimeError::InvalidRole(
-                "authenticated caller is required by the delegation policy".into(),
-            ));
-        }
-        return Ok(DelegationPermit::inert());
-    };
     let parent_role = match caller.session_id {
         Some(id) => sessions.session_role(id)?,
         None => catalog
@@ -806,13 +794,8 @@ fn delegate_brief(
             authenticated.continuation,
         )
     };
-    let _delegation_permit = authorize_delegation(
-        bound,
-        agent,
-        Some(&caller),
-        payload.get("role"),
-        operation_id,
-    )?;
+    let _delegation_permit =
+        authorize_delegation(bound, agent, &caller, payload.get("role"), operation_id)?;
     // Machine-local runtime/model policy belongs to the workspace root and is
     // not copied into managed worktrees. Decide every read-only refusal here;
     // `dispatch` still re-reads the same trusted root and stays the authority.

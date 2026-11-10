@@ -1321,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_tools_use_the_shared_memory_root_instead_of_the_working_directory() {
+    fn memory_tools_write_under_the_memory_root() {
         let memory_root = tempdir().unwrap();
         let mut client = RecordingClient {
             reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
