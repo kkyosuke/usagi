@@ -124,29 +124,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         })
     }
 
-    /// Whether the source directory exists, distinguishing a genuinely absent
-    /// path from a dangling final component or ancestor.
-    pub(crate) fn source_dir_exists(&self) -> Result<bool> {
-        match fs::metadata(&self.dir) {
-            Ok(metadata) => {
-                anyhow::ensure!(
-                    metadata.is_dir(),
-                    "markdown source path is not a directory: {}",
-                    self.dir.display()
-                );
-                Ok(true)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if path_is_genuinely_missing(&self.dir)? {
-                    Ok(false)
-                } else {
-                    Err(error).context(format!("failed to inspect {}", self.dir.display()))
-                }
-            }
-            Err(error) => Err(error).context(format!("failed to inspect {}", self.dir.display())),
-        }
-    }
-
     pub(crate) fn index_path(&self) -> PathBuf {
         self.dir.join(INDEX_FILE)
     }
@@ -312,11 +289,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
         }
         let repair = self.lock().and_then(|_lock| self.repair_derived_locked());
         Self::log_repair_failure(repair);
-    }
-
-    /// Repair without reacquiring a lock already held across a read snapshot.
-    pub(crate) fn repair_derived_best_effort_locked(&self, _lock: &StoreLock) {
-        Self::log_repair_failure(self.repair_derived_locked());
     }
 
     fn log_repair_failure(repair: Result<()>) {

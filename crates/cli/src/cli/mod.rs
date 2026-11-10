@@ -4,7 +4,7 @@
 //! 実装していく。
 //!
 //! この tree は引数なし TUI、人間向け command、daemon control plane、MCP server を含む
-//! process argv 全体を解釈する。エージェント向け issue / memory 操作そのものは MCP 面
+//! process argv 全体を解釈する。エージェント向け memory 操作そのものは MCP 面
 //! （`crate::mcp`）が受け持ち、CLI command には置かない。
 //!
 //! TUI・daemon・MCP を開く command は typed な [`RunOutcome`] を返し、managed session

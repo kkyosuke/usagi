@@ -835,7 +835,7 @@ mod tests {
 
     /// A memory file whose name disagrees with its `name` field is still
     /// reported by the file it lives in, through both the cached-index and the
-    /// rebuild path — the same invariant the issue store holds.
+    /// rebuild path.
     #[test]
     fn summaries_report_a_memory_file_that_exists() {
         let tmp = tempfile::tempdir().unwrap();

@@ -1,14 +1,12 @@
 //! Cross-process advisory locking for the file-backed stores.
 //!
-//! The issue and memory stores are read-modify-write: a mutation reads the
-//! directory (e.g. to allocate the next issue number or to find stale-named
-//! siblings), writes one markdown file, then rebuilds the derived `index.json`
+//! The markdown stores are read-modify-write: a mutation reads the directory
+//! (e.g. to find stale-named siblings), writes one markdown file, then rebuilds the derived `index.json`
 //! / `MEMORY.md` by scanning the whole directory. The per-file write is atomic
 //! (temp + rename, see [`super::json_file`]), but the *sequence*
-//! is not: multiple MCP server processes can write the same issue root (workers
-//! in one session) or workspace-shared memory root concurrently, so two
-//! processes can interleave and lose data (e.g. both allocate the same number,
-//! or a stale rebuild wins).
+//! is not: multiple MCP server processes can write the same workspace-shared
+//! memory root concurrently, so two processes can interleave and lose data
+//! (e.g. a stale rebuild wins).
 //!
 //! [`StoreLock`] serialises those sequences across processes with an exclusive
 //! advisory lock (`flock`-style, via the `fs2` crate) held on a per-store
@@ -195,8 +193,8 @@ mod tests {
     #[test]
     fn path_is_a_dotfile_inside_the_dir() {
         assert_eq!(
-            StoreLock::path(Path::new("/repo/.usagi/issues")),
-            PathBuf::from("/repo/.usagi/issues/.lock")
+            StoreLock::path(Path::new("/repo/.usagi/memory")),
+            PathBuf::from("/repo/.usagi/memory/.lock")
         );
     }
 

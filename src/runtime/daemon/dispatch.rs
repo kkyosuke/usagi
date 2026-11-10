@@ -30,21 +30,20 @@ pub(super) fn launch_context(
 }
 
 use super::{
-    AgentAdmission, AgentReadiness, AgentReadinessPreflight, AmbiguousIssueNumber, Arc, BTreeMap,
-    BTreeSet, ConnectionId, ConnectionWorkspace, CurrentLocatorFile, DEFAULT_GENERATION_LIMIT,
-    DaemonRequest, Deserialize, DispatchStore, DispatchToolAction, Envelope, EnvelopeKind,
-    ErrorCode, ErrorLog, GenerationFence, GenerationRegistry, GenerationRegistryFile,
-    INBOX_PAGE_MAX, InboxCursor, MetricsObserver, MetricsSample, OperationId, Ordering, Path,
-    PathBuf, PeerProcess, PendingDaemonAgentRestart, ResponseOutcome, SessionId,
-    SessionRuntimeError, SessionScopeResolver, SharedAgentRuntime, SharedMetricsBroker,
-    SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime, SharedTerminalRuntime,
-    SystemGit, TeardownSignal, TerminalId, TerminalPipelineMetrics, UnixStandbyProbe,
-    UserDecisionStore, WorkspaceId, clear_pending_daemon_agent_restart, current_build,
-    observe_generation_process, output_pipeline_counters, paths, perform_compensating_remove,
-    perform_create, perform_delegated_create, perform_remove_with_merged_head,
-    pr_projection_counters, process_start_identity, recover_rollover,
-    restore_pending_daemon_agents, rollover_trigger, validate_owned_directory,
-    write_pending_daemon_agent_restart,
+    AgentAdmission, AgentReadiness, AgentReadinessPreflight, Arc, BTreeMap, BTreeSet, ConnectionId,
+    ConnectionWorkspace, CurrentLocatorFile, DEFAULT_GENERATION_LIMIT, DaemonRequest, Deserialize,
+    DispatchStore, DispatchToolAction, Envelope, EnvelopeKind, ErrorCode, ErrorLog,
+    GenerationFence, GenerationRegistry, GenerationRegistryFile, INBOX_PAGE_MAX, InboxCursor,
+    MetricsObserver, MetricsSample, OperationId, Ordering, Path, PathBuf, PeerProcess,
+    PendingDaemonAgentRestart, ResponseOutcome, SessionId, SessionRuntimeError,
+    SessionScopeResolver, SharedAgentRuntime, SharedMetricsBroker, SharedPrInventory,
+    SharedProcessResourceSampler, SharedSessionRuntime, SharedTerminalRuntime, SystemGit,
+    TeardownSignal, TerminalId, TerminalPipelineMetrics, UnixStandbyProbe, UserDecisionStore,
+    WorkspaceId, clear_pending_daemon_agent_restart, current_build, observe_generation_process,
+    output_pipeline_counters, paths, perform_compensating_remove, perform_create,
+    perform_delegated_create, perform_remove_with_merged_head, pr_projection_counters,
+    process_start_identity, recover_rollover, restore_pending_daemon_agents, rollover_trigger,
+    validate_owned_directory, write_pending_daemon_agent_restart,
 };
 
 pub(super) struct DispatchToolContext<'a> {
@@ -1922,7 +1921,6 @@ pub(super) fn session_response_envelope(
                 | SessionAction::TodoRemove
                 | SessionAction::DecisionList
                 | SessionAction::DecisionLog
-                | SessionAction::DelegateIssue
                 | SessionAction::DelegateBrief => None,
             } && let Some(object) = body.as_object_mut()
             {

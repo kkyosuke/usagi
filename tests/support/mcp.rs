@@ -78,7 +78,7 @@ struct McpProcess {
 impl McpHarness {
     #[must_use]
     pub fn start() -> Self {
-        Self::start_at(Channel::Local, None, false, None, false)
+        Self::start_at(Channel::Local, None, None, false)
     }
 
     /// production channel（`USAGI_RUNTIME_MODE=production`）で起動する。
@@ -87,36 +87,30 @@ impl McpHarness {
     /// 「base と selected の関係」を base 側から間違えても local では露見しない。
     #[must_use]
     pub fn start_in_production() -> Self {
-        Self::start_at(Channel::Production, None, false, None, false)
+        Self::start_at(Channel::Production, None, None, false)
     }
 
     /// Every shipping Agent grammar, including Antigravity.
     #[must_use]
     pub fn start_with_all_agents() -> Self {
-        Self::start_at(Channel::Local, None, false, None, true)
+        Self::start_at(Channel::Local, None, None, true)
     }
 
     #[must_use]
     pub fn start_in_session(name: &str) -> Self {
-        Self::start_at(Channel::Local, Some(name), false, None, false)
+        Self::start_at(Channel::Local, Some(name), None, false)
     }
 
     #[must_use]
-    pub fn start_with_tool_availability(issue: bool, memory: bool) -> Self {
-        Self::start_at(Channel::Local, None, false, Some((issue, memory)), false)
-    }
-
-    #[must_use]
-    pub fn start_in_nested_session(name: &str) -> Self {
-        Self::start_at(Channel::Local, Some(name), true, None, false)
+    pub fn start_with_tool_availability(memory: bool) -> Self {
+        Self::start_at(Channel::Local, None, Some(memory), false)
     }
 
     #[allow(clippy::too_many_lines)] // One fixture setup keeps its workspace, daemon, and Agent paths aligned.
     fn start_at(
         channel: Channel,
         session: Option<&str>,
-        nested: bool,
-        tool_availability: Option<(bool, bool)>,
+        tool_availability: Option<bool>,
         all_agents: bool,
     ) -> Self {
         let heavy_e2e = heavy_e2e_lock();
@@ -206,13 +200,6 @@ impl McpHarness {
                 cwd
             },
         );
-        let cwd = if nested {
-            let nested = cwd.join("crates/core");
-            fs::create_dir_all(&nested).unwrap();
-            nested
-        } else {
-            cwd
-        };
 
         let path = format!(
             "{}:{}",
@@ -662,16 +649,12 @@ impl McpHarness {
     }
 }
 
-fn configure_tool_availability(channel: Channel, home: &Path, availability: Option<(bool, bool)>) {
+fn configure_tool_availability(channel: Channel, home: &Path, availability: Option<bool>) {
     let data_dir = channel.data_dir(home);
     ensure_private_dir_all(&data_dir).unwrap();
-    let (issue_enabled, memory_enabled) = availability.unwrap_or((
-        Settings::default().issue_enabled,
-        Settings::default().memory_enabled,
-    ));
+    let memory_enabled = availability.unwrap_or(Settings::default().memory_enabled);
     Storage::new(data_dir)
         .save_settings(&Settings {
-            issue_enabled,
             memory_enabled,
             ..Settings::default()
         })

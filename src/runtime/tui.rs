@@ -4045,7 +4045,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
                 .map_err(|error| workspace_open_error(error, &opened))?;
             let workspace =
                 workspace_usecase::open(&self.storage, &path, Utc::now()).map_err(io_error)?;
-            // New workspaces copy Global's Agent / Issue / Memory defaults. For a
+            // New workspaces copy Global's Agent / Memory defaults. For a
             // pre-existing registration from before workspace settings existed,
             // the first open performs the same one-time initialization. The store
             // never overwrites an existing workspace file.
@@ -9037,7 +9037,7 @@ mod tests {
         let mut draft = port.read(SettingsScope::Global).unwrap();
         draft.theme = Theme::Dark;
         draft.default_model = usagi_core::domain::settings::DefaultModel::Claude;
-        draft.issue_enabled = false;
+        draft.memory_enabled = false;
 
         // A dedicated settings surface commits after Config opened. It also
         // changes owned fields to pin the documented last-Config-writer-wins
@@ -9066,7 +9066,7 @@ mod tests {
             saved.default_model,
             usagi_core::domain::settings::DefaultModel::Claude
         );
-        assert!(!saved.issue_enabled);
+        assert!(!saved.memory_enabled);
         assert_eq!(saved.env, concurrent.env);
     }
 
@@ -9124,7 +9124,7 @@ mod tests {
             theme: Theme::Light,
             modal_selection_mode: ModalSelectionMode::Prompt,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
-            issue_enabled: false,
+            memory_enabled: false,
             ..global.clone()
         };
         port.save(SettingsScope::Workspace, &local_a).unwrap();
@@ -9132,7 +9132,7 @@ mod tests {
             theme: Theme::Dark,
             modal_selection_mode: ModalSelectionMode::Action,
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
-            issue_enabled: false,
+            memory_enabled: false,
             ..global
         };
 
@@ -9157,7 +9157,7 @@ mod tests {
             reopened.read(SettingsScope::Workspace).unwrap(),
             Settings {
                 default_model: usagi_core::domain::settings::DefaultModel::Claude,
-                issue_enabled: false,
+                memory_enabled: false,
                 ..changed_global.clone()
             }
         );
@@ -9260,7 +9260,7 @@ mod tests {
             .unwrap();
         WorkspaceSettingsStore::new(&workspace)
             .save(&LocalSettings {
-                issue_enabled: Some(false),
+                memory_enabled: Some(false),
                 ..LocalSettings::default()
             })
             .unwrap();
@@ -9283,7 +9283,7 @@ mod tests {
         assert_eq!(global.theme, Theme::Dark);
         assert_eq!(global.env, global_env);
         let local = WorkspaceSettingsStore::new(&workspace).load().unwrap();
-        assert_eq!(local.issue_enabled, Some(false));
+        assert_eq!(local.memory_enabled, Some(false));
         assert_eq!(local.env, workspace_env);
     }
 
@@ -9341,7 +9341,6 @@ mod tests {
                 usagi_core::domain::settings::TerminalConcurrencyLimit::default(),
             default_model: usagi_core::domain::settings::DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
-            issue_enabled: false,
             memory_enabled: false,
             team_template: usagi_core::domain::settings::TeamTemplate::Hierarchical,
             env: usagi_core::domain::settings::EnvBindings::new(),

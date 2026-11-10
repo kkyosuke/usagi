@@ -23,10 +23,9 @@ fn workspace_round_trips_through_json() {
 #[test]
 fn overview_carries_the_workspace_and_its_counts() {
     let ws = Workspace::new("app", "/home/user/app");
-    let overview = WorkspaceOverview::new(ws.clone(), 2, 4, 1);
+    let overview = WorkspaceOverview::new(ws.clone(), 2, 1);
     assert_eq!(overview.workspace, ws);
     assert_eq!(overview.session_count, 2);
-    assert_eq!(overview.open_issue_count, 4);
     assert_eq!(overview.pr_count, 1);
     // Exercise the derived Clone / PartialEq / Debug.
     assert_eq!(overview.clone(), overview);

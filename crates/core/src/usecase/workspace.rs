@@ -8,8 +8,8 @@
 //! rejected: JSON cannot represent it losslessly, so it is deliberately omitted
 //! from the registry (and therefore from [`recent`]).
 //!
-//! [`recent`] enriches every registered workspace with its session, open-issue,
-//! and unique-pull-request counts and sorts the result most-recent-first. A
+//! [`recent`] enriches every registered workspace with its session and
+//! unique-pull-request counts and sorts the result most-recent-first. A
 //! broken repository-local store degrades only that workspace's figures to zero;
 //! corruption of the global registry itself is still reported to the caller.
 
@@ -19,7 +19,6 @@ use std::path::Path;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::domain::issue::IssueStatus;
 use crate::domain::pullrequest::PrLink;
 use crate::domain::recent::{Recent, Unite, UniteOverview};
 use crate::domain::workspace::{Workspace, WorkspaceOverview, validate_workspace_name};
@@ -141,7 +140,7 @@ pub fn remove(
 /// joined to those overviews by path and keep their stored tab order. Missing
 /// Unite members are skipped; a broken optional Unite store degrades to the
 /// healthy single-workspace list. Missing or unreadable repository-local state
-/// and issue stores contribute zero counts without hiding healthy siblings.
+/// contributes zero counts without hiding healthy siblings.
 ///
 /// # Errors
 ///
@@ -389,16 +388,7 @@ fn overview_for(storage: &impl WorkspaceRepository, workspace: Workspace) -> Wor
             .collect::<HashSet<_>>()
             .len()
     });
-    let open_issue_count = storage
-        .issue_summaries(&workspace.path)
-        .map_or(0, |issues| {
-            issues
-                .iter()
-                .filter(|issue| issue.status != IssueStatus::Done)
-                .count()
-        });
-
-    WorkspaceOverview::new(workspace, session_count, open_issue_count, pr_count)
+    WorkspaceOverview::new(workspace, session_count, pr_count)
 }
 
 #[cfg(test)]
@@ -412,7 +402,6 @@ mod tests {
         NewWorkspaceError, NewWorkspaceKind, WorkspaceProbe, is_registered, open,
         preflight_new_workspace, recent, register, remove, touch_unite,
     };
-    use crate::domain::issue::{Issue, IssuePriority, IssueStatus};
     use crate::domain::note::Scratchpad;
     use crate::domain::pullrequest::PrLink;
     use crate::domain::recent::{Recent, Unite};
@@ -420,7 +409,6 @@ mod tests {
     use crate::domain::workspace::{Workspace, WorkspaceOverview};
     use crate::domain::workspace_state::WorkspaceState;
     use crate::infrastructure::paths::project_data_dir;
-    use crate::infrastructure::store::issue::IssueStore;
     use crate::infrastructure::store::state::WorkspaceStateStore;
     use crate::infrastructure::store::workspace::Storage;
 
@@ -454,23 +442,6 @@ mod tests {
             last_active: None,
             notes: Scratchpad::default(),
             prs,
-        }
-    }
-
-    fn issue(number: u32, status: IssueStatus) -> Issue {
-        Issue {
-            number,
-            title: format!("issue {number}"),
-            status,
-            priority: IssuePriority::Medium,
-            labels: Vec::new(),
-            dependson: Vec::new(),
-            related: Vec::new(),
-            parent: None,
-            milestone: None,
-            created_at: ts(2),
-            updated_at: ts(2),
-            body: String::new(),
         }
     }
 
@@ -656,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_sorts_and_counts_sessions_open_issues_and_unique_prs() {
+    fn recent_sorts_and_counts_sessions_and_unique_prs() {
         let (tmp, storage) = storage();
         let alpha_root = tmp.path().join("alpha");
         let beta_root = tmp.path().join("beta");
@@ -682,13 +653,6 @@ mod tests {
                 updated_at: ts(9),
             })
             .unwrap();
-        let issue_store = IssueStore::new(&beta_root);
-        issue_store.write(&issue(1, IssueStatus::Todo)).unwrap();
-        issue_store
-            .write(&issue(2, IssueStatus::InProgress))
-            .unwrap();
-        issue_store.write(&issue(3, IssueStatus::Done)).unwrap();
-
         let items = recent(&storage).unwrap();
 
         assert_eq!(
@@ -698,11 +662,9 @@ mod tests {
                     workspace("beta", &beta_root, ts(9)),
                     2,
                     2,
-                    2,
                 )),
                 Recent::Workspace(WorkspaceOverview::new(
                     workspace("alpha", &alpha_root, ts(5)),
-                    0,
                     0,
                     0,
                 )),
@@ -794,7 +756,6 @@ mod tests {
             vec![Recent::Workspace(WorkspaceOverview::new(
                 alpha.clone(),
                 0,
-                0,
                 0
             ))]
         );
@@ -803,7 +764,7 @@ mod tests {
         fs::write(storage.dir().join("unites.json"), future).unwrap();
         assert_eq!(
             recent(&storage).unwrap(),
-            vec![Recent::Workspace(WorkspaceOverview::new(alpha, 0, 0, 0))]
+            vec![Recent::Workspace(WorkspaceOverview::new(alpha, 0, 0))]
         );
         assert!(
             touch_unite(
@@ -836,7 +797,6 @@ mod tests {
             "{ broken",
         )
         .unwrap();
-        fs::write(broken_root.join(".usagi/issues"), "not a directory").unwrap();
 
         let items = recent(&storage).unwrap();
 
@@ -847,11 +807,9 @@ mod tests {
                     workspace("broken", &broken_root, ts(9)),
                     0,
                     0,
-                    0,
                 )),
                 Recent::Workspace(WorkspaceOverview::new(
                     workspace("healthy", &healthy_root, ts(5)),
-                    0,
                     0,
                     0,
                 )),

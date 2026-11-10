@@ -11,12 +11,12 @@
 //! for what only the dispatch table calls, and private for the rest.
 
 use super::{
-    AmbiguousIssueNumber, BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore,
-    SessionDispatchContext, SessionId, SessionRuntimeError, SharedAgentRuntime,
-    SharedSessionRuntime, SystemGit, TeardownSignal, WorkspaceId, best_effort_merged_pr_head,
-    clean_orphan_session_resources, dispatch_agent_after_preflight, launch_context,
-    perform_compensating_remove, perform_create, perform_delegated_create,
-    perform_remove_with_merged_head, record_session_lineage, scratchpad, session_id_by_name,
+    BTreeMap, BTreeSet, ConnectionWorkspace, DispatchStore, SessionDispatchContext, SessionId,
+    SessionRuntimeError, SharedAgentRuntime, SharedSessionRuntime, SystemGit, TeardownSignal,
+    WorkspaceId, best_effort_merged_pr_head, clean_orphan_session_resources,
+    dispatch_agent_after_preflight, launch_context, perform_compensating_remove, perform_create,
+    perform_delegated_create, perform_remove_with_merged_head, record_session_lineage, scratchpad,
+    session_id_by_name,
 };
 
 pub(super) fn session_organization(
@@ -59,8 +59,6 @@ pub(super) fn dispatch_session_action(
     payload: &serde_json::Value,
 ) -> Result<usagi_daemon::usecase::session_runtime::SessionReply, SessionRuntimeError> {
     use usagi_core::infrastructure::ipc::SessionAction;
-    use usagi_core::infrastructure::store::issue::IssueStore;
-    use usagi_core::usecase::issue;
     use usagi_daemon::usecase::agent_ipc::PromptMode;
     use usagi_daemon::usecase::session_runtime::perform_status;
 
@@ -426,91 +424,6 @@ pub(super) fn dispatch_session_action(
             reply(serde_json::json!({"session_id": scope.session_id, "scratchpad": body}))
         }
         SessionAction::DelegateBrief => reply(delegate_brief(context, operation_id, payload)?),
-        SessionAction::DelegateIssue => {
-            let workspace = bound_workspace()?;
-            let number = payload
-                .get("number")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|value| u32::try_from(value).ok())
-                .ok_or(SessionRuntimeError::InvalidRequest)?;
-            let name = payload
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .map_or_else(|| format!("issue-{number}"), str::to_owned);
-            let _delegation_permit =
-                authorize_delegation(bound, agent, caller, payload.get("role"), operation_id)?;
-            authorize_create_or_reuse(&name)?;
-            let root = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .repository_root()
-                .to_path_buf();
-            let issue = issue::get(&IssueStore::new(root), number)
-                .map_err(|error| {
-                    error
-                        .chain()
-                        .find_map(|cause| cause.downcast_ref::<AmbiguousIssueNumber>())
-                        .cloned()
-                        .map_or(
-                            SessionRuntimeError::Storage,
-                            SessionRuntimeError::AmbiguousIssue,
-                        )
-                })?
-                .ok_or(SessionRuntimeError::InvalidRequest)?;
-            let prompt = issue::to_prompt(&issue);
-            let requested_role = payload.get("role").cloned();
-            let mut created = perform_create(
-                bound.sessions(),
-                &SystemGit,
-                operation_id,
-                &serde_json::json!({
-                    "name": name,
-                    "role": requested_role,
-                    "parent_session_id": caller.and_then(|caller| caller.session_id),
-                    "creator_agent_id": caller.map(|caller| caller.agent_id),
-                    "creator_continuation": authenticated_caller.as_ref().and_then(|caller| caller.continuation),
-                }),
-            )?;
-            let id = record_session_lineage(agent, workspace, &created.body, &name)?;
-            if caller.is_some()
-                && let Some(sessions) = created
-                    .body
-                    .get_mut("sessions")
-                    .and_then(serde_json::Value::as_array_mut)
-            {
-                sessions
-                    .retain(|session| session.get("session_id") == Some(&serde_json::json!(id)));
-            }
-            let delivery = if let Some(caller) = caller.cloned() {
-                let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-                runtime
-                    .dispatch_store()
-                    .queue_delegated_prompt(
-                        workspace,
-                        Some(id),
-                        prompt,
-                        chrono::Utc::now(),
-                        caller,
-                        usagi_core::domain::id::OperationId::parse(operation_id)
-                            .map_err(|_| SessionRuntimeError::InvalidRequest)?,
-                    )
-                    .map_err(|_| SessionRuntimeError::Storage)?;
-                usagi_daemon::usecase::agent_ipc::PromptDelivery {
-                    delivered_to: "queue",
-                    queued: true,
-                }
-            } else {
-                agent
-                    .lock()
-                    .map_err(|_| SessionRuntimeError::Storage)?
-                    .prompt(workspace, Some(id), &prompt, PromptMode::Queue)
-                    .map_err(|error| SessionRuntimeError::Delivery(error.message))?
-            };
-            reply(
-                serde_json::json!({"name": name, "session_id": id, "created": created.body, "delivered_to": delivery.delivered_to, "queued": delivery.queued}),
-            )
-        }
         // Create runs its heavy Git worktree build with the shared session lock
         // released, so a long `git worktree add` never freezes concurrent
         // readers (session list, terminal poll, user-decision list) on the
@@ -699,7 +612,7 @@ pub(super) struct DelegationPermit {
     operation_id: Option<usagi_core::domain::id::OperationId>,
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_counts_active_children_against_concurrency
 impl DelegationPermit {
     const fn inert() -> Self {
         Self {
@@ -709,7 +622,7 @@ impl DelegationPermit {
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_counts_active_children_against_concurrency
 impl Drop for DelegationPermit {
     fn drop(&mut self) {
         if let (Some(store), Some(operation_id)) = (&self.store, self.operation_id) {
@@ -718,7 +631,7 @@ impl Drop for DelegationPermit {
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_issue_counts_queued_children_against_concurrency
+#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_counts_active_children_against_concurrency
 pub(super) fn authorize_delegation(
     bound: &ConnectionWorkspace,
     agent: &SharedAgentRuntime,
@@ -866,7 +779,7 @@ fn delegate_brief(
         .and_then(serde_json::Value::as_str)
         .map_or_else(|| format!("triage-{suffix}"), str::to_owned);
     let prompt = format!(
-        "このセッションの worktree 内で次の依頼をトリアージし、必要なら issue 化して実装へつなげてください。リポジトリの規約に従ってください。\n\n{brief}"
+        "このセッションの worktree 内で次の依頼をトリアージし、実装へつなげてください。リポジトリの規約に従ってください。\n\n{brief}"
     );
     let (runtime, model) = new_agent_selector(payload.get("agent"))?;
 

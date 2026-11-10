@@ -28,7 +28,7 @@ use usagi_core::infrastructure::ipc::{
     DaemonReply, DaemonRequest, DispatchAgentIntent, DispatchIntent, TuiUserDecisionAction,
 };
 use usagi_core::infrastructure::store::{
-    DerivedState, issue::IssueStore, memory::MemoryStore, user_decision::UserDecisionStore,
+    DerivedState, memory::MemoryStore, user_decision::UserDecisionStore,
 };
 
 #[test]
@@ -108,7 +108,7 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 51);
+    assert_eq!(tools.len(), 44);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -132,6 +132,13 @@ fn production_tools_list_fixes_the_tool_schema_contract() {
         "supervisor_cancel",
         "supervisor_resolve_escalation",
         "supervisor_events",
+        "issue_create",
+        "issue_get",
+        "issue_to_prompt",
+        "issue_search",
+        "issue_update",
+        "issue_delete",
+        "session_delegate_issue",
     ] {
         assert!(!names.contains(name), "removed tool is advertised: {name}");
         let response = mcp.tool(name, &json!({"name": "removed-workflow"}));
@@ -141,7 +148,7 @@ fn production_tools_list_fixes_the_tool_schema_contract() {
 
 #[test]
 fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
-    let mut mcp = McpHarness::start_with_tool_availability(false, false);
+    let mut mcp = McpHarness::start_with_tool_availability(false);
     let tools = mcp.tools();
     let names = tools
         .iter()
@@ -149,34 +156,28 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .collect::<Vec<_>>();
 
     assert_eq!(names.len(), 40);
-    assert!(names.iter().all(|name| !name.starts_with("issue_")));
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
-    assert!(!names.contains(&"session_delegate_issue"));
     assert!(names.contains(&"session_list"));
     assert!(names.contains(&"terminal_list"));
     assert!(names.contains(&"terminal_read"));
 
-    for name in ["issue_search", "memory_search", "session_delegate_issue"] {
-        let response = mcp.tool(name, &json!({}));
-        assert_eq!(response["error"]["code"], -32601);
-    }
+    let response = mcp.tool("memory_search", &json!({}));
+    assert_eq!(response["error"]["code"], -32601);
 }
 
 /// The registry and the Agent prompt must come from the same settings, or an
-/// Agent is told about a family its own MCP server refused to register. Issue
-/// off with Memory on makes that observable: the prompt has to lose exactly the
-/// issue line and keep the rest.
+/// Agent is told about a family its own MCP server refused to register. Memory
+/// off makes that observable: the prompt has to lose exactly the memory line
+/// and keep the rest.
 #[test]
 fn production_disabled_family_leaves_both_the_registry_and_the_agent_prompt() {
-    let mut mcp = McpHarness::start_with_tool_availability(false, true);
+    let mut mcp = McpHarness::start_with_tool_availability(false);
     let tools = mcp.tools();
     let names = tools
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert!(names.iter().all(|name| !name.starts_with("issue_")));
-    assert!(!names.contains(&"session_delegate_issue"));
-    assert!(names.iter().any(|name| name.starts_with("memory_")));
+    assert!(names.iter().all(|name| !name.starts_with("memory_")));
 
     drop(mcp.launch_caller());
     let capture = wait_for_fixture_argv(&mcp, "codex", None, "<tools>");
@@ -186,15 +187,15 @@ fn production_disabled_family_leaves_both_the_registry_and_the_agent_prompt() {
         "the session line is not conditional: {prompt}"
     );
     assert!(
-        prompt.contains("- memory:"),
-        "an enabled family lost its line: {prompt}"
+        prompt.contains("- user decision:"),
+        "the user decision line is not conditional: {prompt}"
     );
     assert!(
-        !prompt.contains("- issue:"),
+        !prompt.contains("- memory:"),
         "a disabled family stayed in the prompt: {prompt}"
     );
     // A disabled family is not described as missing either.
-    assert!(!prompt.contains("issue"), "{prompt}");
+    assert!(!prompt.contains("memory"), "{prompt}");
 }
 
 #[test]
@@ -673,54 +674,8 @@ fn production_delegate_brief_rejects_an_unknown_caller_without_creating_a_sessio
 }
 
 #[test]
-fn production_issue_writes_are_refused_at_the_workspace_root() {
-    let mut mcp = McpHarness::start();
-    let read = mcp.tool("issue_get", &json!({"number":1}));
-    assert_eq!(read["result"]["content"][0]["text"], "null");
-    let write = mcp.tool("issue_create", &json!({"title":"refused"}));
-    assert_eq!(write["error"]["code"], -32603);
-    assert!(
-        write["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("workspace root")
-    );
-    assert!(!mcp.workspace().join(".usagi/issues").exists());
-}
-
-#[test]
-fn claimed_child_store_tools_stay_bound_to_the_authenticated_session() {
-    let mut mcp = McpHarness::start();
-    drop(mcp.launch_caller());
-
-    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"Claimed child scope"})));
-
-    assert_eq!(created["number"], 1);
-    assert!(
-        mcp.workspace()
-            .join(".usagi/sessions/mcp-caller/.usagi/issues/001-claimed-child-scope.md")
-            .is_file()
-    );
-    assert!(!mcp.workspace().join(".usagi/issues").exists());
-}
-
-#[test]
 fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     let mut mcp = McpHarness::start_in_session("store-e2e");
-    let created = tool_text(&mcp.tool(
-        "issue_create",
-        &json!({
-            "title":"MCP durable issue",
-            "priority":"high",
-            "labels":["mcp"],
-            "body":"round trip"
-        }),
-    ));
-    let fetched = tool_text(&mcp.tool("issue_get", &json!({"number":1})));
-    let found = tool_text(&mcp.tool(
-        "issue_search",
-        &json!({"query":"durable","label":"mcp","ready":true}),
-    ));
     let saved = tool_text(&mcp.tool(
         "memory_save",
         &json!({
@@ -736,9 +691,6 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     let repaired = memory_store.read("mcp-fact").unwrap().unwrap();
     let memory = tool_text(&mcp.tool("memory_get", &json!({"name":"mcp-fact"})));
 
-    assert_eq!(created["number"], 1);
-    assert_eq!(fetched["title"], "MCP durable issue");
-    assert_eq!(found[0]["ready"], true);
     assert_eq!(saved["name"], "mcp-fact");
     assert_eq!(repaired.body, "remember me");
     assert!(!memory_dirty.exists());
@@ -746,11 +698,6 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
     assert!(!missing.value);
     assert_eq!(missing.derived, DerivedState::Fresh);
     assert_eq!(memory["body"], "remember me");
-    assert!(
-        mcp.cwd()
-            .join(".usagi/issues/001-mcp-durable-issue.md")
-            .is_file()
-    );
     assert!(mcp.cwd().join(".usagi/memory/mcp-fact.md").is_file());
 
     fs::remove_file(memory_store.index_path()).unwrap();
@@ -762,307 +709,7 @@ fn production_store_tools_round_trip_through_stdio_and_durable_files() {
 }
 
 #[test]
-fn production_issue_create_commits_source_when_derived_refresh_fails() {
-    let mut mcp = McpHarness::start_in_session("derived-refresh-failure");
-    let issues = mcp.cwd().join(".usagi/issues");
-    fs::create_dir_all(issues.join("index.json")).unwrap();
-
-    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"Committed without index"})));
-
-    assert_eq!(created["number"], 1);
-    assert!(issues.join("001-committed-without-index.md").is_file());
-    assert_eq!(
-        fs::read_to_string(issues.join(".derived-dirty")).unwrap(),
-        "rebuild from markdown\n"
-    );
-    let fetched = tool_text(&mcp.tool("issue_get", &json!({"number":1})));
-    assert_eq!(fetched["title"], "Committed without index");
-    assert!(issues.join("index.json").is_dir());
-    assert!(issues.join(".derived-dirty").is_file());
-
-    // The RPC returns the committed Issue, while the store outcome retains the
-    // explicit derived-state contract for direct callers.
-    let store = IssueStore::new(mcp.cwd());
-    let persisted = store.read(1).unwrap().unwrap();
-    let outcome = store.write(&persisted).unwrap();
-    assert_eq!(outcome.derived, DerivedState::RebuildNeeded);
-
-    let unreadable_claim = issues.join("002-unreadable.md");
-    fs::create_dir(&unreadable_claim).unwrap();
-    let dirty_before = fs::read(issues.join(".derived-dirty")).unwrap();
-    let error = store.read(2).unwrap_err();
-    assert!(error.to_string().contains("failed to read"));
-    assert!(unreadable_claim.is_dir());
-    assert_eq!(
-        fs::read(issues.join(".derived-dirty")).unwrap(),
-        dirty_before
-    );
-
-    fs::remove_dir(&unreadable_claim).unwrap();
-    fs::remove_dir(issues.join("index.json")).unwrap();
-    let repaired = store.read(1).unwrap().unwrap();
-    assert_eq!(repaired.title, "Committed without index");
-    assert!(issues.join("index.json").is_file());
-    assert!(!issues.join(".derived-dirty").exists());
-    let missing = store.remove_with_outcome(999).unwrap();
-    assert!(!missing.value);
-    assert_eq!(missing.derived, DerivedState::Fresh);
-}
-
-#[test]
-fn production_issue_create_uses_the_git_common_sequence_authority() {
-    let mut mcp = McpHarness::start_in_session("shared-sequence");
-    let authority = mcp.workspace().join(".git/usagi/issue-numbers");
-    let reservations = authority.join("reservations");
-    fs::create_dir_all(&reservations).unwrap();
-    fs::write(
-        authority.join("sequence.json"),
-        "{\n  \"version\": 1,\n  \"last_reserved\": 515\n}\n",
-    )
-    .unwrap();
-    fs::write(reservations.join("0000000515.reserved"), "515\n").unwrap();
-
-    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"After reservation"})));
-
-    assert_eq!(created["number"], 516);
-    assert!(
-        mcp.cwd()
-            .join(".usagi/issues/516-after-reservation.md")
-            .is_file()
-    );
-    assert_eq!(
-        fs::read_to_string(reservations.join("0000000516.reserved")).unwrap(),
-        "516\n"
-    );
-    assert!(
-        fs::read_to_string(authority.join("sequence.json"))
-            .unwrap()
-            .contains("\"last_reserved\": 516")
-    );
-}
-
-#[test]
-fn production_issue_create_from_nested_linked_worktree_uses_git_common_authority() {
-    let mut mcp = McpHarness::start_in_nested_session("nested-shared-sequence");
-    let authority = mcp.workspace().join(".git/usagi/issue-numbers");
-    fs::create_dir_all(&authority).unwrap();
-    fs::write(
-        authority.join("sequence.json"),
-        "{\n  \"version\": 1,\n  \"last_reserved\": 515\n}\n",
-    )
-    .unwrap();
-    let common_legacy = mcp.workspace().join(".git/usagi-issue-sequence/next");
-    fs::create_dir_all(common_legacy.parent().unwrap()).unwrap();
-    fs::write(&common_legacy, "migrated-to-usagi-issue-numbers:515\n").unwrap();
-    fs::write(authority.join("legacy-v2-migrated"), "515\n").unwrap();
-
-    let created = mcp.tool(
-        "issue_create",
-        &json!({"title":"Nested allocator authority","body":"body"}),
-    );
-    assert!(created.get("error").is_none(), "{created}");
-    let body: serde_json::Value =
-        serde_json::from_str(created["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(body["number"], 516);
-    assert!(authority.join("reservations/0000000516.reserved").is_file());
-    assert_eq!(
-        fs::read_to_string(common_legacy).unwrap(),
-        "migrated-to-usagi-issue-numbers:516\n"
-    );
-    assert_eq!(
-        fs::read_to_string(mcp.cwd().join(".usagi/issues/usagi-issue-sequence/next")).unwrap(),
-        "migrated-to-usagi-issue-numbers:516\n"
-    );
-    assert!(!mcp.cwd().join(".usagi/issue-numbers").exists());
-}
-
-#[test]
-fn production_issue_point_tools_reject_duplicate_numbers_without_changing_siblings() {
-    let mut mcp = McpHarness::start_in_session("duplicate-issue-e2e");
-    let created = tool_text(&mcp.tool("issue_create", &json!({"title":"First"})));
-    let number = created["number"].as_u64().unwrap();
-    let issues_dir = mcp.cwd().join(".usagi/issues");
-    let first = issues_dir.join(format!("{number:03}-first.md"));
-    let second = issues_dir.join(format!("{number:03}-second.md"));
-    let first_source = fs::read(&first).unwrap();
-    fs::write(&second, &first_source).unwrap();
-
-    let listed = tool_text(&mcp.tool("issue_search", &json!({})));
-    assert_eq!(listed.as_array().unwrap().len(), 2);
-    let mut listed_files: Vec<_> = listed
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|issue| issue["file"].as_str().unwrap().to_owned())
-        .collect();
-    listed_files.sort();
-    assert_eq!(
-        listed_files,
-        [
-            format!("{number:03}-first.md"),
-            format!("{number:03}-second.md")
-        ]
-    );
-    assert!(
-        listed
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|issue| issue["ambiguous"] == true && issue["ready"] == false)
-    );
-    let matching = tool_text(&mcp.tool("issue_search", &json!({"query":"First"})));
-    let mut matching_files: Vec<_> = matching
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|issue| issue["file"].as_str().unwrap().to_owned())
-        .collect();
-    matching_files.sort();
-    assert_eq!(
-        matching_files,
-        [
-            format!("{number:03}-first.md"),
-            format!("{number:03}-second.md")
-        ]
-    );
-    let source_before = [fs::read(&first).unwrap(), fs::read(&second).unwrap()];
-    let index = issues_dir.join("index.json");
-    let index_before = fs::read(&index).unwrap();
-    let dirty = issues_dir.join(".derived-dirty");
-    fs::write(&dirty, b"pre-existing rebuild request\n").unwrap();
-    let dirty_before = fs::read(&dirty).unwrap();
-
-    for response in [
-        mcp.tool("issue_create", &json!({"title":"First"})),
-        mcp.tool("issue_get", &json!({"number":number})),
-        mcp.tool("issue_to_prompt", &json!({"number":number})),
-        mcp.tool(
-            "issue_update",
-            &json!({"number":number,"title":"Replacement"}),
-        ),
-        mcp.tool("issue_delete", &json!({"number":number})),
-    ] {
-        assert_eq!(response["error"]["code"], -32603);
-        let message = response["error"]["message"].as_str().unwrap();
-        assert!(message.contains(&format!("issue #{number} is ambiguous")));
-        assert!(message.contains(first.to_str().unwrap()));
-        assert!(message.contains(second.to_str().unwrap()));
-    }
-
-    assert_eq!(fs::read(&first).unwrap(), source_before[0]);
-    assert_eq!(fs::read(&second).unwrap(), source_before[1]);
-    assert_eq!(fs::read(index).unwrap(), index_before);
-    assert_eq!(fs::read(dirty).unwrap(), dirty_before);
-    assert!(
-        !issues_dir
-            .join(format!("{number:03}-replacement.md"))
-            .exists()
-    );
-}
-
-#[test]
-fn production_delegate_issue_preserves_ambiguity_without_session_or_queue_side_effects() {
-    let mut mcp = McpHarness::start();
-    let issues_dir = mcp.workspace().join(".usagi/issues");
-    fs::create_dir_all(&issues_dir).unwrap();
-    let first = issues_dir.join("001-first.md");
-    let second = issues_dir.join("001-second.md");
-    let source = "---\nnumber: 1\ntitle: First\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-07-22T00:00:00+00:00\nupdated_at: 2026-07-22T00:00:00+00:00\n---\n\nbody\n";
-    fs::write(&first, source).unwrap();
-    fs::write(&second, source).unwrap();
-
-    let sessions_path = support::daemon::lifecycle_state_path(&mcp.data_dir());
-    let dispatch_path = mcp.data_dir().join("daemon/dispatch.json");
-    let sessions_before = fs::read(&sessions_path).unwrap();
-    let dispatch_before = fs::read(&dispatch_path).ok();
-    let name = "ambiguous-must-not-exist";
-
-    let response = mcp.tool("session_delegate_issue", &json!({"number":1,"name":name}));
-
-    assert_eq!(response["error"]["code"], -32603);
-    let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("issue #1 is ambiguous"));
-    assert!(message.contains(first.to_str().unwrap()));
-    assert!(message.contains(second.to_str().unwrap()));
-    assert!(!mcp.workspace().join(".usagi/sessions").join(name).exists());
-    assert_eq!(fs::read(sessions_path).unwrap(), sessions_before);
-    assert_eq!(fs::read(dispatch_path).ok(), dispatch_before);
-
-    let branch = Command::new("git")
-        .args(["-C", mcp.workspace().to_str().unwrap(), "branch", "--list"])
-        .arg(format!("usagi/{name}"))
-        .output()
-        .unwrap();
-    assert!(branch.status.success());
-    assert_eq!(branch.stdout, [] as [u8; 0]);
-}
-
-#[test]
-fn production_delegate_issue_assigns_the_selected_role_without_persisting_instructions() {
-    let mut mcp = McpHarness::start();
-    write_session_role_catalog(&mcp, "coder", "Implement an issue", "ISSUE_ROLE_SECRET");
-    fs::create_dir_all(mcp.workspace().join(".usagi/issues")).unwrap();
-    fs::write(
-        mcp.workspace().join(".usagi/issues/001-delegated-role.md"),
-        "---\nnumber: 1\ntitle: Delegated role\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-08-01T00:00:00+00:00\nupdated_at: 2026-08-01T00:00:00+00:00\n---\n\nImplement it.\n",
-    )
-    .unwrap();
-
-    let response = mcp.tool(
-        "session_delegate_issue",
-        &json!({"number":1, "name":"role-issue", "role":"coder"}),
-    );
-    assert!(response.get("error").is_none(), "{response}");
-    let sessions = tool_text(&mcp.tool("session_list", &json!({})));
-    let delegated = sessions["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|session| session["name"] == "role-issue")
-        .unwrap();
-    assert_eq!(delegated["role_id"], "coder");
-    assert_eq!(delegated["role_summary"], "Implement an issue");
-    let dispatch = fs::read_to_string(mcp.data_dir().join("daemon/dispatch.json")).unwrap();
-    assert!(!dispatch.contains("ISSUE_ROLE_SECRET"));
-}
-
-#[test]
-fn production_delegate_issue_requires_an_authenticated_caller_in_company_mode() {
-    let mut mcp = McpHarness::start();
-    fs::write(
-        mcp.workspace().join(".usagi/roles.toml"),
-        r#"version = 1
-[roles.coder]
-summary = "Implement"
-scopes = ["session"]
-instructions = "code"
-[roles.coder.delegation]
-enabled = false
-"#,
-    )
-    .unwrap();
-
-    let response = mcp.tool(
-        "session_delegate_issue",
-        &json!({"number":1, "name":"must-not-exist", "role":"coder"}),
-    );
-
-    assert_eq!(response["error"]["code"], -32603);
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("authenticated caller is required by the delegation policy")
-    );
-    assert!(
-        !mcp.workspace()
-            .join(".usagi/sessions/must-not-exist")
-            .exists()
-    );
-}
-
-#[test]
-fn production_delegate_issue_counts_queued_children_against_concurrency() {
+fn production_delegate_brief_counts_active_children_against_concurrency() {
     let mut mcp = McpHarness::start();
     fs::write(
         mcp.workspace().join(".usagi/roles.toml"),
@@ -1087,23 +734,17 @@ enabled = false
 "#,
     )
     .unwrap();
-    let issues = mcp.workspace().join(".usagi/issues");
-    fs::create_dir_all(&issues).unwrap();
-    for number in [1, 2] {
-        fs::write(
-            issues.join(format!("{number:03}-queued.md")),
-            format!(
-                "---\nnumber: {number}\ntitle: Queued {number}\nstatus: todo\npriority: high\nlabels: []\ndependson: []\nrelated: []\ncreated_at: 2026-08-25T00:00:00+00:00\nupdated_at: 2026-08-25T00:00:00+00:00\n---\n\nImplement it.\n"
-            ),
-        )
-        .unwrap();
-    }
     let caller_credential = mcp.launch_caller();
     mcp.restart_with_credential(&caller_credential);
 
     let first = mcp.tool(
-        "session_delegate_issue",
-        &json!({"number":1, "name":"queued-one", "role":"coder"}),
+        "session_delegate_brief",
+        &json!({
+            "name":"queued-one",
+            "role":"coder",
+            "brief":"implement the first change",
+            "agent":{"runtime":"codex","model":"fixture-codex"}
+        }),
     );
     assert!(first.get("error").is_none(), "{first}");
     let first = tool_text(&first);
@@ -1111,8 +752,13 @@ enabled = false
     assert_eq!(returned_sessions.len(), 1);
     assert_eq!(returned_sessions[0]["name"], "queued-one");
     let second = mcp.tool(
-        "session_delegate_issue",
-        &json!({"number":2, "name":"queued-two", "role":"coder"}),
+        "session_delegate_brief",
+        &json!({
+            "name":"queued-two",
+            "role":"coder",
+            "brief":"implement the second change",
+            "agent":{"runtime":"codex","model":"fixture-codex"}
+        }),
     );
 
     assert_eq!(second["error"]["code"], -32603);
@@ -1343,13 +989,10 @@ fn assert_shipping_agy_workspace(mcp: &McpHarness, capture: &FixtureArgv) {
     }
 }
 
-/// The families a shipping launch gets: this harness leaves Issue and Memory at
-/// their default (enabled) in both settings layers.
+/// The families a shipping launch gets: this harness leaves Memory at its
+/// default (enabled) in both settings layers.
 fn shipping_tool_families() -> usagi_core::domain::agent::mcp_tools::McpToolFamilies {
-    usagi_core::domain::agent::mcp_tools::McpToolFamilies {
-        issue: true,
-        memory: true,
-    }
+    usagi_core::domain::agent::mcp_tools::McpToolFamilies { memory: true }
 }
 
 fn assert_shipping_legacy_argv(capture: &FixtureArgv) {
@@ -3144,11 +2787,6 @@ if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
 exit 0
 "#,
     );
-    let delegated_issue = tool_text(&mcp.tool(
-        "issue_create",
-        &json!({"title":"must not reuse another creator's session"}),
-    ));
-
     let list = tool_text(&mcp.tool("session_list", &json!({})));
     assert_eq!(
         list["sessions"].as_array().unwrap().as_slice(),
@@ -3186,10 +2824,6 @@ exit 0
                 "agent":{"runtime":"codex","model":"fixture-codex"},
                 "prompt":"must not enter another creator's session"
             }),
-        ),
-        (
-            "session_delegate_issue",
-            json!({"number":delegated_issue["number"], "name":"existing-top-level", "role":"coder"}),
         ),
         (
             "session_delegate_brief",

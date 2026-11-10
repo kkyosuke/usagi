@@ -11,7 +11,7 @@
 //!
 //! | request | endpoint |
 //! |---|---|
-//! | control operations (workspace / session / issue / Agent launch, generic terminal launch) | the active generation |
+//! | control operations (workspace / session / Agent launch, generic terminal launch) | the active generation |
 //! | scope inventory | every trusted generation, merged and deduplicated |
 //! | attach / resume / resync / input / resize / detach / kill, addressed by a complete `TerminalRef` | the owner named by `TerminalRef.daemon_generation` |
 //! | unknown, retired, or forged generation | typed refusal — never the active endpoint, never a same-named terminal |

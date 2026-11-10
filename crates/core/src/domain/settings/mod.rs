@@ -3,7 +3,7 @@
 //! The global, per-user preferences persisted as `settings.json` in the data
 //! directory, plus workspace settings persisted beside a project. Theme, icon
 //! rendering, modal interaction, and the generic Terminal PTY ceiling stay global; Agent,
-//! Team, Issue, and Memory values are copied to a workspace when it is
+//! Team, and Memory values are copied to a workspace when it is
 //! registered and may then be changed independently.
 //! Environment bindings ([`env`]) exist in both scopes and merge, so a workspace
 //! adds to — or overrides — what every workspace inherits.
@@ -546,8 +546,6 @@ pub struct Settings {
     /// `None` follows the workspace's current checkout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
-    /// Whether issue-backed MCP tools are available to agents.
-    pub issue_enabled: bool,
     /// Whether durable-memory MCP tools are available to agents.
     pub memory_enabled: bool,
     /// Built-in role catalog used for new and resumed Agent work.
@@ -569,7 +567,6 @@ impl Default for Settings {
             terminal_max_concurrent: TerminalConcurrencyLimit::default(),
             default_model: DefaultModel::default(),
             default_branch: None,
-            issue_enabled: true,
             memory_enabled: true,
             team_template: TeamTemplate::default(),
             // No environment is injected unless it is configured explicitly.
@@ -594,13 +591,12 @@ impl Settings {
         self.pr_auto_open = settings.pr_auto_open;
         self.terminal_max_concurrent = settings.terminal_max_concurrent;
         self.default_model = settings.default_model;
-        self.issue_enabled = settings.issue_enabled;
         self.memory_enabled = settings.memory_enabled;
         self.team_template = settings.team_template;
         self
     }
 
-    /// Apply workspace-owned Agent, Base branch, Team, Issue, Memory, and
+    /// Apply workspace-owned Agent, Base branch, Team, Memory, and
     /// environment values over this global baseline. Theme, icon rendering, modal interaction,
     /// and the generic Terminal PTY ceiling always remain global.
     ///
@@ -615,9 +611,6 @@ impl Settings {
         if let Some(branch) = &local.default_branch {
             self.default_branch = Some(branch.clone());
         }
-        if let Some(enabled) = local.issue_enabled {
-            self.issue_enabled = enabled;
-        }
         if let Some(enabled) = local.memory_enabled {
             self.memory_enabled = enabled;
         }
@@ -631,7 +624,7 @@ impl Settings {
     }
 }
 
-/// Per-workspace Agent, Base branch, Team, Issue, and Memory settings stored in
+/// Per-workspace Agent, Base branch, Team, and Memory settings stored in
 /// `<workspace>/.usagi/settings.json` (or the development-mode-specific `dev`
 /// directory).
 ///
@@ -646,7 +639,6 @@ pub struct LocalSettings {
     /// Workspace-specific session base ref. Absence follows the current checkout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
-    pub issue_enabled: Option<bool>,
     pub memory_enabled: Option<bool>,
     /// Workspace override for the built-in team template.
     #[serde(deserialize_with = "deserialize_local_team_template")]
@@ -657,7 +649,7 @@ pub struct LocalSettings {
 }
 
 impl LocalSettings {
-    /// Replace the Agent, Base branch, Team, Issue, and Memory choices with
+    /// Replace the Agent, Base branch, Team, and Memory choices with
     /// `settings`, keeping this workspace's own environment bindings.
     ///
     /// The Config surface edits a merged [`Settings`] view, which carries the
@@ -668,7 +660,6 @@ impl LocalSettings {
     pub fn with_config(mut self, settings: &Settings) -> Self {
         self.default_model = Some(settings.default_model);
         self.default_branch.clone_from(&settings.default_branch);
-        self.issue_enabled = Some(settings.issue_enabled);
         self.memory_enabled = Some(settings.memory_enabled);
         self.team_template = Some(settings.team_template);
         self

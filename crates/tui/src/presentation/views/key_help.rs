@@ -618,7 +618,7 @@ mod tests {
         )
         .join("\n");
 
-        assert!(first.contains("search Issue and Memory"));
+        assert!(first.contains("search Memory"));
         assert!(first.contains("search retained terminal output"));
         assert!(last.contains("Pull Requests / Preview"));
         assert!(modal.contains("activate project"));

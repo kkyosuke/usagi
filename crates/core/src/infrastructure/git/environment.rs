@@ -10,9 +10,9 @@
 //! re-establish that scope itself.
 //!
 //! This module is the single place that decides it. The decision is a pure
-//! function of the inherited variable *names*, and the subprocess boundaries (the
-//! daemon's `GitRunner`, the issue-number sequence resolver) only build a
-//! [`Command`] through [`confined_git_command`].
+//! function of the inherited variable *names*, and the subprocess boundary (the
+//! daemon's `GitRunner`) only builds a [`Command`] through
+//! [`confined_git_command`].
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -51,7 +51,7 @@ pub const INHERITED_GIT_VARIABLES: &[&str] = &["GIT_SSH", "GIT_SSH_COMMAND", "GI
 /// Git's local and global attribute sources.
 pub const CONFINED_GIT_CONFIG: &[(&str, &str)] = &[
     // A repository-supplied file-system monitor is a command git runs on every
-    // enumeration, including the `git ls-files` behind issue numbering.
+    // working-tree enumeration.
     ("core.fsmonitor", "false"),
     // `/dev/null` is a directory that contains no hook, so every hook git looks
     // for — `post-checkout` on `git worktree add` above all — is absent.

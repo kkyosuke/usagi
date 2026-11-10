@@ -1,8 +1,7 @@
 //! A session's note scratchpad: a free-form note plus a lightweight checklist
 //! and an append-only decision log.
 //!
-//! Unlike an [`Issue`](crate::domain::issue::Issue) in the git-tracked store,
-//! everything here is throwaway, machine-local scratch space for the current
+//! Everything here is throwaway, machine-local scratch space for the current
 //! session's work — display / UX only, never affecting the session's identity or
 //! branches. The three sections travel together as one [`Scratchpad`]:
 //!
@@ -25,9 +24,7 @@ fn is_false(value: &bool) -> bool {
 
 /// One entry in a session's lightweight checklist.
 ///
-/// A throwaway, machine-local reminder for the current session's work — distinct
-/// from a git-tracked issue in the store (which has status / priority /
-/// dependencies).
+/// A throwaway, machine-local reminder for the current session's work.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SessionTodo {
     /// The todo text. Trimmed and required non-empty by the usecase that writes it.

@@ -3,7 +3,6 @@
 //! それぞれ [`super::persistence`] の基盤の上に、そのエンティティ固有の採番・
 //! ファイル名・派生ファイルを載せる。
 //!
-//! - [`issue`] — issue の CRUD・採番・`index.json`。
 //! - [`memory`] — memory の CRUD・`MEMORY.md` 目次・`index.json`。
 //! - [`workspace`] — workspace レジストリ（`workspaces.json`）。
 //! - [`state`] — repo の `WorkspaceState`（development は `<repo>/.usagi/dev/state.json`）。
@@ -35,8 +34,6 @@ impl<T> MutationOutcome<T> {
 }
 
 pub mod dispatch;
-pub mod issue;
-pub(crate) mod issue_number_sequence;
 pub mod lifecycle;
 pub mod memory;
 pub mod pr_inventory;

@@ -5244,14 +5244,6 @@ fn submit_overview(state: &mut AppState, input: &str) -> Vec<Effect> {
             }
         }
         Ok(overview::Command::Session { arguments }) => submit_overview_session(state, &arguments),
-        Ok(command) => {
-            state.overlay = None;
-            state.notice = Some(Notice::new(format!("Requested {}", command.name())));
-            vec![Effect::WorkspaceCommand {
-                workspace: state.workspace,
-                command,
-            }]
-        }
         Err(error) => {
             state.notice = Some(Notice::new(error.to_string()));
             Vec::new()

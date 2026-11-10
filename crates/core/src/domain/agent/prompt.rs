@@ -36,16 +36,13 @@ const TOOLS_OPEN: &str = "<tools>\ntool 名と引数は tools/list のスキー�
 const TOOLS_CLOSE: &str = "</tools>";
 
 /// Every line must hold in both scopes, so a family never needs a root variant
-/// and a session variant. The issue line states where writes are accepted rather
-/// than whether *this* agent may write: in a session worktree that reads as the
-/// permission, at the workspace root as the refusal, and both are true.
+/// and a session variant.
 ///
 /// Session orchestration is never disabled, so its line is present whenever an
 /// MCP server is wired. It carries the pointer to the guide resource instead of
 /// the procedure itself, so the prompt does not restate what the guide owns.
 const SESSION_TOOLS: &str = "- session: session の作成・観測・委譲・完了報告は daemon が権威です。手順は resource usagi://guides/orchestration を読んでください。";
 const USER_DECISION_TOOLS: &str = "- user decision: 人への質問・確認・選択が必要な場合は usagi MCP の user_decision_request を使い、TUI で回答できるようにしてください。作成応答を失ったら user_decision_list で質問と未受信回答を回収してください。返された decision_id を user_decision_get で確認し、pending の間は回答に依存しない作業だけを進めてください。resolved の回答を受信したら user_decision_ack で受信確認してください。cancelled / expired を承認とみなさず、人の回答を代わりに送信しないでください。";
-const ISSUE_TOOLS: &str = "- issue: 作業の起点となる backlog を検索・参照できます。git 追跡下のため、書き込みは session worktree からだけ受理されます。";
 const MEMORY_TOOLS: &str = "- memory: session をまたいで残す判断や制約を検索・保存できます。";
 
 /// The immutable boundary of the checkout the launch runs in.
@@ -92,7 +89,6 @@ fn tool_lines(families: McpToolFamilies) -> impl Iterator<Item = &'static str> {
     [
         Some(SESSION_TOOLS),
         Some(USER_DECISION_TOOLS),
-        families.issue.then_some(ISSUE_TOOLS),
         families.memory.then_some(MEMORY_TOOLS),
     ]
     .into_iter()
@@ -107,14 +103,8 @@ mod tests {
     /// fragment so this text names no concrete tool.
     const SESSION_SCOPE_CONTRACT: &str = "<context>\nあなたは usagi が管理するセッション専用の worktree 内で起動されています。このディレクトリは既に独立した作業環境のため、新たに git worktree を作成する必要はありません。\n</context>\n<constraints>\n- 作業はこのディレクトリ配下だけで完結させてください。\n- 親ディレクトリ（メインリポジトリ本体）のファイルは読み書きしないでください。\n- 親ディレクトリへ cd しないでください。\n</constraints>\n<instructions>\n受けた指示を実行して、何かしらの結果（設計やPRなど）みれる形で提供してください。\nartifacts/ はユーザーに見せる成果物の保存先です。提示する調査結果、表示用 HTML・画像、検証結果の要約だけを保存してください。生ログ、途中経過、補助スクリプト、一時設定、キャッシュは artifacts/ に入れず、この worktree 内の .work/ など Git 対象外の作業領域へ保存してください。ディレクトリがなければ作成し、artifacts/.gitignore と .work/.gitignore に * を記載して Git 追跡から除外してください。保存後は artifacts/.index.json を成果物の相対パスの JSON 配列（例: [\"report.md\", \"preview.html\"]）として更新し、既存の提示対象を保持してください。HTML の素材や補助データは artifacts/assets/ に置き、単独で提示しないファイルは一覧へ登録しないでください。コードとして管理するファイルは従来どおりリポジトリへ保存してください。\n</instructions>";
 
-    const ALL: McpToolFamilies = McpToolFamilies {
-        issue: true,
-        memory: true,
-    };
-    const NONE: McpToolFamilies = McpToolFamilies {
-        issue: false,
-        memory: false,
-    };
+    const ALL: McpToolFamilies = McpToolFamilies { memory: true };
+    const NONE: McpToolFamilies = McpToolFamilies { memory: false };
 
     #[test]
     fn the_session_boundary_matches_its_stable_contract_and_names_no_tool() {
@@ -124,7 +114,7 @@ mod tests {
         );
         for scope in [PromptScope::Root, PromptScope::Session] {
             let boundary = scope_prompt(scope);
-            for tool in ["issue", "memory", "tools/list", "user_decision_request"] {
+            for tool in ["memory", "tools/list", "user_decision_request"] {
                 assert!(
                     !boundary.contains(tool),
                     "{tool} leaked into the {scope:?} boundary"
@@ -163,31 +153,15 @@ mod tests {
         let baseline = launch_system_prompt(PromptScope::Session, Some(NONE), None);
         assert!(baseline.contains(SESSION_TOOLS));
         assert!(baseline.contains(USER_DECISION_TOOLS));
-        for (families, line) in [
-            (
-                McpToolFamilies {
-                    issue: true,
-                    ..NONE
-                },
-                ISSUE_TOOLS,
-            ),
-            (
-                McpToolFamilies {
-                    memory: true,
-                    ..NONE
-                },
-                MEMORY_TOOLS,
-            ),
-        ] {
-            let prompt = launch_system_prompt(PromptScope::Session, Some(families), None);
-            assert!(!baseline.contains(line), "{line} is not gated");
-            assert_eq!(
-                prompt.lines().count(),
-                baseline.lines().count() + 1,
-                "enabling one family changed more than one line"
-            );
-            assert_eq!(prompt.matches(line).count(), 1);
-        }
+        let families = McpToolFamilies { memory: true };
+        let prompt = launch_system_prompt(PromptScope::Session, Some(families), None);
+        assert!(!baseline.contains(MEMORY_TOOLS), "memory is not gated");
+        assert_eq!(
+            prompt.lines().count(),
+            baseline.lines().count() + 1,
+            "enabling one family changed more than one line"
+        );
+        assert_eq!(prompt.matches(MEMORY_TOOLS).count(), 1);
     }
 
     #[test]
@@ -211,18 +185,13 @@ mod tests {
         assert!(boundary < tools && tools < role);
 
         // Every enabled family appears once, in the declared order.
-        let lines: Vec<usize> = [
-            SESSION_TOOLS,
-            USER_DECISION_TOOLS,
-            ISSUE_TOOLS,
-            MEMORY_TOOLS,
-        ]
-        .iter()
-        .map(|line| {
-            assert_eq!(prompt.matches(line).count(), 1);
-            prompt.find(line).unwrap()
-        })
-        .collect();
+        let lines: Vec<usize> = [SESSION_TOOLS, USER_DECISION_TOOLS, MEMORY_TOOLS]
+            .iter()
+            .map(|line| {
+                assert_eq!(prompt.matches(line).count(), 1);
+                prompt.find(line).unwrap()
+            })
+            .collect();
         assert!(lines.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(lines.iter().all(|line| *line > tools && *line < role));
     }

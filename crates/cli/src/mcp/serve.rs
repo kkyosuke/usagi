@@ -5,7 +5,7 @@
 //! 1 接続の lifecycle state と行単位の validation/routing を `handle_line_with_client` に閉じ込め、
 //! `serve` は実 IO（stdin/stdout）の反復だけを担う。実 IO は合成ルートが注入するため、routing は
 //! ユニットテストできる。`tools/call` は実装済み tool を対応する store / daemon 経路へ送り、
-//! issue / memory は接続時に固定した root の core store usecase、
+//! memory は接続時に固定した root の core store usecase、
 //! session / agent / terminal 系は daemon client へ接続し、tool 個別または daemon のエラーを JSON-RPC エラーへ変換する。
 
 use std::io::{self, BufRead, Read, Write};
@@ -25,7 +25,7 @@ use super::protocol::{self, error_code};
 use super::runtime_model::{
     ExecutableLocator, PathExecutableLocator, RuntimeModelSnapshot, WorkspaceAgentConfig,
 };
-use super::tool::{CallerPolicy, StoreRoot, ToolDescriptor, ToolError, ToolRoute};
+use super::tool::{CallerPolicy, ToolDescriptor, ToolError, ToolRoute};
 use super::tools::RegisteredTool;
 use super::{resources, tools};
 
@@ -67,7 +67,6 @@ enum ServerState {
 struct ServerCapabilities<'a> {
     tools: &'a ServerTools<'a>,
     caller_credential: Option<&'a str>,
-    store_root: &'a Path,
     memory_root: &'a Path,
 }
 
@@ -167,7 +166,6 @@ pub fn serve_with_client(
         ServerCapabilities {
             tools: &ServerTools::new(&snapshot, families),
             caller_credential: None,
-            store_root: &store_root,
             memory_root: &store_root,
         },
     )
@@ -202,14 +200,13 @@ pub fn serve_with_client_and_caller(
         ServerCapabilities {
             tools: &ServerTools::new(&snapshot, families),
             caller_credential: Some(caller_credential),
-            store_root: &store_root,
             memory_root: &store_root,
         },
     )
 }
 
 /// Compatibility path for a daemon-claimed MCP child that supplies one
-/// authenticated store root. Both issue and memory operations are bound to that
+/// authenticated store root. Settings and memory operations are bound to that
 /// root even when the provider starts the child from another directory. Current
 /// daemons call [`serve_with_client_and_caller_at_roots`] with separate roots.
 ///
@@ -237,7 +234,7 @@ pub fn serve_with_client_and_caller_at(
     )
 }
 
-/// Serves one claimed MCP child with a repository store root for issues and a
+/// Serves one claimed MCP child with a repository root for settings and a
 /// daemon-owned, git-untracked root for cross-session memory.
 ///
 /// # Errors
@@ -266,7 +263,6 @@ pub fn serve_with_client_and_caller_at_roots(
         ServerCapabilities {
             tools: &ServerTools::new(&snapshot, families),
             caller_credential: Some(caller_credential),
-            store_root,
             memory_root,
         },
     )
@@ -323,7 +319,6 @@ fn serve_with_client_and_features(
         ServerCapabilities {
             tools: &ServerTools::new(snapshot, families),
             caller_credential: None,
-            store_root: &store_root,
             memory_root: &store_root,
         },
     )
@@ -402,7 +397,6 @@ fn handle_line(line: &str, version: &str) -> Option<String> {
         ServerCapabilities {
             tools: &ServerTools::new(&RuntimeModelSnapshot::default(), McpToolFamilies::all()),
             caller_credential: None,
-            store_root: Path::new("."),
             memory_root: Path::new("."),
         },
         &mut state,
@@ -643,17 +637,13 @@ fn tools_call(
     {
         return protocol::error(id, error_code::INVALID_PARAMS, &message);
     }
-    let routed_store_root = match descriptor.route() {
-        ToolRoute::Store(StoreRoot::Memory) => capabilities.memory_root,
-        _ => capabilities.store_root,
-    };
     execute_tool(
         id,
         descriptor,
         arguments,
         client,
         capabilities.caller_credential,
-        routed_store_root,
+        capabilities.memory_root,
     )
 }
 
@@ -795,10 +785,7 @@ fn tool_is_available(snapshot: &RuntimeModelSnapshot, route: ToolRoute) -> bool 
 }
 
 fn uses_runtime_schema(route: ToolRoute) -> bool {
-    matches!(
-        route,
-        ToolRoute::Session(SessionAction::Create | SessionAction::DelegateIssue)
-    )
+    matches!(route, ToolRoute::Session(SessionAction::Create))
 }
 
 fn exact_workspace_id(arguments: &Value) -> Option<usagi_core::domain::id::WorkspaceId> {
@@ -1074,7 +1061,6 @@ mod tests {
                         McpToolFamilies::all(),
                     ),
                     caller_credential: None,
-                    store_root: Path::new("."),
                     memory_root: Path::new("."),
                 },
                 &mut state,
@@ -1190,7 +1176,7 @@ mod tests {
     fn tools_list_returns_every_tool_with_schema() {
         let v = call(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 43);
         assert!(tools.iter().any(|tool| tool["name"] == "user_decision_ack"));
         // 各要素が name / description / inputSchema(object) を持つ。
         for tool in tools {
@@ -1204,9 +1190,7 @@ mod tests {
     fn disabled_tool_families_are_neither_listed_nor_callable() {
         let input = initialized_input(concat!(
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_search\",\"arguments\":{}}}\n",
             "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_search\",\"arguments\":{}}}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"session_delegate_issue\",\"arguments\":{\"number\":1}}}\n",
         ));
         let mut out = Vec::new();
         let mut client = RecordingClient {
@@ -1219,10 +1203,7 @@ mod tests {
             "9.9.9",
             &mut client,
             &RuntimeModelSnapshot::default(),
-            McpToolFamilies {
-                issue: false,
-                memory: false,
-            },
+            McpToolFamilies { memory: false },
         )
         .unwrap();
 
@@ -1239,9 +1220,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names.len(), 39);
         assert!(names.contains(&"user_decision_ack"));
-        assert!(names.iter().all(|name| !name.starts_with("issue_")));
         assert!(names.iter().all(|name| !name.starts_with("memory_")));
-        assert!(!names.contains(&"session_delegate_issue"));
         for response in &responses[2..] {
             assert_eq!(response["error"]["code"], -32601);
         }
@@ -1280,7 +1259,6 @@ mod tests {
             ServerCapabilities {
                 tools: &tools,
                 caller_credential: Some("credential"),
-                store_root: Path::new("."),
                 memory_root: Path::new("."),
             },
         );
@@ -1343,8 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_tools_use_the_shared_memory_root_instead_of_the_issue_root() {
-        let issue_root = tempdir().unwrap();
+    fn memory_tools_use_the_shared_memory_root_instead_of_the_working_directory() {
         let memory_root = tempdir().unwrap();
         let mut client = RecordingClient {
             reply: Ok(DaemonReply::Ok(serde_json::json!({}))),
@@ -1362,7 +1339,6 @@ mod tests {
             ServerCapabilities {
                 tools: &ServerTools::new(&RuntimeModelSnapshot::default(), McpToolFamilies::all()),
                 caller_credential: Some("credential"),
-                store_root: issue_root.path(),
                 memory_root: memory_root.path(),
             },
         );
@@ -1370,12 +1346,6 @@ mod tests {
         assert!(response.get("result").is_some(), "{response}");
         assert!(
             memory_root
-                .path()
-                .join(".usagi/memory/dispatch-lessons.md")
-                .exists()
-        );
-        assert!(
-            !issue_root
                 .path()
                 .join(".usagi/memory/dispatch-lessons.md")
                 .exists()
@@ -1388,24 +1358,15 @@ mod tests {
 
     #[test]
     fn tools_call_store_tool_returns_content() {
-        let v = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_get","arguments":{"number":4294967295}}}"#).unwrap();
+        let v = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_get","arguments":{"name":"no-such-memory-fixture"}}}"#).unwrap();
         assert_eq!(v["result"]["content"][0]["text"], "null");
         assert_eq!(v["result"]["isError"], false);
     }
 
     #[test]
-    fn tools_call_store_tool_maps_invalid_arguments_and_execution_errors() {
-        let invalid = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"issue_get","arguments":{}}}"#).unwrap();
+    fn tools_call_store_tool_maps_invalid_arguments() {
+        let invalid = call(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_get","arguments":{}}}"#).unwrap();
         assert_eq!(invalid["error"]["code"], -32602);
-
-        let missing = call(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"issue_to_prompt","arguments":{"number":4294967295}}}"#).unwrap();
-        assert_eq!(missing["error"]["code"], -32603);
-        assert!(
-            missing["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("no issue")
-        );
     }
 
     #[test]
@@ -1515,8 +1476,12 @@ mod tests {
                 ErrorTool(|| ToolError::InvalidParams("invalid".into())),
                 crate::mcp::protocol::error_code::INVALID_PARAMS,
             ),
+            (
+                ErrorTool(|| ToolError::Execution("failed".into())),
+                crate::mcp::protocol::error_code::INTERNAL_ERROR,
+            ),
         ] {
-            let descriptor = ToolDescriptor::workspace_store(tool);
+            let descriptor = ToolDescriptor::memory_store(tool);
             assert_eq!(descriptor.name(), "error_fixture");
             assert_eq!(descriptor.description(), "error mapping fixture");
             assert!(descriptor.input_schema().contains("object"));
@@ -2043,7 +2008,6 @@ mod tests {
             "session_todo_remove",
             "session_decision_list",
             "session_decision_log",
-            "session_delegate_issue",
             "session_delegate_brief",
         ] {
             // `session_delegate_brief` advertises only runtime/model selectors,

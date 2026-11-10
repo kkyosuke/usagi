@@ -2,8 +2,8 @@
 //!
 //! Two independent locations, kept here so no layer re-spells them as literals:
 //!
-//! - **Per-repository metadata** at `<repo>/.usagi` ([`STATE_DIR`]): the issue /
-//!   memory stores and the `.gitignore` writer join it. Lives next to the code
+//! - **Per-repository metadata** at `<repo>/.usagi` ([`STATE_DIR`]): the memory
+//!   store and the `.gitignore` writer join it. Lives next to the code
 //!   it describes and is committed with it.
 //! - **The global per-user data directory** ([`data_dir`]): `$USAGI_HOME` /
 //!   `~/.usagi` for production, or its selected `dev/` / `local/` child for

@@ -1493,7 +1493,6 @@ fn step_config_saves_only_from_the_dirty_save_row() {
     step_config(&mut config, Key::Down, &mut settings);
     step_config(&mut config, Key::Down, &mut settings);
     step_config(&mut config, Key::Down, &mut settings);
-    step_config(&mut config, Key::Down, &mut settings);
     // Enter on the dirty Save row begins the save flow (loading).
     assert!(matches!(
         step_config(&mut config, Key::Enter, &mut settings),
@@ -1518,7 +1517,6 @@ fn overview_config_saves_the_current_workspace_and_returns_to_home() {
         Key::Down,
         Key::Down,
         Key::Right,
-        Key::Down,
         Key::Down,
         Key::Enter,
         Key::CtrlQ,
@@ -1547,7 +1545,7 @@ fn overview_config_saves_the_current_workspace_and_returns_to_home() {
     assert_eq!(settings.selected, vec![PathBuf::from("/tmp/project")]);
     assert_eq!(settings.saves.len(), 1);
     assert_eq!(settings.saves[0].0, SettingsScope::Workspace);
-    assert!(!settings.saves[0].1.issue_enabled);
+    assert!(!settings.saves[0].1.memory_enabled);
     let frames = term
         .frames
         .iter()
@@ -1635,7 +1633,7 @@ fn production_config_and_source_writes_use_the_responsive_worker_path() {
     };
     let mut config = Config::load(&mut settings);
     let _ = step_config(&mut config, Key::Right, &mut settings);
-    for _ in 0..10 {
+    for _ in 0..9 {
         let _ = step_config(&mut config, Key::Down, &mut settings);
     }
     assert!(matches!(
@@ -2946,10 +2944,10 @@ fn open_list_keeps_registry_entries_the_recent_projection_does_not_carry() {
     let registry = vec![ws("alpha"), ws("beta"), ws("gamma"), ws("delta")];
     // delta は単体 recent と Unite card の両方に現れる（production の `recent()` は常にこの形）。
     let projection = vec![
-        Recent::Workspace(WorkspaceOverview::new(ws("delta"), 2, 3, 4)),
+        Recent::Workspace(WorkspaceOverview::new(ws("delta"), 2, 4)),
         Recent::Unite(UniteOverview::new(vec![
-            WorkspaceOverview::new(ws("delta"), 2, 3, 4),
-            WorkspaceOverview::new(ws("gamma"), 1, 1, 1),
+            WorkspaceOverview::new(ws("delta"), 2, 4),
+            WorkspaceOverview::new(ws("gamma"), 1, 1),
         ])),
     ];
 
@@ -2974,8 +2972,8 @@ fn open_touch_keeps_workspace_open_when_escape_is_pressed() {
     let alpha = ws_minutes_ago("alpha", 20);
     let beta = ws_minutes_ago("beta", 10);
     let recent = vec![
-        Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
-        Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
+        Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 4)),
+        Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 7)),
     ];
     let keys = [
         Key::Char('o'),
@@ -3120,8 +3118,8 @@ fn recent_touch_keeps_workspace_open_when_escape_is_pressed() {
     let alpha = ws_minutes_ago("alpha", 20);
     let beta = ws_minutes_ago("beta", 10);
     let recent = vec![
-        Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 3, 4)),
-        Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 6, 7)),
+        Recent::Workspace(WorkspaceOverview::new(beta.clone(), 2, 4)),
+        Recent::Workspace(WorkspaceOverview::new(alpha.clone(), 5, 7)),
     ];
     let keys = [
         Key::Char('o'),
@@ -3151,8 +3149,8 @@ fn recent_touch_keeps_workspace_open_when_escape_is_pressed() {
 #[test]
 fn unite_recent_reopens_the_ordered_workspace_deck() {
     let unite = Recent::Unite(UniteOverview::new(vec![
-        WorkspaceOverview::new(ws("primary"), 0, 0, 0),
-        WorkspaceOverview::new(ws("other"), 0, 0, 0),
+        WorkspaceOverview::new(ws("primary"), 0, 0),
+        WorkspaceOverview::new(ws("other"), 0, 0),
     ]));
     let empty = Recent::Unite(UniteOverview::new(Vec::new()));
     let keys = [Key::Char('2'), Key::Char('r'), Key::CtrlQ, Key::Char('y')];
@@ -4015,8 +4013,8 @@ fn resume_keeps_the_opened_canonical_identity_when_saved_path_is_an_alias() {
 #[test]
 fn returning_from_a_directory_open_reloads_single_and_group_history() {
     let group = Recent::Unite(usagi_core::domain::recent::UniteOverview::new(vec![
-        WorkspaceOverview::new(ws("added"), 1, 0, 0),
-        WorkspaceOverview::new(ws("other"), 1, 0, 0),
+        WorkspaceOverview::new(ws("added"), 1, 0),
+        WorkspaceOverview::new(ws("other"), 1, 0),
     ]));
     let mut loader = FakeLoader {
         recent_projects: vec![group, recent("added"), recent("other")],

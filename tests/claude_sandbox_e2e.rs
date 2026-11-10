@@ -282,22 +282,22 @@ fn retire_bootstrap_brokers(repo: &Path, data: &Path, fixture: &Path) {
 }
 
 #[test]
-fn session_scope_preserves_sibling_issue_and_daemon_authority_for_path_alias_matrix() {
+fn session_scope_preserves_sibling_tracked_source_and_daemon_authority_for_path_alias_matrix() {
     let fixture = fixture_root();
     let _ = fs::remove_dir_all(&fixture);
     let own = fixture.join("sessions/a");
     let sibling = fixture.join("sessions/b/sentinel");
-    let issue = fixture.join("issues/630.md");
+    let tracked = fixture.join("memory/630.md");
     let daemon = fixture.join("daemon/state.json");
     for path in [
         &own,
         sibling.parent().unwrap(),
-        issue.parent().unwrap(),
+        tracked.parent().unwrap(),
         daemon.parent().unwrap(),
     ] {
         fs::create_dir_all(path).unwrap();
     }
-    for path in [&sibling, &issue, &daemon] {
+    for path in [&sibling, &tracked, &daemon] {
         fs::write(path, ORIGINAL).unwrap();
     }
 
@@ -316,14 +316,14 @@ fn session_scope_preserves_sibling_issue_and_daemon_authority_for_path_alias_mat
     assert_unchanged(&sibling);
 
     let hardlink = own.join("authority-hardlink");
-    let link = run_in_session(&own, "ln \"$1\" \"$2\"", &[&issue, &hardlink]);
+    let link = run_in_session(&own, "ln \"$1\" \"$2\"", &[&tracked, &hardlink]);
     assert!(!link.status.success());
-    assert_unchanged(&issue);
+    assert_unchanged(&tracked);
     assert!(!hardlink.exists());
 
-    let remove = run_in_session(&own, "rm \"$1\"", &[&issue]);
+    let remove = run_in_session(&own, "rm \"$1\"", &[&tracked]);
     assert!(!remove.status.success());
-    assert_unchanged(&issue);
+    assert_unchanged(&tracked);
 
     let moved = own.join("stolen-daemon-state");
     let rename = run_in_session(&own, "mv \"$1\" \"$2\"", &[&daemon, &moved]);

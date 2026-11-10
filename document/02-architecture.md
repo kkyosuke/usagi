@@ -252,18 +252,16 @@ presentation 主体の実クレートになる。
 
 ## Markdown 永続化の commit contract
 
-issue / memory store の永続化契約は本節を正本とする。source of truth は各 store root 配下の
-`.usagi/issues/*.md` と `.usagi/memory/*.md` であり、`index.json` と memory の
-`MEMORY.md` は source から破棄・再生成できる derived file である。derived file のための
+memory store の永続化契約は本節を正本とする。source of truth は store root 配下の
+`.usagi/memory/*.md` であり、`index.json` と `MEMORY.md` は source から破棄・再生成できる derived file である。derived file のための
 durable source migration は行わない。
 
 共通の frontmatter 形式は `FrontmatterDoc`、キャンセル付きロック取得・source 読み書き・derived file の
-再構築と修復は `MarkdownStore` に集約する。Issue / Memory の store はファイル名・summary・追加の derived file
+再構築と修復は `MarkdownStore` に集約する。Memory の store はファイル名・summary・追加の derived file
 などの差分だけを定義し、書き込み後は source 全体から同じ再構築経路を使う。
 
-手動起動した MCP server の既定 store root は cwd だが、daemon provisioned MCP は issue と memory を分離する。issue は
-authenticated session の trusted worktree、memory は data home の `agent-memory/<workspace-id>` を root にする。
-後者は Git 追跡外かつ同じ workspace の root/session Agent 間で共有されるため、コーディネータの運用知見を
+手動起動した MCP server の既定 store root は cwd だが、daemon provisioned MCP は memory の root を data home の
+`agent-memory/<workspace-id>` にする。この root は Git 追跡外かつ同じ workspace の root/session Agent 間で共有されるため、コーディネータの運用知見を
 session をまたいで再利用できる。
 
 `index.json` の schema version は `2` で、sorted source file name（key identity）と source
@@ -281,7 +279,7 @@ fast path は全 source byte を各 1 回読む一方、frontmatter の parse �
 を再生成し、外部編集された sibling の stale summary に新しい fingerprint を付けない。
 
 summary が報告する `file` は、その entry を実際に読み取った source file の名前である。entry の field から
-導出する canonical 名（issue は `NNN-<slug>.md`、memory は `<name>.md`）は次の write 先を決める write
+導出する canonical 名（`<name>.md`）は次の write 先を決める write
 target であって、読み手への報告名ではない。store を経由せず Markdown を直接置いた source、および title
 変更後まだ書き戻していない source では両者がずれるため、報告名を実 file に固定し、読み手が存在しない path を
 掴まないようにする。`index.json` の `file` も同じ実 file 名を保持し、rename は `source_fingerprint` の
@@ -303,150 +301,14 @@ source commit 前の失敗は mutation 未適用の error である。source com
 reopen 後の最初の read が store lock 下で source を走査し、derived file を自己修復する。修復が
 一時的に失敗しても marker を残し、source を直接読む操作は committed state を返す。
 
-update / remove の再送は source key（issue number / memory name）に対して冪等である。issue
-create の再送は、初期 status と request fields が一致する committed source を同じ store 内で
-先に照合し、その番号が一意な同一 content identity なら既存番号を返す。matching source の番号が
-重複していれば既存番号を任意に返さず ambiguity error になる。したがって derived failure や応答
-消失の後に同じ mutation を再送しても、別番号の issue や二重削除を作らない。
-
-issue number の採番 authority も本節を正本とする。Git repository では
-`<git-common-dir>/usagi/issue-numbers/`、非 Git workspace では
-`<workspace>/.usagi/issue-numbers/` にだけ authoritative state を置く。
-
-```text
-<git-common-dir>/usagi/issue-numbers/
-├── .lock
-├── sequence.json                         # { "version": 1, "last_reserved": N }
-├── legacy-v2-migrated                    # Git migration commit: canonical body "N\n"
-└── reservations/
-    └── 0000000516.reserved               # body: "516\n"
-
-<git-common-dir>/usagi-issue-sequence/
-├── .lock                                 # pre-fix v2 と共有する migration lock
-└── next                                  # active: "N\n"
-                                          # fenced: "migrated-to-usagi-issue-numbers:N\n"
-
-<observed-issue-store>/usagi-issue-sequence/
-├── .lock                                 # nested/non-Git の pre-fix store-local lock
-└── next                                  # shared old-v2 と同じ active / fenced format
-```
-
-raw cwd が repository 内の深い path でも、最寄り ancestor の `.git` まで遡って worktree boundary を決める。
-authority は [Git subprocess の環境 confine](#git-subprocess-の環境-confine) を通した
-`git -C <worktree-root> rev-parse --path-format=absolute --git-common-dir` の成功結果だけを canonical existing
-directory として採用する。valid separate-git-dir / submodule で `commondir` が無い場合は Git が返す git dir
-自体を使う。empty / non-repository `.git`、stale / dangling gitfile・`commondir`、non-UTF-8 / empty output、
-その他の read error は local fallback directory を作らず fail-closed になる。
-
-non-Gitで予約した後に`git init`するとauthority path自体が変わる。Git resolverはcaller / current
-worktree / 登録済み全worktree rootの`<root>/.usagi/issue-numbers` が1つでもmaterialize済みなら、
-abandoned journalを無視してGit-common authorityを作らずfail-closedにする。このtopology変更は異なるlock間で
-atomicに切り替えられないため、cached non-Git allocatorを停止し、全fallback sequence / journal / source floorを
-offlineでGit authorityへreconcileしてから旧fallbackを取り除く。absence checkだけはcached processをfenceしないので、
-quiescenceは必須の外部gateである。Git→non-Gitへのclassification変更も同じoffline reconciliationなしで行わない。
-
-lock 順序は current authority `.lock`、canonical parent identityでdedupした後の辞書順の列挙済み旧 v2 `.lock` の順で固定する。raw pathのsymlink aliasは同じ順序に正規化する。全 lock を保持したまま、
-`sequence.json`、`legacy-v2-migrated`、全 reservation marker、旧 `next`、workspace root と
-登録済み全Git worktree root、それぞれの`.usagi/sessions/<name>/`、および登録済み全Git worktreeでtracked / untracked / ignoredとしてmaterialize済みの
-arbitrary nested issue storeにある全sourceのfilename prefix / parse可能なfrontmatter宣言の最大値を最初に検証する。activeな旧`next`は
-plain `u32` として high-water へ fold する。observed path のうち sentinel で封鎖されていない authority が2つ以上なら、
-相互に独立した旧 writer を atomic に止められないため、authoritative file を書く前に停止する。
-
-```text
-F = max(sequence, reservation journal, source claims,
-        optional migration marker, every old-v2 next/sentinel)
-
-migration required:
-  → all observed old-v2 next = "migrated-to-usagi-issue-numbers:N\n"
-  → reservation marker
-  → legacy-v2-migrated = "N\n"（Git のみ）
-  → sequence.json
-  → source Markdown
-
-migration complete:
-  → reservation marker
-  → sequence.json
-  → source Markdown
-```
-
-ここで `N = F + 1` である。sentinel は旧 v2 writer を恒久的に fence する。現行 allocator は旧 v2 の lock を保持して sentinel を先に公開するため、待機していた旧 v2 writer は sentinel を plain `u32` として parse できず fail-closed になる。複数の独立した active / missing 旧 authority がある場合は、安全な停止順を証明できないため write 前に offline reconciliation を要求する。
-
-Git の sentinel と `legacy-v2-migrated` は migration watermark であり、通常採番の live high-water ではない。通常予約では sequence / journal だけが進み、両 watermark は相互に一致した古い値のままでよい。後発の旧 v2 path を再移行するときだけ observed fence / marker を更新する。非 Git は migration marker を公開・更新しない。
-
-crash recovery は次の境界で固定する。atomic write の Write / Rename failure は old / new の完全な片方だけを露出する。
-
-| 最後に durable になった境界 | retry |
-| --- | --- |
-| sentinel が未commit | 元の floor から migration を再試行 |
-| first / partial / all sentinel(N) | N を fold し、N+1 から再試行 |
-| reservation marker | journal を fold して次番号へ進む |
-| Git migration marker | journal / marker / sentinel を fold |
-| sequence、source 未作成 | 予約済み gap を再利用しない |
-| exhausted partial sentinel(MAX) | 残り sentinel → marker(MAX) → sequence(MAX) へ収束 |
-
-sequence は strict な schema / version、sentinel、migration marker、reservation marker は canonical な filename/body を検証する。active old-v2 numeric だけは pre-fix parser と同じ trimmed `u32` を受理する。invalid stateとread failureは新しいwriteより前にfail-closedになる。Git migration markerがある場合、shared sentinelはmarker以上のfenced floorでなければならない。markerより新しいsentinelはpartial migrationとして最大値へfoldする。
-
-source high-waterはfilename prefixだけでなく、parse可能なfrontmatterの`number`も含む。
-`007-*.md`が`number: 800`を宣言する場合も、prefixの無いsourceが`number: 900`を宣言する場合も、
-宣言側を再採番しない。allocation時のsource read / parse failureは宣言high-waterを証明できないため
-lenient listingのようにskipせずfail-closedにする。
-
-durable floorが`u32::MAX`の場合は、全old-v2 pathをsentinel(MAX)へfenceし、Git marker(MAX)と
-sequence(MAX)へ収束させる。途中のatomic writeが失敗しても、既存sequence、active `next`、または先に
-公開済みのsentinel(MAX)からfloorを回復する。reservationやsourceを追加せずexhaustion errorを返す。
-
-Git は common legacy を常時、normalized worktree より深い caller の current store-local path を `next` 未作成でも列挙する。
-normalized workspace と登録済み全 Git worktree の各 `.usagi/sessions/` を毎回走査し、通常の direct-session child は
-store-local `next` が未作成でも legacy authority として導出して lock / fence する。child 自身が登録済み worktree なら旧 v2 も
-Git-common authority を使うため、明示的に materialize 済みの local legacy だけを fold し、missing local authority は作らない。
-未登録 child が独立した `.git` を持つ場合、または sessions tree / session entry が symlink の場合は authoritative write 前に
-fail-closed になる。child 側から起動した場合も、conventional workspace と Git common directory が一致し、caller worktree が
-その workspace に登録済みであることを authority 解決前に検証する。さらに登録済み全 Git worktree の tracked / untracked / ignored file から materialize 済みの nested legacy
-`next` を pathspec で毎回発見する。
-同じauthority lock下のdiscovery phaseでnested issue Markdownを発見し、そのstore-local legacy pathも`next`未作成の段階からlock / fence
-対象へ加える。source high-water も normalized workspace と登録済み全 worktree の root / direct-session child、および
-materialize 済み nested source という同じ親集合から走査する。registered worktree root自身は旧v2も`.git`経由でcommon legacyを使うためstore-local pathを追加しない。
-非 Git は workspace root / current と存在する全 direct-session root を `next` 未作成でも列挙する。`Active` と `Missing` は
-ともに未封鎖で、列挙済み authority のうち2件以上なら authoritative write 前に停止する。dangling sessions / issue store / authority pathも
-「missing」と推測せず、session symlinkも暗黙に追わずfail-closedになる。非 Git は global completion marker を公開しないため、後発 direct session を
-既存 marker で隠さない。
-
-ただし、Gitでまだ legacy fileを作っていない arbitrary nested cwd、非Gitのroot/current/direct-session外の
-arbitrary nested cwd、および列挙snapshot後に初めてmaterializeするpathは有限に封鎖できない。sentinel markerだけで
-その未知 process の将来 write を防げるとは主張しない。最初の current reservation 前に全
-pre-fix process の cwd / legacy path を inventory し、列挙対象へ materializeして fenceするか停止して再起動を禁止することが
-safe rollout の外部 compatibility gate である。複数の未封鎖 file が見つかった場合は、全 pre-fix writer を停止し、最大
-floor を失わず1つの authorityへオフラインで整理するまで allocationを再開しない。
-並行回帰では、HEAD直前のraw-cwd resolver / filename floor / plain-u32 increment / StoreLockと同じロジックを
-別processで実行するold-v2 compatibility emulatorを用いる。旧側先行予約のfoldとcurrent側先行sentinel parse failureを
-実OS process / file lockで固定する。
-
-issue number は番号指定 CRUD の identity である。同じ番号 prefix の source Markdown が複数ある場合、
-point get / update / delete と同番号への write は、番号と衝突した全 exact path を辞書順で保持する typed
-`AmbiguousIssueNumber` error で fail-closed になる。point read は store lock を取得してから一意性を判定し、
-選んだ exact path の read と必要な derived repair が終わるまで同じ lock を保持する。検査は dirty marker、
-source write、source remove、derived repair より前に行うため、ambiguity error 後は全 sibling と derived state が
-不変のまま残る。filename prefix と parse 可能な frontmatter の `number` が一致しない source も typed error とし、
-point operation はどちらを正しい identity とも推測しない。自動 renumber や自動削除は repair として行わない。
-
-list / search は source set の診断面でもあるため、同番号 sibling を collapse せず parse 可能な Markdown ごとの
-row として exact filename 付きで列挙し続ける。parse 不能な sibling も filename prefix により衝突数へ含めるので、
-残った parse 可能な search row は `ambiguous: true` と `ready: false` になり、重複番号を参照する依存もその番号を
-`unmet_deps` に残す。search は store lock 下の 1 回の directory enumeration から raw filename claim と
-parse 可能な exact-path source を同時に得て、query、ambiguity、done dependency、readiness の全判断に同じ
-snapshot を使う。snapshot 前には同じ lock のまま scheduled derived repair を試みるため、自己修復契約も保つ。
-全文 query は番号集合でなく source ごとに照合する。重複を修復するときは ambiguity
-error が示す exact path ごとに git 履歴と参照元を監査し、残す identity と新番号へ移す identity を明示的に
-決める。番号指定 delete は repair 手段に使わない。`IssueStore::validate_source_set` は immutable な source
-snapshotをstrictにparseし、filename/frontmatter不一致・prefix欠落・重複番号をerrorにする。rootの
-`committed_issue_sources_are_parseable_and_unambiguous` testがcheckout済み `.usagi/issues/*.md` 全体へこの検査を適用し、
-壊れたsource setをCIで拒否する。
+save / remove の再送は source key（memory name）に対して冪等である。したがって derived failure や応答消失の
+後に同じ mutation を再送しても、二重削除を作らない。
 
 ## Git subprocess の環境 confine
 
 `git` binary を起動する経路は本節を正本とする。実装は `usagi-core` の
 `infrastructure::git::environment` に 1 か所だけ置き、subprocess を持つ面（daemon の
-session worktree adapter、issue number authority の repository resolver）は
+session worktree adapter）は
 `confined_git_command(repo)` だけで command を組み立てる。
 
 session worktree adapter の Git 観測は core の `infrastructure::bounded_process` を使う。
@@ -483,7 +345,7 @@ diff は pager を起動する。いずれも利用者が「開いた」だけ�
 | key | 値 | 閉じるもの |
 |---|---|---|
 | `core.hooksPath` | `/dev/null` | hook を持たない directory を指すので、`git worktree add` の `post-checkout` を含め全 hook が不在になる |
-| `core.fsmonitor` | `false` | issue 採番の `git ls-files` を含む全列挙が repository 指定の monitor command を起動しない |
+| `core.fsmonitor` | `false` | working tree の列挙が repository 指定の monitor command を起動しない |
 | `submodule.recurse` | `false` | submodule 側の設定へ同じ面が増えることを避ける |
 | `core.pager` | `cat` | 出力は常にこの process が読む。設定された pager は repository が実行させる program でしかない |
 
@@ -549,7 +411,7 @@ session の Git effect（create、mirror した tree の nested worktree、remov
 | presentation | 各面クレート（TUI の画面 / daemon のサーバ端点 / cli のサブコマンド・MCP tool アダプタ）と、ルート `main.rs` の dispatch |
 
 `usagi-core/usecase` は `ports.rs` に application-owned な永続化境界を定義し、具体的な
-`IssueStore` / `MemoryStore` / `WorkspaceStateStore` / `Storage` や lock guard を参照しない。
+`MemoryStore` / `WorkspaceStateStore` / `Storage` や lock guard を参照しない。
 read-modify-write の原子性は transaction callback の契約として port に残し、
 `usagi-core/infrastructure` の file adapter が lock を保持したままその callback を実行する。
 Git を使う cleanup inventory も infrastructure adapter、観測結果から候補を決める処理は usecase とする。
@@ -670,7 +532,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 
 | 実装 | 置き場所 |
 |---|---|
-| `Workspace` / `Settings` / `Issue` などのエンティティ、および画面が並べて見せる読み取り値（`WorkspaceOverview` = workspace＋各カウント、`UniteOverview` = 合併した workspace 群の合計、welcome 画面の recent 一覧が持つ `Recent` = そのどちらか） | `crates/core/src/domain/` |
+| `Workspace` / `Settings` / `Memory` などのエンティティ、および画面が並べて見せる読み取り値（`WorkspaceOverview` = workspace＋各カウント、`UniteOverview` = 合併した workspace 群の合計、welcome 画面の recent 一覧が持つ `Recent` = そのどちらか） | `crates/core/src/domain/` |
 | agent の static profile、product-neutral capability、immutable launch request / plan / durable snapshot、injected MCP wiring が公開する tool 系統、system prompt 本文 | `crates/core/src/domain/agent/`。CLI 文法・shell rendering・PTY・secret・provisioning は置かない |
 | `state.json` などの store・IPC プロトコル型・git 操作 | `crates/core/src/infrastructure/` |
 | daemon reply の decode・operation の correlate・live 入力の `Key` 分類 | `crates/tui/src/infrastructure/`。payload と入力だけを見る純関数で、接続・lane・thread・端末 backend の所有は合成ルート（`src/runtime/tui.rs`）に残る。`tests/architecture.rs` の `tui_infrastructure_translates_without_owning_real_io` が実 IO の混入を禁じる |
@@ -871,7 +733,7 @@ phase hook の認証と反映は `AgentRuntime` が所有し、daemon が観測�
 ## TUI Overview のコマンド dispatch
 
 `crates/tui` の `usecase/overview/` は、Overview 固有のコマンド語彙
-（`clean` / `config` / `env` / `issue` / `session`）を持つ。
+（`artifact` / `clean` / `config` / `daemon` / `env` / `garden` / `roles` / `session`）を持つ。
 `interpret` は入力をトップレベル名と trim 済みの未解釈引数に分け、`Command::into_handler` が
 コマンドごとのハンドラへ変換する。ハンドラは `Run` トレイトを実装し、実 IO や画面状態を
 直接操作せず純粋な `CommandResult` を返す。コマンド固有処理を持たない現在のハンドラは、
@@ -932,7 +794,7 @@ phase hook の認証と反映は `AgentRuntime` が所有し、daemon が観測�
 骨格（枠）を持つ。tree は引数なし・通常 CLI・daemon・MCP の完全な argv を解析し、各実行面を表す
 typed `RunOutcome` route を返す。通常 CLI の handler としてここに置くのは、**ターミナルから
 `usagi <cmd>` で叩く人間向けコマンド**（`open` / `config` / `doctor` / `update` / `completion` /
-`version` と clap 自動の `help`）である。エージェント向けの issue / memory 操作は MCP 面
+`version` と clap 自動の `help`）である。エージェント向けの memory 操作は MCP 面
 （`crates/cli/mcp/`）が受け持ち、daemon / MCP route の effect はそれぞれの実行面が担う。
 どんなコマンド・オプションがあるかは単一の clap command tree から `usagi --help` と型の両方に
 反映される。通常 CLI branch の dispatch は `Run` トレイトで一様化する。
@@ -1143,7 +1005,7 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   backlink が選択した worktree の `.git` marker を指すことを起動ごとに再検証してから launcher へ渡す。Git 管理されて
   いない workspace と、workspace root 自体が standalone Git repository である場合は追加 Git root を持たず、own
   worktree だけを書き込み可能にする。後者の `.git` directory は既に writable な worktree の内側にある。
-  したがって sibling session の作業ファイル、root の tracked issue source、daemon durable state は path の表記や
+  したがって sibling session の作業ファイル、root の tracked source、daemon durable state は path の表記や
   symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
 - **普遍領域**: launcher は、repository と重ならない普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
@@ -1323,7 +1185,7 @@ allowlist と PATH 上の executable（`claude` / `codex` / `agy`）の存在を
 server lifetime 中は変わらないため、設定、PATH、CLI install/uninstall の変更を反映するには MCP server の
 再起動または client 再接続が必要である。allowlist の正本や schema を CLI/provider の model list で拡張・保存しない。
 
-既存の `session_create` と `session_delegate_issue` は移行期間の `agent_cli` alias を受ける。parser は
+既存の `session_create` は移行期間の `agent_cli` alias を受ける。parser は
 これを `runtime` に正規化するが、`runtime` または `agent.id` と混在した alias は migration error として
 拒否する。`session_delegate_brief` は dispatch 先の session を自ら作るため、`agent` selector は
 `runtime`/`model` の新規 worker 専用であり、`agent.id` branch を schema に載せず daemon も受理しない。
@@ -1331,11 +1193,10 @@ server lifetime 中は変わらないため、設定、PATH、CLI install/uninst
 作成と dispatch は失敗時に巻き戻る 1 つの operation として扱う（正本は
 [7. MCP の delegation の atomicity](07-mcp.md#delegation-の-atomicity)）。
 
-既存の `session_delegate_brief`、`session_delegate_issue`、`issue_to_prompt`、`session_prompt`、
-`session_complete` は引き続き利用できる。
+既存の `session_delegate_brief`、`session_prompt`、`session_complete` は引き続き利用できる。
 
 `crates/cli` の `mcp/` は、エージェント向けの tool 面（IF）を持つ。CLI が人間向けの
-`usagi <cmd>` を提供するのに対し、MCP は issue / memory / session / agent / terminal の tool を JSON-RPC で
+`usagi <cmd>` を提供するのに対し、MCP は memory / session / agent / terminal の tool を JSON-RPC で
 公開する（設計は [proposals/01-entry-surfaces.md](proposals/01-entry-surfaces.md)）。CLI の
 `Run` トレイトに対応する metadata の一様化を `Tool` と `ToolDescriptor` で行う。
 
@@ -1347,16 +1208,16 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
                                      ┌─────────────────────────────────┴──────────────────────────────┐
                                      ▼                                                                ▼
                          Store route ─► Tool::call ─► core store usecase       daemon route ─► core IPC client
-                         （issue / memory）                                  （session / agent / terminal）
+                         （memory）                                          （session / agent / terminal）
 ```
 
 - **`Tool` トレイト**: `name` / `description` / `input_schema`（`tools/list` に載る IF）と
-  `call`（Store route の実行）を持つ。`call` は既定が未実装スタブで、issue / memory の store tool だけが
-  core usecase を呼ぶ実装へオーバーライドする。tool は **系統ごとにファイル**（`mcp/tools/issue.rs` /
-  `memory.rs` / `session.rs` / `terminal.rs`）に置き、各 tool が 1 struct として実装する。
+  `call`（Store route の実行）を持つ。`call` は既定が未実装スタブで、memory の store tool だけが
+  core usecase を呼ぶ実装へオーバーライドする。tool は **系統ごとにファイル**（`mcp/tools/memory.rs` /
+  `session.rs` / `terminal.rs`）に置き、各 tool が 1 struct として実装する。
 - **レジストリと dispatch**: 各系統の `tools()` が tool struct と typed `ToolRoute` を同じ式で
   `ToolDescriptor` にし、`tools::registry()` は descriptor を連結する。tool 名を再解釈する文字列 `match` は持たず、
-  route を付けていない `Box<dyn Tool>` は registry の要素型になれない。MCP serve は Global / Workspace の実効設定で issue / memory 系統を filter した同じ集合を
+  route を付けていない `Box<dyn Tool>` は registry の要素型になれない。MCP serve は Global / Workspace の実効設定で memory 系統を filter した同じ集合を
   接続単位の `ServerTools` に実効 schema とともに保持して listing と call に使う。name lookup と引数の schema validation の後、
   descriptor の route に従って Store または daemon IPC へ送る。設定読込・runtime snapshot の取得は共通の接続初期化経路に集約する。
   全 tool に一様な入口を与えるが、全 tool が `Tool::call` を通るわけではない。
@@ -1365,7 +1226,7 @@ stdin ─► serve ─► handle_line ─► respond(method) ┬─ initialize �
   応答エンベロープの整形は `mcp/protocol.rs` に集約する。`initialize` と `tools/list` は実際に
   応答し、`tools/call` は tool を名前で引いて store または daemon の実行経路へ送る。tool または
   daemon の失敗は JSON-RPC エラーに変換する。配布 version は合成ルートが `serve` に注入する。
-- issue / memory の Store route は core store usecase を直接呼ぶ。session / agent / terminal tool は
+- memory の Store route は core store usecase を直接呼ぶ。session / agent / terminal tool は
   core IPC client を介して daemon の usecase へ委譲する。共有ロジックは
   `usagi-core`、daemon-owned effect は `usagi-daemon` に置く（[入口面 CLI のコマンド dispatch](#入口面-cli-のコマンド-dispatch)）。
 

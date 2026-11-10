@@ -856,7 +856,7 @@ impl SessionCommandPortFactory for SnapshotSessionPortFactory {
 }
 
 fn recent(name: &str) -> Recent {
-    Recent::Workspace(WorkspaceOverview::new(ws(name), 1, 0, 0))
+    Recent::Workspace(WorkspaceOverview::new(ws(name), 1, 0))
 }
 
 fn run(
@@ -2994,10 +2994,9 @@ impl SettingsPort for RecordingSettingsPort {
 
 // Focus the dirty Save row from Global Config: cycle the theme, then step down to
 // Save (Theme → Icons → Modal mode → Terminal PTYs → Environment → Agent model →
-// Team → Issue → Memory → PR → Save).
-const CONFIG_SAVE_KEYS: [Key; 12] = [
+// Team → Memory → PR → Save).
+const CONFIG_SAVE_KEYS: [Key; 11] = [
     Key::Right,
-    Key::Down,
     Key::Down,
     Key::Down,
     Key::Down,
@@ -3011,10 +3010,9 @@ const CONFIG_SAVE_KEYS: [Key; 12] = [
 ];
 
 // Workspace Config starts on Agent and contains Agent → env → Base branch →
-// Session setup → Team → Issue → Memory → Save.
-const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 9] = [
+// Session setup → Team → Memory → Save.
+const WORKSPACE_CONFIG_SAVE_KEYS: [Key; 8] = [
     Key::Right,
-    Key::Down,
     Key::Down,
     Key::Down,
     Key::Down,
@@ -3570,7 +3568,7 @@ impl super::ControllerBackendFactory for CountingBackendFactory {
 fn recent_at(name: &str, updated_at: DateTime<Utc>) -> Recent {
     let mut workspace = ws(name);
     workspace.updated_at = updated_at;
-    Recent::Workspace(WorkspaceOverview::new(workspace, 1, 0, 0))
+    Recent::Workspace(WorkspaceOverview::new(workspace, 1, 0))
 }
 
 fn has_director_drawer(frames: &[Vec<String>]) -> bool {

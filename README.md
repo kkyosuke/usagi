@@ -49,7 +49,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 | session・タブ・操作の場所を探すのに時間がかかる | [横断コマンドパレット](document/03-tui.md#横断コマンドパレット) で検索して開く |
 | UI を閉じると長い処理まで止まる | daemon が process を所有し、再接続できる |
 | 委譲先や PR までの流れが分断される | session、Agent、差分、PR、note を同じ作業単位で扱う |
-| 過去の Issue や Memory の本文を探したい | [Issue・Memory 検索](document/03-tui.md#issue-と-memory-の検索) で検索・閲覧できる |
+| 過去の Memory の本文を探したい | [Memory 検索](document/03-tui.md#memory-の検索) で検索・閲覧できる |
 | 調査結果や確認用の HTML・画像を探しづらい | session 行の [Artifacts アイコンと件数](document/03-tui.md#artifacts)から閲覧でき、取得失敗も見分けられる。`artifact` の横断一覧はプロジェクト直下の成果物も表示し、削除後の保管済み成果物も検索できる |
 
 `Ctrl-O` → `Ctrl-F` で統合検索を開き、`Tab` で検索対象を切り替えられます。
@@ -173,7 +173,7 @@ Agent は起動前に CLI の認証状態を確認し、確認失敗の理由を
 | Director | 会話ごとの委譲先 session を確認し、root Agent と作業を進める画面。親 session の削除後も所属を保持し、長い組織図はスクロールでき、初期化失敗や削除中の状態も確認できます（[操作方法](document/03-tui.md#指示モードdirector-mode)） |
 | [Team](document/10-session-roles.md#catalog) | `none`（なし）/ `hierarchical`（階層型）/ `flat`（フラット）/ `pipeline`（パイプライン）から Agent の委譲構造を選ぶ設定 |
 
-Agent は組み込みの MCP server を通じて session の作成・観測・委譲、issue、memory などを扱えます。
+Agent は組み込みの MCP server を通じて session の作成・観測・委譲、memory などを扱えます。
 詳しい操作と authority の境界は [MCP サーバ](document/07-mcp.md) を参照してください。
 
 ## ドキュメント
