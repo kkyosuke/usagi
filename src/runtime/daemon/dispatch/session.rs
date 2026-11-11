@@ -198,8 +198,9 @@ pub(super) fn dispatch_session_action(
                 .lock()
                 .map_err(|_| SessionRuntimeError::Storage)?
                 .session_conversations()?;
-            let runtime = agent.lock().map_err(|_| SessionRuntimeError::Storage)?;
-            let agent_observations = runtime
+            let agent_observations = agent
+                .lock()
+                .map_err(|_| SessionRuntimeError::Storage)?
                 .session_observations(workspace)
                 .map_err(|_| SessionRuntimeError::Storage)?;
             let runtime_observation = |id, names: &_, parents: &_| {

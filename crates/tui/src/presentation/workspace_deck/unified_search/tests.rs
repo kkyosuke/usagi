@@ -525,4 +525,8 @@ fn unified_search_uses_real_leader_and_backtab_input_classification() {
         deck.handle_overlay_key(&key);
     }
     assert_eq!(search(&deck).scope, Scope::Artifact);
+    assert_eq!(
+        deck.handle_overlay_key(&Key::Live(LiveTerminalAction::OpenUnifiedSearch)),
+        OverlayIntent::Stay
+    );
 }

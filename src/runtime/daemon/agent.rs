@@ -1095,7 +1095,9 @@ pub(super) fn recover_pending_daemon_agents_once(
         &mut pending,
         current_integration,
     )?;
-    clear_pending_daemon_agent_restart(data_dir, &pending.operation_id)?;
+    if pending.agents.iter().all(|item| item.completed) {
+        clear_pending_daemon_agent_restart(data_dir, &pending.operation_id)?;
+    }
     Ok(Some(restored))
 }
 

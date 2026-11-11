@@ -242,8 +242,10 @@ entry画面の `Ctrl-C` / `Ctrl-Q` はTUIを終了する。workspace上のConfig
 | Pull Request | `Ctrl-X` | 選択PRをdismiss |
 | Pull Request | `Enter` / `Esc` | browserで開く / close |
 | Preview file finder | 文字 / paste / `Backspace` | fuzzy filter編集 |
-| Preview file finder | `↑` / `↓` / `Enter` / `Esc` | file選択 / preview / close |
+| Preview file finder | `←` / `→` | file group（All / Changed / Tracked）切替 |
+| Preview file finder | `↑` / `↓` / `Enter` / `Esc` | file選択 / preview（Artifact一覧では外部表示、Tabで本文） / close |
 | Preview document | `↑` / `↓` / `Esc` | scroll / file一覧へ戻る |
+| Preview document | `/`、`n` / `N`、`l`、`w`、`Tab` | 本文検索開始、次 / 前の一致、行番号切替、折り返し切替、Artifact外部表示 |
 | Scratchpad | 文字 / paste | メモ本文を編集（複数行 paste 対応） |
 | Scratchpad | 矢印 / `Home` | メモのカーソル移動 |
 | Scratchpad | `Enter` | 改行。読み込み失敗時は再試行 |
