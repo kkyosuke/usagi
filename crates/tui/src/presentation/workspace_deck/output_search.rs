@@ -134,6 +134,7 @@ impl WorkspaceDeck {
             return false;
         }
         (search.hits, search.status) = collect_hits(&self.slots, search.input.value(), responses);
+        search.cursor = search.cursor.min(search.hits.len().saturating_sub(1));
         true
     }
 }

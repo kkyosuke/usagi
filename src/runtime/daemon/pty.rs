@@ -313,6 +313,7 @@ impl PtySpawner for AgentPty {
             }
         };
         let Some(pid) = pty.process_id() else {
+            let _ = pty.terminate_reap();
             ErrorLog::record(&daemon_pty_failure_entry(
                 "Agent",
                 "observe-child",
@@ -324,6 +325,7 @@ impl PtySpawner for AgentPty {
         let reader = match pty.reader() {
             Ok(reader) => reader,
             Err(error) => {
+                let _ = pty.terminate_reap();
                 ErrorLog::record(&daemon_pty_failure_entry(
                     "Agent",
                     "open-reader",
@@ -526,6 +528,7 @@ impl GenericPtySpawner for DaemonPty {
             }
         };
         let Some(pid) = pty.process_id() else {
+            let _ = pty.terminate_reap();
             ErrorLog::record(&daemon_pty_failure_entry(
                 "terminal",
                 "observe-child",
@@ -537,6 +540,7 @@ impl GenericPtySpawner for DaemonPty {
         let reader = match pty.reader() {
             Ok(reader) => reader,
             Err(error) => {
+                let _ = pty.terminate_reap();
                 ErrorLog::record(&daemon_pty_failure_entry(
                     "terminal",
                     "open-reader",

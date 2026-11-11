@@ -391,12 +391,29 @@ impl PrivateLockWait {
     };
 }
 
+#[derive(Debug)]
+pub(super) struct LockedPrivateFile(pub(super) std::fs::File);
+
+impl std::ops::Deref for LockedPrivateFile {
+    type Target = std::fs::File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for LockedPrivateFile {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 pub(super) fn lock_private_exclusive(
     path: &Path,
     label: &str,
     mode_policy: PrivateLockModePolicy,
     wait: PrivateLockWait,
-) -> std::io::Result<std::fs::File> {
+) -> std::io::Result<LockedPrivateFile> {
     let file = open_private_lock(path, label, mode_policy)?;
     let deadline = Instant::now() + wait.limit;
     loop {
@@ -411,10 +428,11 @@ pub(super) fn lock_private_exclusive(
             }
         }
     }
+    let locked = LockedPrivateFile(file);
     #[cfg(test)]
     wait_private_lock_after_flock_barrier(path);
-    verify_private_lock_path(path, &file, label)?;
-    Ok(file)
+    verify_private_lock_path(path, &locked, label)?;
+    Ok(locked)
 }
 
 pub(super) struct ExactProcessControl;
@@ -450,6 +468,14 @@ impl LivenessProbe for ExactProcessControl {
 pub(super) struct FileInstanceLock {
     pub(super) path: PathBuf,
     pub(super) held: RefCell<Option<std::fs::File>>,
+}
+
+impl Drop for FileInstanceLock {
+    fn drop(&mut self) {
+        if let Some(file) = self.held.get_mut().take() {
+            let _ = FileExt::unlock(&file);
+        }
+    }
 }
 
 /// The descriptor identity behind the singleton guard. Normally this is the
@@ -511,20 +537,32 @@ pub(super) struct FileWorkspaceFence {
 }
 
 impl FileWorkspaceFence {
-    /// Give the workspace back by dropping the locked descriptor.
+    /// Give the workspace back by unlocking and dropping the locked descriptor.
     ///
-    /// `flock` is released with the last descriptor naming the node, so this is
-    /// the whole of it. The owner pid line stays behind as the fence node's
-    /// contents; the next owner truncates and rewrites it when it acquires.
+    /// Explicit unlock ensures a concurrent fork that inherited the open file
+    /// description before exec cannot prolong the lock. The owner pid line
+    /// stays behind as the fence node's contents; the next owner truncates and
+    /// rewrites it when it acquires.
     ///
     /// Returns whether this call was the one that released it, so a repeated
     /// sweep neither re-reports nor fails.
     pub(super) fn release(&self) -> bool {
-        self.held
+        let Some(file) = self
+            .held
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
-            .is_some()
+        else {
+            return false;
+        };
+        let _ = FileExt::unlock(&file);
+        true
+    }
+}
+
+impl Drop for FileWorkspaceFence {
+    fn drop(&mut self) {
+        let _ = self.release();
     }
 }
 
@@ -662,11 +700,13 @@ impl WorkspaceFence for FileWorkspaceFence {
                 Ok(()) => {
                     #[cfg(test)]
                     wait_private_lock_after_flock_barrier(&self.path);
-                    verify_private_lock_path(&self.path, &file, "daemon workspace fence")?;
-                    // Publish the owner hint immediately, so the window in which a
-                    // refused start could read the previous owner's line is only
-                    // as long as this write.
-                    write_owner_hint(&file, self.pid)?;
+                    if let Err(error) =
+                        verify_private_lock_path(&self.path, &file, "daemon workspace fence")
+                            .and_then(|()| write_owner_hint(&file, self.pid))
+                    {
+                        let _ = FileExt::unlock(&file);
+                        return Err(error);
+                    }
                     *self
                         .held
                         .lock()
@@ -708,7 +748,12 @@ impl InstanceLock for FileInstanceLock {
                 Ok(()) => {
                     #[cfg(test)]
                     wait_private_lock_after_flock_barrier(&self.path);
-                    verify_private_lock_path(&self.path, &file, "daemon instance lock")?;
+                    if let Err(error) =
+                        verify_private_lock_path(&self.path, &file, "daemon instance lock")
+                    {
+                        let _ = FileExt::unlock(&file);
+                        return Err(error);
+                    }
                     *self.held.borrow_mut() = Some(file);
                     return Ok(true);
                 }
@@ -784,7 +829,7 @@ pub(super) fn request_replacement_while_locked(
 pub(super) fn acquire_lifecycle_lock_io_within(
     data_dir: &Path,
     wait: PrivateLockWait,
-) -> std::io::Result<std::fs::File> {
+) -> std::io::Result<LockedPrivateFile> {
     (|| {
         ensure_private_dir_all(data_dir)?;
         let path = data_dir.join("daemon").join("lifecycle.lock");

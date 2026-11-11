@@ -1383,10 +1383,9 @@ fn workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
 /// production patience out adds seconds per assertion without changing the
 /// answer. The acquiring calls keep the real constant.
 fn impatient_workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
-    FileWorkspaceFence {
-        patience: Duration::ZERO,
-        ..workspace_fence(workspace, pid)
-    }
+    let mut fence = workspace_fence(workspace, pid);
+    fence.patience = Duration::ZERO;
+    fence
 }
 
 #[test]
@@ -8038,6 +8037,13 @@ fn session_git_policy_anchors_authority_to_the_registered_worktree() {
             .contains(&common.join("refs/heads/main"))
     );
     assert!(!policy.writable_roots.contains(&common.join("config")));
+
+    std::fs::remove_dir_all(common.join("refs")).unwrap();
+    std::fs::remove_dir_all(common.join("logs")).unwrap();
+    let recreated_policy = session_git_policy(&fixture.path().join("repo"), &worktree)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recreated_policy.writable_roots, policy.writable_roots);
 
     let standalone = tempfile::tempdir_in("target").unwrap();
     std::fs::create_dir(standalone.path().join(".git")).unwrap();

@@ -910,7 +910,6 @@ pub(super) enum UserDecisionDispatchError {
     Transport(usagi_core::infrastructure::store::user_decision::UserDecisionPageError),
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecisionDispatchError {
     fn from(error: usagi_core::domain::user_decision::UserDecisionError) -> Self {
         Self::Decision(error)
@@ -1334,7 +1333,6 @@ pub(super) fn dispatch_dispatch(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 pub(super) fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<SessionId> {
     session_lineage_by_name(snapshot, name).map(|(session_id, _)| session_id)
 }
@@ -1457,6 +1455,12 @@ pub(super) fn dispatch_rollover(
                             reason: error.message,
                         }
                     })?;
+                let all_workspaces_adopted = planned.agents.iter().all(|item| {
+                    bound
+                        .workspaces
+                        .workspace(item.runtime.terminal.workspace_id)
+                        .is_some()
+                });
                 let workspace_root = planned
                     .agents
                     .first()
@@ -1466,7 +1470,9 @@ pub(super) fn dispatch_rollover(
                             .workspace(item.runtime.terminal.workspace_id)
                     })
                     .map(|tenant| tenant.root().to_path_buf());
-                if !planned.agents.is_empty() && workspace_root.is_none() {
+                if !planned.agents.is_empty()
+                    && (!all_workspaces_adopted || workspace_root.is_none())
+                {
                     return Err(
                         usagi_daemon::usecase::authority::routing::RolloverRefusal::AgentRestartRefused {
                             reason: "live Agent workspace is no longer adopted; no Agent was stopped"
@@ -1570,31 +1576,35 @@ pub(super) fn dispatch_rollover(
             // recovery if the handoff failed before W2. The durable transaction and
             // its background worker are the second safety net when this request or
             // its client disappears.
-            let workspace_id = pending.agents[0].agent.target.workspace_id;
             let mut rollback = pending.clone();
-            let restored = bound
-                .workspaces
-                .workspace(workspace_id)
-                .ok_or_else(|| std::io::Error::other("Agent workspace is unavailable"))
-                .and_then(|tenant| {
-                    let recovery_bound = ConnectionWorkspace {
-                        tenant,
-                        workspaces: Arc::clone(&bound.workspaces),
-                    };
-                    restore_pending_daemon_agents(
-                        data_dir,
-                        agent,
-                        &recovery_bound.scope_resolver(),
-                        &mut rollback,
-                        false,
-                    )
+            let all_adopted = rollback
+                .agents
+                .iter()
+                .filter(|item| !item.completed)
+                .all(|item| {
+                    bound
+                        .workspaces
+                        .workspace(item.agent.target.workspace_id)
+                        .is_some()
                 });
+            let restored = if all_adopted {
+                restore_pending_daemon_agents(
+                    data_dir,
+                    agent,
+                    &bound.scope_resolver(),
+                    &mut rollback,
+                    false,
+                )
+            } else {
+                Err(std::io::Error::other("Agent workspace is unavailable"))
+            };
             if let Err(error) = restored {
                 ErrorLog::record(&format!(
                     "daemon rollover pre-commit Agent rollback failed: {error}"
                 ));
-            } else if let Err(error) =
-                clear_pending_daemon_agent_restart(data_dir, &pending.operation_id)
+            } else if rollback.agents.iter().all(|item| item.completed)
+                && let Err(error) =
+                    clear_pending_daemon_agent_restart(data_dir, &pending.operation_id)
             {
                 ErrorLog::record(&format!(
                     "daemon rollover Agent rollback marker cleanup deferred: {error}"
@@ -1751,7 +1761,6 @@ pub(super) fn dispatch_session(
     session_response_envelope(action, result, request_id, hello)
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 pub(super) fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
     body.get("caller_context")
         .and_then(|context| context.get("credential"))
@@ -1984,7 +1993,6 @@ pub(super) fn session_response_envelope(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 pub(super) fn exact_merged_pr_head(
     inventory: Option<usagi_core::infrastructure::ipc::PrSnapshot>,
     branch_head: Option<String>,
@@ -2947,6 +2955,75 @@ mod tests {
         assert_eq!(
             session::session_organization(child, &names, &missing),
             (None, 1, vec!["Director".to_owned(), "child".to_owned()],)
+        );
+    }
+
+    #[test]
+    fn pure_dispatch_helpers_cover_session_credential_pr_and_decision_conversions() {
+        use usagi_core::domain::pr_inventory::{PrEntry, PrState, canonicalize};
+        use usagi_core::domain::user_decision::UserDecisionError;
+        use usagi_core::infrastructure::ipc::PrSnapshot;
+
+        let converted = UserDecisionDispatchError::from(UserDecisionError::Terminal);
+        assert!(matches!(
+            converted,
+            UserDecisionDispatchError::Decision(UserDecisionError::Terminal)
+        ));
+
+        let session_id = SessionId::new();
+        let snapshot = serde_json::json!({
+            "sessions": [
+                {"name": "alpha", "lifecycle": "Available", "session_id": session_id},
+            ]
+        });
+        assert_eq!(session_id_by_name(&snapshot, "alpha"), None);
+        let snapshot = serde_json::json!({
+            "sessions": [
+                {"name": "alpha", "lifecycle": "available", "session_id": session_id},
+            ]
+        });
+        assert_eq!(session_id_by_name(&snapshot, "alpha"), Some(session_id));
+        assert_eq!(session_id_by_name(&snapshot, "missing"), None);
+
+        assert_eq!(
+            request_mcp_credential(&serde_json::json!({
+                "caller_context": {"credential": "from-context"},
+                "payload": {"_caller_credential": "from-payload"},
+            })),
+            Some("from-context")
+        );
+        assert_eq!(
+            request_mcp_credential(&serde_json::json!({
+                "payload": {"_caller_credential": "from-payload"},
+            })),
+            Some("from-payload")
+        );
+        assert_eq!(request_mcp_credential(&serde_json::json!({})), None);
+
+        let entry = |state: PrState, head_oid: Option<&str>| {
+            let mut pr =
+                PrEntry::new(canonicalize("https://github.com/example/repo/pull/1").unwrap());
+            pr.state = state;
+            pr.head_oid = head_oid.map(str::to_owned);
+            pr
+        };
+        assert_eq!(exact_merged_pr_head(None, Some("abc".to_owned())), None);
+        let pr_snapshot = PrSnapshot {
+            session_id,
+            revision: 1,
+            entries: vec![
+                entry(PrState::Open, Some("abc")),
+                entry(PrState::Merged, Some("def")),
+            ],
+        };
+        assert_eq!(exact_merged_pr_head(Some(pr_snapshot.clone()), None), None);
+        assert_eq!(
+            exact_merged_pr_head(Some(pr_snapshot.clone()), Some("abc".to_owned())),
+            None
+        );
+        assert_eq!(
+            exact_merged_pr_head(Some(pr_snapshot), Some("def".to_owned())),
+            Some("def".to_owned())
         );
     }
 }

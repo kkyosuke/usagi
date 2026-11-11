@@ -13,6 +13,25 @@ pub(super) fn validate_owned_directory(path: &Path) -> Result<(), InvalidOwnedDi
     validate_owned_path(path, false)
 }
 
+/// Creates missing child directories one component at a time and verifies that
+/// the base directory and every child remain caller-owned, non-symlink
+/// directories.
+pub(super) fn ensure_owned_subdirectories(
+    base: &Path,
+    relatives: &[&str],
+) -> Result<(), InvalidOwnedDirectory> {
+    validate_owned_directory(base)?;
+    for relative in relatives {
+        let mut directory = base.to_path_buf();
+        for component in Path::new(relative).components() {
+            directory.push(component);
+            let _ = std::fs::create_dir(&directory);
+            validate_owned_directory(&directory)?;
+        }
+    }
+    Ok(())
+}
+
 /// Drops group and other permission bits from existing directories owned by this
 /// user. Absent paths, symlinks, and foreign owners are left unchanged so the
 /// caller's exact private-chain check still rejects them.

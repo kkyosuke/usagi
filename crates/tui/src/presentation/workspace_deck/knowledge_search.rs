@@ -174,6 +174,7 @@ impl WorkspaceDeck {
         match response {
             Response::Search(results) if search.document.is_none() => {
                 search.results = results;
+                search.cursor = search.cursor.min(search.rows().len().saturating_sub(1));
                 search.status = search.summary();
             }
             Response::Read(result) if search.document.is_some() => match result {

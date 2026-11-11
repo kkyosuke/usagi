@@ -46,6 +46,8 @@ impl Run for GuardWorkspace {
     }
 }
 
+const MAX_HOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
+
 /// `PreToolUse` payload を `input` から読み、ツールの対象がエージェントの worktree を出るときに
 /// deny 判定を `output` に書く。read / write を注入することで、プロセスの実 stdin / stdout なしに
 /// 判定全体をユニットテストできる（合成ルートが実 stdin / stdout を束ねる）。
@@ -55,8 +57,14 @@ impl Run for GuardWorkspace {
 /// `output` への書き込みに失敗した場合、そのエラーを返す。
 pub fn evaluate(input: &mut dyn Read, output: &mut dyn Write) -> io::Result<()> {
     let mut raw = String::new();
-    if let Err(error) = input.read_to_string(&mut raw) {
+    if let Err(error) = input
+        .take((MAX_HOOK_PAYLOAD_BYTES as u64) + 1)
+        .read_to_string(&mut raw)
+    {
         return write_denial(output, &format!("guard payload could not be read: {error}"));
+    }
+    if raw.len() > MAX_HOOK_PAYLOAD_BYTES {
+        return write_denial(output, "guard payload exceeds maximum size");
     }
     if let Some(reason) = deny_reason(&raw) {
         return write_denial(output, &reason);
@@ -125,8 +133,8 @@ fn session_worktree_root(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// `tool_input` の値のうち、`matches` に当たる key が運ぶ空でない文字列。書き込み先候補と
-/// command 候補はどちらもこの形で拾い、1 つでも危険なら拒否する（配列や非文字列は拾えないため
-/// 候補ゼロ＝fail-closed の拒否に落ちる）。
+/// command 候補はどちらもこの形で拾い、1 つでも危険または非文字列・空白のみなら拒否する
+/// （配列や非文字列が混ざった場合も候補ゼロ＝fail-closed の拒否に落ちる）。
 fn string_values(
     input: &serde_json::Map<String, serde_json::Value>,
     matches: fn(&str) -> bool,
@@ -134,9 +142,9 @@ fn string_values(
     input
         .iter()
         .filter(|(key, _)| matches(key))
-        .filter_map(|(_, value)| value.as_str())
-        .filter(|value| !value.trim().is_empty())
-        .collect()
+        .map(|(_, value)| value.as_str().filter(|value| !value.trim().is_empty()))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 /// 書き込み先候補。`Write` の `file_path`、`NotebookEdit` の `notebook_path`、未知ツールの
@@ -541,7 +549,7 @@ mod tests {
     fn root_mode_checks_commands_from_an_unknown_runner_not_just_bash() {
         // `Bash` が改名されても root の read-only allowlist を素通りさせない。command を運ぶ
         // key を持つ未知のツールは shell として検査する。
-        let (temp, _root, _worktree) = layout();
+        let (temp, _root, worktree) = layout();
         let mutating = payload(
             temp.path(),
             "FutureRunner",
@@ -561,9 +569,43 @@ mod tests {
             serde_json::json!({"cmd": "git --no-pager --no-optional-locks status", "script": "rm -rf x"}),
         );
         assert!(deny_reason(&mixed).unwrap().contains("rm -rf x"));
+        // 有効な key と非文字列/空白 key が混在する場合も素通りさせず拒否する。
+        let mixed_non_string_cmd = payload(
+            temp.path(),
+            "FutureRunner",
+            serde_json::json!({"cmd": "git --no-pager --no-optional-locks status", "script": ["rm -rf x"]}),
+        );
+        assert!(
+            deny_reason(&mixed_non_string_cmd)
+                .unwrap()
+                .contains("has no command")
+        );
+        let mixed_non_string_path = payload(
+            &worktree,
+            "FutureMutator",
+            serde_json::json!({
+                "file_path": worktree.join("src/main.rs"),
+                "paths": [temp.path().join("outside.rs")]
+            }),
+        );
+        assert!(
+            deny_reason(&mixed_non_string_path)
+                .unwrap()
+                .contains("names no usable file path")
+        );
         // command key はあるが使える値が無い場合も拒否する。
         let empty = payload(temp.path(), "FutureRunner", serde_json::json!({"cmd": 7}));
         assert!(deny_reason(&empty).unwrap().contains("has no command"));
+    }
+
+    #[test]
+    fn denies_an_oversized_payload_without_reading_unbounded_input() {
+        let oversized = "x".repeat(MAX_HOOK_PAYLOAD_BYTES + 16);
+        let mut out = Vec::new();
+        evaluate(&mut Cursor::new(oversized), &mut out).unwrap();
+        let written = String::from_utf8(out).unwrap();
+        assert!(written.contains("guard payload exceeds maximum size"));
+        assert!(written.contains("\"permissionDecision\":\"deny\""));
     }
 
     #[test]
