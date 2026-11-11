@@ -56,7 +56,13 @@ fn git_timeout(args: &[&str]) -> Option<Duration> {
     let observation = args.first().is_some_and(|argument| {
         matches!(
             *argument,
-            "status" | "rev-parse" | "merge-base" | "symbolic-ref" | "rev-list"
+            "status"
+                | "rev-parse"
+                | "merge-base"
+                | "symbolic-ref"
+                | "rev-list"
+                | "for-each-ref"
+                | "show-ref"
         )
     }) || args.starts_with(&["worktree", "list"]);
     Some(Duration::from_secs(if observation { 2 } else { 30 }))
@@ -775,6 +781,14 @@ mod bounded_git_tests {
                 "base",
                 "head"
             ]),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            git_timeout(&["for-each-ref", "refs/heads"]),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            git_timeout(&["show-ref", "--verify", "refs/heads/main"]),
             Some(Duration::from_secs(2))
         );
         assert_eq!(

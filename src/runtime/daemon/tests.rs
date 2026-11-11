@@ -8038,6 +8038,13 @@ fn session_git_policy_anchors_authority_to_the_registered_worktree() {
     );
     assert!(!policy.writable_roots.contains(&common.join("config")));
 
+    std::fs::remove_dir_all(common.join("refs")).unwrap();
+    std::fs::remove_dir_all(common.join("logs")).unwrap();
+    let recreated_policy = session_git_policy(&fixture.path().join("repo"), &worktree)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recreated_policy.writable_roots, policy.writable_roots);
+
     let standalone = tempfile::tempdir_in("target").unwrap();
     std::fs::create_dir(standalone.path().join(".git")).unwrap();
     assert!(

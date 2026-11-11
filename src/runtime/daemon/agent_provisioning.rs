@@ -5,7 +5,8 @@
 //! orchestration remain in the parent composition module.
 
 use super::secure_path::{
-    InvalidOwnedDirectory, tighten_owned_directories, validate_owned_directory, validate_owned_path,
+    InvalidOwnedDirectory, ensure_owned_subdirectories, tighten_owned_directories,
+    validate_owned_directory, validate_owned_path,
 };
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
@@ -615,14 +616,11 @@ pub(super) struct SessionGitPolicy {
 ///
 /// Linked worktrees keep their index, `HEAD`, commit message and `HEAD` reflog
 /// in a worktree-private administrative directory, but new objects and branch
-/// refs live in the repository's common directory. Granting only the checkout
-/// therefore makes file edits work while every commit fails with `EPERM`.
-/// Granting the whole common directory would also expose `main`, remotes and
-/// repository configuration, so the session receives only its private admin
-/// directory, the shared content-addressed object store, and the `usagi/*`
-/// branch ref / reflog namespaces. The mutable `.git` pointer is not authority:
-/// both its common directory and its private-admin backlink must match the
-/// daemon-selected workspace/worktree pair before any external path is granted.
+/// refs live in the repository's common directory. The session receives only
+/// its private admin directory, the shared content-addressed object store, and
+/// the `usagi/*` branch ref / reflog namespaces. Both its common directory and
+/// its private-admin backlink must match the daemon-selected workspace/worktree
+/// pair before any external path is granted.
 pub(super) fn session_git_policy(
     workspace_root: &Path,
     worktree: &Path,
@@ -638,10 +636,6 @@ pub(super) fn session_git_policy(
         }
         Err(_) => return Err(()),
     };
-    // A standalone repository needs no external Git grant: its administrative
-    // directory is already contained by the writable checkout. Accept it only
-    // when the selected session directory is the registered workspace itself;
-    // a nested or foreign repository must not become additional authority.
     if !marker_metadata.file_type().is_file() {
         let workspace_root = workspace_root.canonicalize().map_err(|_| ())?;
         let worktree = worktree.canonicalize().map_err(|_| ())?;
@@ -665,7 +659,8 @@ pub(super) fn session_git_policy(
     if backlink != marker.canonicalize().map_err(|_| ())? {
         return Err(());
     }
-
+    let subdirs = ["refs/heads/usagi", "logs/refs/heads/usagi"];
+    ensure_owned_subdirectories(&common, &subdirs).map_err(|_| ())?;
     let writable_roots = vec![
         git_dir,
         common.join("objects"),
