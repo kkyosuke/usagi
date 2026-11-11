@@ -1288,12 +1288,28 @@ fn assert_shipping_agy_workspace(mcp: &McpHarness, capture: &FixtureArgv) {
         .filter_map(|(index, argument)| (argument == "--add-dir").then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(positions.len(), 1, "managed AGY workspace flag changed");
-    let integration = Path::new(
+    let alias = Path::new(
         capture
             .arguments
             .get(positions[0] + 1)
             .expect("managed AGY workspace path is missing"),
     );
+    // AGY runs commands in the first workspace in path order, so the launch
+    // adds the private integration through an alias that sorts after the
+    // worktree.
+    assert_eq!(
+        alias.parent().map(|parent| parent.canonicalize().unwrap()),
+        Some(mcp.workspace().canonicalize().unwrap().join(".usagi")),
+        "managed AGY workspace {} must be the workspace alias",
+        alias.display()
+    );
+    assert!(
+        alias
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("workspace-agy-"))
+    );
+    let integration = &fs::read_link(alias).expect("the AGY workspace alias is a symlink");
     let relative = integration
         .strip_prefix(
             mcp.data_dir()
