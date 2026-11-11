@@ -558,7 +558,7 @@ pub const AGENT_CLI_NOT_INSTALLED: &str = "agent CLI is not installed; install i
 /// Safe answer when the provider's status command reports it is not ready,
 /// normally because it is signed out.
 pub const AGENT_CLI_SIGNED_OUT: &str =
-    "agent CLI is not signed in; sign in with the CLI (or open it in an Agent pane), then retry";
+    "agent CLI is not signed in; sign in with the CLI, then retry";
 /// Safe answer when the status command did not finish or its output was unusable.
 pub const AGENT_CLI_NOT_RESPONDING: &str =
     "agent CLI did not answer its status check; check that the CLI runs, then retry";

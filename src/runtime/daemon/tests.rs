@@ -663,22 +663,10 @@ fn readiness_separates_a_missing_signed_out_and_unresponsive_cli() {
 }
 
 #[test]
-fn only_a_hand_opened_pane_without_a_prompt_admits_a_signed_out_cli() {
+fn only_a_hand_opened_pane_admits_a_signed_out_cli() {
     use usagi_daemon::usecase::agent_ipc::{
         AGENT_CLI_NOT_INSTALLED, AGENT_CLI_NOT_RESPONDING, AGENT_CLI_SIGNED_OUT,
     };
-    for (watched, delivers_prompt, policy) in [
-        (true, false, ReadinessPolicy::Interactive),
-        (true, true, ReadinessPolicy::Required),
-        (false, false, ReadinessPolicy::Required),
-        (false, true, ReadinessPolicy::Required),
-    ] {
-        assert_eq!(
-            ReadinessPolicy::for_admission(watched, delivers_prompt),
-            policy,
-            "watched={watched}, delivers_prompt={delivers_prompt}"
-        );
-    }
     for (readiness, interactive, required) in [
         (AgentReadiness::Ready, None, None),
         (
@@ -703,8 +691,9 @@ fn only_a_hand_opened_pane_without_a_prompt_admits_a_signed_out_cli() {
                 expected,
                 "{readiness:?} under {policy:?}"
             );
-            if let Err(error) = verdict {
-                assert_eq!(error.code, ErrorCode::Unavailable);
+            match verdict {
+                Ok(admitted) => assert_eq!(admitted, readiness),
+                Err(error) => assert_eq!(error.code, ErrorCode::Unavailable),
             }
         }
     }

@@ -973,6 +973,7 @@ pub(super) fn restore_pending_daemon_agents(
         drop(owner);
         // Nobody watches a restored pane during daemon restart recovery.
         run_agent_readiness(agent, preflight.as_ref(), ReadinessPolicy::Required)
+            .map(drop)
             .map_err(|error| std::io::Error::other(error.message))?;
         let _environment = agent
             .prepare_environment(item.agent.target.workspace_id, preflight.is_some())

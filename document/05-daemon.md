@@ -2167,17 +2167,18 @@ probe の結果は 3 種類の失敗に分けて扱い、wire の safe message �
 | `exit_failure` | status command が失敗を返した（通常は未ログイン） | CLI で sign in して retry |
 | `timed_out` などその他 | status command が応答しない・出力が使えない | CLI が動くか確認して retry |
 
-`exit_failure` で launch を止めるかは、その launch に**画面を見ている利用者がいて、spawn 時に入力される prompt が無いか**で
-決まる。条件を満たす launch では CLI を起動し、利用者が Agent pane 内の CLI のログイン画面で sign in できるようにする。
-それ以外は spawn 前に拒否する。spawn 時に prompt が入力される launch を通すと、その prompt が CLI のログイン画面へ
-入力されて失われるためである。`spawn_failed` と応答しない probe は、どの launch でも spawn 前に拒否する。
+`exit_failure` で launch を止めるかは、その launch が **TUI で利用者が自分で開いた Agent pane か**で決まる。TUI からの
+Agent launch では CLI を起動し、利用者が Agent pane 内の CLI のログイン画面で sign in できるようにする。ただし scope に
+queue 済み prompt があれば spawn 前に拒否する。launch はその prompt を spawn 時に CLI へ入力するため、通すと prompt が
+ログイン画面へ入力されて失われる。probe は owner lock の外で走り、その間に prompt が queue されうるため、この確認は
+reservation と同じ owner lock の中で行う。resume は CLI・MCP・他の Agent からも駆動されるため、`exit_failure` を拒否する。
+`spawn_failed` と応答しない probe は、どの launch でも spawn 前に拒否する。
 
 | launch の経路 | `exit_failure` の扱い |
 |---|---|
-| TUI からの手動 launch（scope に queue 済み prompt が無い） | 起動する |
-| TUI からの手動 launch（scope に queue 済み prompt がある） | 拒否する |
-| TUI からの手動 resume（prompt なし） | 起動する |
-| MCP からの resume、headless resume、repair resume | 拒否する |
+| TUI からの Agent launch（scope に queue 済み prompt が無い） | 起動する |
+| TUI からの Agent launch（scope に queue 済み prompt がある） | 拒否する |
+| resume（手動・MCP・headless・repair のいずれも） | 拒否する |
 | `session_dispatch` / handoff による dispatch | 拒否する |
 | daemon restart 後の自動復帰 | 拒否する |
 

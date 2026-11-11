@@ -2113,25 +2113,33 @@ fn concurrent_production_admission_uses_one_generation_transition_and_spawn() {
     );
 }
 
-/// A hand-opened launch may let a signed-out CLI start only while nothing
-/// would be typed into it at spawn; a queued prompt makes the launch deliver one.
+/// A launch admitted with a signed-out CLI is refused while a prompt is queued
+/// for its scope, because the prompt would be typed into the login screen.
 #[test]
-fn a_launch_delivers_a_prompt_only_while_one_is_queued_for_its_scope() {
+fn a_signed_out_launch_is_refused_only_while_a_prompt_is_queued_for_its_scope() {
     let mut runtime = runtime();
     let launch_intent = intent(None);
     let workspace = launch_intent.workspace;
     let session = launch_intent.session.unwrap();
-    assert!(!runtime.launch_delivers_prompt(&launch_intent).unwrap());
+    runtime
+        .refuse_queued_prompt_for_signed_out_launch(&launch_intent)
+        .unwrap();
     runtime
         .prompt(workspace, Some(session), "queued work", PromptMode::Queue)
         .unwrap();
-    assert!(runtime.launch_delivers_prompt(&launch_intent).unwrap());
+    let refused = runtime
+        .refuse_queued_prompt_for_signed_out_launch(&launch_intent)
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Unavailable);
+    assert_eq!(refused.message, AGENT_CLI_SIGNED_OUT);
     // Another scope of the same workspace has nothing queued.
     let root = AgentLaunchIntent {
         session: None,
         ..launch_intent
     };
-    assert!(!runtime.launch_delivers_prompt(&root).unwrap());
+    runtime
+        .refuse_queued_prompt_for_signed_out_launch(&root)
+        .unwrap();
 }
 
 // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。

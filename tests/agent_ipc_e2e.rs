@@ -1704,6 +1704,46 @@ fn root_ipc_manual_launch_starts_a_signed_out_codex_for_in_pane_sign_in() {
     wait_for_spawns(&count, 1);
 }
 
+/// A prompt queued for the scope would be typed into a signed-out CLI's login
+/// screen, so even a hand-opened launch refuses it without spawning, and keeps
+/// the prompt for the launch after the user signs in.
+#[test]
+fn root_ipc_manual_launch_refuses_a_signed_out_codex_while_a_prompt_is_queued() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("spawn-count");
+    write_codex(&bin, &count, 1);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut client);
+    let queued = client
+        .request(DaemonRequest::Session {
+            action: SessionAction::Prompt,
+            operation_id: OperationId::new().to_string(),
+            payload: serde_json::json!({
+                "name": "agent-e2e",
+                "prompt": "must wait for sign-in",
+                "mode": "queue",
+            }),
+        })
+        .expect("a prompt is queued for the next launch");
+    let body = match queued {
+        DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body) => body,
+    };
+    assert_eq!(body["delivered_to"], "queue");
+    let refused = client
+        .request(DaemonRequest::Agent {
+            operation_id: OperationId::new().to_string(),
+            intent: launch_intent(workspace, session, Some("codex")),
+        })
+        .unwrap_err();
+    safe_readiness_error(refused, "sign in with the CLI");
+    assert!(!count.exists(), "a refused launch must not spawn the PTY");
+}
+
 #[test]
 fn hung_readiness_keeps_owner_io_available_and_probe_population_bounded() {
     let _serial = serial();
