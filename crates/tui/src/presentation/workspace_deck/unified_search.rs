@@ -151,6 +151,13 @@ impl Search {
     }
 
     pub(super) fn handle(&mut self, key: &Key, slots: &[WorkspaceSlot]) -> OverlayIntent {
+        if matches!(
+            key,
+            Key::Live(crate::usecase::terminal_input::LiveTerminalAction::OpenUnifiedSearch)
+        ) {
+            self.refresh(slots);
+            return OverlayIntent::Stay;
+        }
         if matches!(key, Key::Tab) {
             self.change_scope(slots, false);
             return OverlayIntent::Stay;
