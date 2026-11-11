@@ -313,17 +313,21 @@ pub fn owner_label(
         .get(&decision.owner.workspace_id)
         .cloned()
         .unwrap_or_else(|| {
-            format!(
-                "workspace {}",
-                &decision.owner.workspace_id.to_string()[..8]
-            )
+            let id: String = decision
+                .owner
+                .workspace_id
+                .to_string()
+                .chars()
+                .take(8)
+                .collect();
+            format!("workspace {id}")
         });
     let session = decision.owner.session_id.map_or_else(
         || "workspace root".to_owned(),
         |session| {
             owners.sessions.get(&session).cloned().unwrap_or_else(|| {
-                let id = session.to_string();
-                format!("session {}", id.get(..8).unwrap_or(&id))
+                let id: String = session.to_string().chars().take(8).collect();
+                format!("session {id}")
             })
         },
     );

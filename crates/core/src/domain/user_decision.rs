@@ -176,17 +176,28 @@ impl UserDecision {
     /// Validates the bounded, answerable request before it reaches durable
     /// storage. This is the authority; transport schemas are only guidance.
     pub fn validate_request(&self) -> Result<(), UserDecisionError> {
-        let bounded_nonempty = |value: &str, max: usize| {
-            !value.trim().is_empty() && value.len() <= max && !value.contains('\0')
+        let safe_line = |value: &str, max: usize| {
+            !value.trim().is_empty()
+                && value.len() <= max
+                && value
+                    .chars()
+                    .all(super::presentation_text::presentation_character_is_safe)
         };
-        if !bounded_nonempty(&self.title, USER_DECISION_TITLE_MAX_BYTES)
-            || !bounded_nonempty(&self.prompt, USER_DECISION_PROMPT_MAX_BYTES)
+        let safe_multiline = |value: &str, max: usize| {
+            !value.trim().is_empty()
+                && value.len() <= max
+                && value.chars().all(|ch| {
+                    ch == '\n' || super::presentation_text::presentation_character_is_safe(ch)
+                })
+        };
+        if !safe_line(&self.title, USER_DECISION_TITLE_MAX_BYTES)
+            || !safe_multiline(&self.prompt, USER_DECISION_PROMPT_MAX_BYTES)
             || self.options.len() > USER_DECISION_OPTION_MAX_COUNT
             || (self.options.is_empty() && !self.allow_freeform)
             || self
                 .idempotency_key
                 .as_ref()
-                .is_some_and(|key| !bounded_nonempty(key, USER_DECISION_IDEMPOTENCY_KEY_MAX_BYTES))
+                .is_some_and(|key| !safe_line(key, USER_DECISION_IDEMPOTENCY_KEY_MAX_BYTES))
             || self.expires_at.is_some_and(|expires_at| {
                 expires_at <= self.created_at
                     || expires_at
@@ -209,8 +220,8 @@ impl UserDecision {
         let mut ids = std::collections::BTreeSet::new();
         for option in &self.options {
             option.validate_tradeoffs()?;
-            if !bounded_nonempty(&option.id, USER_DECISION_OPTION_ID_MAX_BYTES)
-                || !bounded_nonempty(&option.label, USER_DECISION_OPTION_LABEL_MAX_BYTES)
+            if !safe_line(&option.id, USER_DECISION_OPTION_ID_MAX_BYTES)
+                || !safe_line(&option.label, USER_DECISION_OPTION_LABEL_MAX_BYTES)
                 || option.description.as_ref().is_some_and(|description| {
                     description.len() > USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES
                         || description.contains('\0')
@@ -268,14 +279,7 @@ impl UserDecision {
             UserDecisionAnswer::Option { .. } | UserDecisionAnswer::Options { .. } => {
                 Err(UserDecisionError::InvalidOption)
             }
-            UserDecisionAnswer::Freeform { text }
-                if self.allow_freeform
-                    && !text.trim().is_empty()
-                    && text.len() <= USER_DECISION_FREEFORM_MAX_BYTES
-                    && !text.contains('\0') =>
-            {
-                Ok(())
-            }
+            UserDecisionAnswer::Freeform { .. } if self.allow_freeform => Ok(()),
             UserDecisionAnswer::Freeform { .. } => Err(UserDecisionError::FreeformNotAllowed),
         }
     }
@@ -292,34 +296,43 @@ impl UserDecisionAnswer {
 
     /// Enforces the resource half of answer validation without mutating state.
     pub fn validate_resource_policy(&self) -> Result<(), UserDecisionError> {
-        let bounded_nonempty = |value: &str, max: usize| {
-            !value.trim().is_empty() && value.len() <= max && !value.contains('\0')
+        let safe_line = |value: &str, max: usize| {
+            !value.trim().is_empty()
+                && value.len() <= max
+                && value
+                    .chars()
+                    .all(super::presentation_text::presentation_character_is_safe)
         };
-        if self.comment().is_some_and(|comment| {
-            !bounded_nonempty(comment, UserDecisionPolicy::COMMENT_MAX_BYTES)
-                || !comment.chars().all(|ch| {
+        let safe_multiline = |value: &str, max: usize| {
+            !value.trim().is_empty()
+                && value.len() <= max
+                && value.chars().all(|ch| {
                     ch == '\n' || super::presentation_text::presentation_character_is_safe(ch)
                 })
-        }) {
+        };
+        if self
+            .comment()
+            .is_some_and(|comment| !safe_multiline(comment, UserDecisionPolicy::COMMENT_MAX_BYTES))
+        {
             return Err(UserDecisionError::InvalidRequest);
         }
         let valid = match self {
             Self::Option { option_id, .. } => {
-                bounded_nonempty(option_id, USER_DECISION_OPTION_ID_MAX_BYTES)
+                safe_line(option_id, USER_DECISION_OPTION_ID_MAX_BYTES)
             }
             Self::Options { option_ids, .. } => {
                 !option_ids.is_empty()
                     && option_ids.len() <= USER_DECISION_OPTION_MAX_COUNT
                     && option_ids
                         .iter()
-                        .all(|id| bounded_nonempty(id, USER_DECISION_OPTION_ID_MAX_BYTES))
+                        .all(|id| safe_line(id, USER_DECISION_OPTION_ID_MAX_BYTES))
                     && option_ids
                         .iter()
                         .collect::<std::collections::BTreeSet<_>>()
                         .len()
                         == option_ids.len()
             }
-            Self::Freeform { text } => bounded_nonempty(text, USER_DECISION_FREEFORM_MAX_BYTES),
+            Self::Freeform { text } => safe_multiline(text, USER_DECISION_FREEFORM_MAX_BYTES),
         };
         valid.then_some(()).ok_or(UserDecisionError::InvalidRequest)
     }
@@ -454,6 +467,46 @@ mod tests {
             item.validate_request(),
             Err(UserDecisionError::InvalidRequest)
         );
+        item.options[0].description = Some("First line\nSecond line".into());
+        assert!(item.validate_request().is_ok());
+        for bad in ["bad\nline", "bad\x1b", "bad\u{202e}"] {
+            let mut candidate = item.clone();
+            candidate.title = bad.into();
+            assert_eq!(
+                candidate.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            let mut candidate = item.clone();
+            candidate.idempotency_key = Some(bad.into());
+            assert_eq!(
+                candidate.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            let mut candidate = item.clone();
+            candidate.options[0].id = bad.into();
+            assert_eq!(
+                candidate.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            let mut candidate = item.clone();
+            candidate.options[0].label = bad.into();
+            assert_eq!(
+                candidate.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+        }
+        for bad in ["bad\x1b", "bad\u{202e}"] {
+            let mut candidate = item.clone();
+            candidate.prompt = bad.into();
+            assert_eq!(
+                candidate.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+            assert_eq!(
+                UserDecisionAnswer::Freeform { text: bad.into() }.validate_resource_policy(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+        }
     }
 
     #[test]

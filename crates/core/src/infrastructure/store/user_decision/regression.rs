@@ -5,7 +5,7 @@ use crate::infrastructure::ipc::{DEFAULT_MAX_FRAME_BYTES, UserDecisionCursor, wr
 
 fn max_answer() -> UserDecisionAnswer {
     UserDecisionAnswer::Freeform {
-        text: "\u{1}".repeat(Policy::FREEFORM_ANSWER_MAX_BYTES),
+        text: "\\".repeat(Policy::FREEFORM_ANSWER_MAX_BYTES),
     }
 }
 
@@ -347,7 +347,7 @@ fn reservation_covers_escaped_multiselect_and_comment() {
     decision.allow_freeform = false;
     decision.selection_mode = UserDecisionSelectionMode::Multiple;
     for (index, option) in decision.options.iter_mut().enumerate() {
-        option.id = format!("{index:02}{}", "\u{1}".repeat(126));
+        option.id = format!("{index:02}{}", "\\".repeat(126));
     }
     let answer = UserDecisionAnswer::Options {
         option_ids: decision

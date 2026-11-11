@@ -180,6 +180,7 @@ impl Frame {
                 continue;
             }
             if !presentation_character_is_safe(character) {
+                last_glyph = None;
                 continue;
             }
 
@@ -751,6 +752,9 @@ mod tests {
             Some(Cell::Glyph { width: 1, .. })
         ));
         assert_eq!(cell_text(&leading_combining, 0, 0), "\u{301}x");
+        let combining_after_filtered = frame(2, 1, &["e\u{202e}\u{301}x"]);
+        assert_eq!(cell_text(&combining_after_filtered, 0, 0), "e");
+        assert_eq!(cell_text(&combining_after_filtered, 0, 1), "\u{301}x");
 
         let malformed = frame(2, 1, &["\u{1b}X"]);
         assert!(matches!(
