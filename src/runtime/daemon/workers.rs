@@ -55,8 +55,8 @@ pub(super) enum AgentReadiness {
 /// How strictly one admission depends on a proven-ready CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadinessPolicy {
-    /// Nobody is watching the pane, or a prompt is delivered at spawn: the CLI
-    /// must prove it is signed in, or the prompt lands in a login screen.
+    /// The launch may be driven by a script, another Agent, or daemon recovery,
+    /// so the CLI must prove it is signed in before it is spawned.
     Required,
     /// A user opens the pane by hand in the TUI, so a signed-out CLI may start
     /// and let the user sign in inside it. The launch still refuses a prompt
