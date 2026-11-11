@@ -78,11 +78,9 @@ pub(crate) trait MarkdownEntry: Sync {
         source_fingerprint: &'a str,
     ) -> Self::IndexFileRef<'a>;
 
-    /// Write extra derived files after `index.json`. Stores without such files
-    /// keep only the cache.
-    fn write_extra_derived(_dir: &Path, _summaries: &[Self::Summary]) -> Result<()> {
-        Ok(())
-    }
+    /// Write extra derived files (such as a table of contents) after
+    /// `index.json`.
+    fn write_extra_derived(dir: &Path, summaries: &[Self::Summary]) -> Result<()>;
 }
 
 struct MarkdownIndex<E: MarkdownEntry> {

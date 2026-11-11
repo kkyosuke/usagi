@@ -402,6 +402,44 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn summaries_error_when_the_memory_directory_is_a_dangling_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        fs::create_dir_all(store.dir().parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("missing"), store.dir()).unwrap();
+        assert!(store.summaries().is_err());
+    }
+
+    #[test]
+    fn a_dirty_marker_that_cannot_be_cleared_keeps_the_rebuild_scheduled() {
+        let _guard = crate::test_support::process_env_guard();
+        let logs = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, logs.path());
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(tmp.path());
+        store.write(&memory("one", "One")).unwrap();
+        // A directory at the marker path cannot be removed with `remove_file`.
+        let marker = store.dir().join(".derived-dirty");
+        fs::create_dir_all(marker.join("child")).unwrap();
+
+        let names: Vec<_> = store
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.name)
+            .collect();
+        assert_eq!(names, vec!["one"]);
+        assert!(marker.is_dir());
+
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
+    }
+
     #[test]
     fn sources_are_empty_when_directory_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
