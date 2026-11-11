@@ -758,7 +758,9 @@ pub(super) fn write_pending_daemon_agent_restart(
     persist_pending_restart(data_dir, pending)
 }
 
-fn pending_restart_mutation_lock(data_dir: &Path) -> std::io::Result<std::fs::File> {
+fn pending_restart_mutation_lock(
+    data_dir: &Path,
+) -> std::io::Result<super::instance_lock::LockedPrivateFile> {
     use super::instance_lock::{PrivateLockModePolicy, PrivateLockWait, lock_private_exclusive};
     lock_private_exclusive(
         &data_dir.join("daemon/agent-restart.lock"),

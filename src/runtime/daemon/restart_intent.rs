@@ -10,13 +10,15 @@ use usagi_core::domain::id::{AgentRuntimeRef, DaemonGeneration};
 use usagi_core::domain::session_lifecycle::AgentPhase;
 use usagi_core::infrastructure::persistence::json_file;
 
-use super::instance_lock::{PrivateLockModePolicy, PrivateLockWait, lock_private_exclusive};
+use super::instance_lock::{
+    LockedPrivateFile, PrivateLockModePolicy, PrivateLockWait, lock_private_exclusive,
+};
 use super::{AGENT_RUNTIME_LIMIT, PendingDaemonAgentRestart};
 
 const FILE: &str = "agent-restart-intent.json";
 const LOCK_FILE: &str = "agent-restart-intent.lock";
 
-fn mutation_lock(data_dir: &Path) -> io::Result<std::fs::File> {
+fn mutation_lock(data_dir: &Path) -> io::Result<LockedPrivateFile> {
     let daemon = data_dir.join("daemon");
     lock_private_exclusive(
         &daemon.join(LOCK_FILE),
