@@ -3507,11 +3507,13 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             changed,
             lines,
         } => {
-            if let Some(overlay) = state
-                .preview_overlay
-                .as_mut()
-                .filter(|overlay| overlay.target == *target && overlay.pane().owns(*request_id))
-            {
+            if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
+                overlay.target == *target
+                    && overlay.path.is_none()
+                    && overlay.file_filter == *filter
+                    && overlay.pane().owns(*request_id)
+                    && overlay.pane().path() == path.as_deref()
+            }) {
                 overlay.pane_mut().loaded(
                     lines
                         .iter()
@@ -3541,6 +3543,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                         .map(|line| sanitize_presentation_line(line))
                         .collect();
                     overlay.scroll = 0;
+                    overlay.match_scroll = None;
                     overlay.search.clear();
                     overlay.search_editing = false;
                     overlay.current_match = 0;
@@ -3556,11 +3559,13 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             filter,
             error,
         } => {
-            if let Some(overlay) = state
-                .preview_overlay
-                .as_mut()
-                .filter(|overlay| overlay.target == *target && overlay.pane().owns(*request_id))
-            {
+            if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
+                overlay.target == *target
+                    && overlay.path.is_none()
+                    && overlay.file_filter == *filter
+                    && overlay.pane().owns(*request_id)
+                    && overlay.pane().path() == path.as_deref()
+            }) {
                 overlay.pane_mut().failed(error.clone());
                 return true;
             }

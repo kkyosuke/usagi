@@ -368,6 +368,7 @@ fn classify_capacity_claims(
         document
             .generations
             .iter()
+            .filter(|entry| entry.role != GenerationRole::Retired)
             .map(|entry| entry.generation.as_str())
             .collect::<BTreeSet<_>>()
     });
@@ -403,6 +404,7 @@ fn release_capacity_claim(resource_id: &str, owner: &str) -> io::Result<()> {
         document
             .generations
             .iter()
+            .filter(|entry| entry.role != GenerationRole::Retired)
             .any(|entry| entry.generation.as_str() == owner)
     }) {
         return Err(io::Error::other(
@@ -896,11 +898,12 @@ fn parse_helper_processes(
     listing
         .lines()
         .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse::<u32>().ok()?;
-            let owner = fields.next()?.parse::<u32>().ok()?;
-            let executable = fields.next()?;
-            let role = helper_role(fields)?;
+            let line = line.trim();
+            let (pid, rest) = line.split_once(char::is_whitespace)?;
+            let pid = pid.parse::<u32>().ok()?;
+            let (owner, args) = rest.trim_start().split_once(char::is_whitespace)?;
+            let owner = owner.parse::<u32>().ok()?;
+            let (executable, role) = helper_command(args.trim_start())?;
             (owner == uid && pid != own_pid && Path::new(executable).is_absolute())
                 .then(|| (pid, role, PathBuf::from(executable)))
         })
@@ -908,13 +911,17 @@ fn parse_helper_processes(
 }
 
 /// Which helper an argument tail names, if any.
-fn helper_role<'a>(argv: impl Iterator<Item = &'a str>) -> Option<HelperRole> {
-    let tail = argv.collect::<Vec<_>>();
-    match tail.as_slice() {
-        ["daemon", "serve"] | ["daemon", "serve", "--standby"] => Some(HelperRole::Daemon),
-        ["daemon", "bootstrap-broker"] => Some(HelperRole::Broker),
-        _ => None,
+fn helper_command(args: &str) -> Option<(&str, HelperRole)> {
+    for (suffix, role) in [
+        (" daemon serve --standby", HelperRole::Daemon),
+        (" daemon serve", HelperRole::Daemon),
+        (" daemon bootstrap-broker", HelperRole::Broker),
+    ] {
+        if let Some(executable) = args.strip_suffix(suffix) {
+            return Some((executable.trim_end(), role));
+        }
     }
+    None
 }
 
 struct SystemGit;
@@ -963,6 +970,7 @@ mod tests {
   106 501 /opt/usagi/bin/usagi daemon stop
   107 501 /opt/usagi/bin/usagi mcp
   108 501 /opt/usagi/bin/usagi
+  109 501 /Users/alice/Application Support/usagi/bin/usagi daemon serve
   999 501 /opt/usagi/bin/usagi daemon serve
 not a process line
 ";
@@ -984,6 +992,11 @@ not a process line
                     103,
                     HelperRole::Daemon,
                     PathBuf::from("/opt/usagi/bin/usagi")
+                ),
+                (
+                    109,
+                    HelperRole::Daemon,
+                    PathBuf::from("/Users/alice/Application Support/usagi/bin/usagi")
                 ),
             ],
             "only this user's daemon and broker, spawned from an absolute path, \
@@ -1210,19 +1223,34 @@ not a process line
             revision: 1,
         });
         let registry = RegistryDocument {
-            generations: vec![GenerationEntry {
-                generation: live,
-                role: GenerationRole::Active,
-                endpoint: "generations/live/daemon.sock".to_owned(),
-                process: ProcessIdentity {
-                    pid: 7,
-                    start_identity: "live-start".to_owned(),
-                    process_group: 7,
+            generations: vec![
+                GenerationEntry {
+                    generation: live,
+                    role: GenerationRole::Active,
+                    endpoint: "generations/live/daemon.sock".to_owned(),
+                    process: ProcessIdentity {
+                        pid: 7,
+                        start_identity: "live-start".to_owned(),
+                        process_group: 7,
+                    },
+                    expected_build: BuildIdentity::default(),
+                    verified_build: None,
+                    revision: 1,
                 },
-                expected_build: BuildIdentity::default(),
-                verified_build: None,
-                revision: 1,
-            }],
+                GenerationEntry {
+                    generation: retired,
+                    role: GenerationRole::Retired,
+                    endpoint: "generations/retired/daemon.sock".to_owned(),
+                    process: ProcessIdentity {
+                        pid: 6,
+                        start_identity: "retired-start".to_owned(),
+                        process_group: 6,
+                    },
+                    expected_build: BuildIdentity::default(),
+                    verified_build: None,
+                    revision: 1,
+                },
+            ],
             ..RegistryDocument::default()
         };
 

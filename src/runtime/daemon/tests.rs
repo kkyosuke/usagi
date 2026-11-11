@@ -1383,10 +1383,9 @@ fn workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
 /// production patience out adds seconds per assertion without changing the
 /// answer. The acquiring calls keep the real constant.
 fn impatient_workspace_fence(workspace: &Path, pid: u32) -> FileWorkspaceFence {
-    FileWorkspaceFence {
-        patience: Duration::ZERO,
-        ..workspace_fence(workspace, pid)
-    }
+    let mut fence = workspace_fence(workspace, pid);
+    fence.patience = Duration::ZERO;
+    fence
 }
 
 #[test]

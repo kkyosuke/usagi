@@ -134,7 +134,10 @@ impl StoreLock {
             .open(path)
         {
             Ok(file) => Self::regular_lock_file(path, file),
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && path.exists() => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_symlink()) =>
+            {
                 // Advisory locking only needs a valid descriptor, not write
                 // access, so a read-only handle is enough to try_lock_exclusive
                 // on both Unix (flock) and Windows (LockFileEx, per fs2).
@@ -155,7 +158,7 @@ impl StoreLock {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NONBLOCK);
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         options
     }

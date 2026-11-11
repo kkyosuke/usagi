@@ -290,6 +290,7 @@ fn write_switchable_hung_codex(bin: &Path, count: &Path, hang: &Path, probes: &P
 
 #[test]
 fn fixture_shell_quote_preserves_metacharacters_as_one_word() {
+    let _serial = serial();
     let value = "/tmp/$HOME/it's a target";
     let output = Command::new("/bin/sh")
         .args(["-c", &format!("printf '%s' {}", shell_quote(value))])
@@ -2149,17 +2150,18 @@ fn assert_agy_conversation_state(state: &Path) {
 /// provider-native resume without a replacement prompt.
 #[test]
 fn agy_private_workspace_captures_and_exactly_resumes_one_conversation() {
+    let _serial = serial();
     exercise_agy_exact_resume(None);
 }
 
 #[test]
 fn agy_private_workspace_captures_and_headlessly_resumes_one_conversation() {
+    let _serial = serial();
     exercise_agy_exact_resume(Some("--version\n次の opaque turn"));
 }
 
 #[allow(clippy::too_many_lines)] // Both interaction modes share cold-restart, context, exact-target, and no-double-spawn assertions.
 fn exercise_agy_exact_resume(headless_prompt: Option<&str>) {
-    let _serial = serial();
     let repo = fixture_repo();
     fs::create_dir(repo.path().join(".usagi")).unwrap();
     fs::write(
