@@ -644,6 +644,12 @@ impl Run for Session {
                     )
                 })?;
                 if let Some(prompt) = headless_prompt {
+                    if prompt.trim().is_empty() || prompt.contains('\0') {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "headless resume prompt must not be empty or contain NUL",
+                        ));
+                    }
                     return Ok(RunOutcome::DaemonRequest(
                         DaemonRequest::ResumeAgentHeadless {
                             operation_id: usagi_core::domain::id::OperationId::new().as_str(),
@@ -1236,6 +1242,14 @@ mod tests {
             SessionCommand::ResumeExact {
                 target: "not-json".into(),
                 headless_prompt: None,
+            },
+            SessionCommand::ResumeExact {
+                target: target_json.clone(),
+                headless_prompt: Some("   ".into()),
+            },
+            SessionCommand::ResumeExact {
+                target: target_json,
+                headless_prompt: Some("bad\0prompt".into()),
             },
             SessionCommand::ResumeInventory {
                 workspace_id: "not-a-resource-id".into(),

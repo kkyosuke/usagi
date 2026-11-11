@@ -83,7 +83,7 @@ impl Tool for MemorySave {
         "セッションをまたいで残す事実（user/feedback/project/reference）を保存するときに使う。upsert で、既存は渡したフィールドだけ部分更新、新規は title 必須。name が識別子になる。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"title":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]},"related":{"type":"array","items":{"type":"string"}},"body":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"title":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]},"related":{"type":"array","items":{"type":"string"}},"body":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: SaveArgs = parse(params)?;
@@ -108,7 +108,7 @@ impl Tool for MemoryGet {
         "保存済みメモリを name 指定で 1 件参照するときに使う。存在しない name なら null を返す。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NameArgs = parse(params)?;
@@ -128,7 +128,7 @@ impl Tool for MemorySearch {
         "関連するメモリを探すときに使う。query の全文検索と type フィルタで絞り込み、updated_at の新しい順に返す。query 省略で全件。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"query":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]}}}"#
+        r#"{"type":"object","properties":{"query":{"type":"string"},"type":{"type":"string","enum":["user","feedback","project","reference"]}},"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: SearchArgs = parse(params)?;
@@ -152,7 +152,7 @@ impl Tool for MemoryDelete {
         "不要・誤りのメモリを name 指定で削除するときに使う。削除は元に戻せない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NameArgs = parse(params)?;

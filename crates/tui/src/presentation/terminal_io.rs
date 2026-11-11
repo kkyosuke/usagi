@@ -417,7 +417,6 @@ pub(super) fn live_action_to_app_key(action: LiveTerminalAction) -> Option<AppKe
         LiveTerminalAction::PreviousTab => Some(AppKey::CtrlP),
         LiveTerminalAction::OpenPullRequests => Some(AppKey::OpenPrs),
         LiveTerminalAction::OpenPreview => Some(AppKey::OpenPreview),
-        LiveTerminalAction::OpenArtifacts => Some(AppKey::OpenArtifacts),
         LiveTerminalAction::OpenDecisions => Some(AppKey::OpenDecisions),
         LiveTerminalAction::OpenNotes => Some(AppKey::OpenNotes),
         LiveTerminalAction::OpenGarden => Some(AppKey::OpenGarden),

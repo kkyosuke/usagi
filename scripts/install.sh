@@ -392,6 +392,7 @@ acquire_lock() {
             # its published ticket before diagnosing malformed metadata.
             if ! ticket="$(read_lock_ticket "$node")"; then
                 [ -d "$node" ] || continue
+                [ -e "$node/pid" ] || [ -L "$node/pid" ] || continue
                 fail "invalid update lock ticket"
             fi
         fi
@@ -419,6 +420,7 @@ acquire_lock() {
             fi
             if ! owner="$(read_lock_ticket "$node")"; then
                 [ -d "$node" ] || continue
+                [ -e "$node/pid" ] || [ -L "$node/pid" ] || continue
                 fail "invalid update lock ticket"
             fi
             if [ "$owner" -lt "$ticket" ]; then
