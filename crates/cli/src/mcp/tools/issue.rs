@@ -48,7 +48,7 @@ impl Tool for IssueCreate {
         "着手前の作業を backlog 化するときに使う。title 必須で番号を採番し、作成した issue を返す（status は既定で todo）。同じ作成要求の retry が重複番号へ解決される場合は ambiguity error で停止する。issue ファイルは git 追跡下のため、root/main のチェックアウトでは拒否され、session worktree 内でのみ書き込める。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"title":{"type":"string"},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":"integer"},"milestone":{"type":"string"},"body":{"type":"string"}},"required":["title"]}"#
+        r#"{"type":"object","properties":{"title":{"type":"string"},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":"integer"},"milestone":{"type":"string"},"body":{"type":"string"}},"required":["title"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let spec: NewIssue = parse(params)?;
@@ -77,7 +77,7 @@ impl Tool for IssueGet {
         "issue の全文（メタデータ＋本文）を番号で 1 件参照するときに使う。存在しない番号なら null を返す。同番号の source Markdown が複数あれば exact path を含む ambiguity error で停止し、任意の 1 件を返さない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
+        r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         Self::call_with_store(params, &store(store_root))
@@ -95,7 +95,7 @@ impl Tool for IssueToPrompt {
         "issue を agent が着手できる実行プロンプト文字列に整形するときに使う。委譲前の下ごしらえ用で、session_delegate_issue はこの整形を内部で行う。同番号 source が複数あれば ambiguity error で prompt を生成しない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
+        r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NumberArgs = parse(params)?;
@@ -121,7 +121,7 @@ impl Tool for IssueSearch {
         "着手候補や関連 issue を探すときに使う。query の全文検索と status/priority/label/parent/milestone/ready フィルタで絞り込み、各件に番号衝突（ambiguous）・依存充足（ready）・未充足依存（unmet_deps）を付与して返す。query 省略で parse 可能な全 source を返し、同番号 sibling も exact filename の別 row として列挙する。parse 不能な sibling も番号衝突の判定には含める。ambiguous な行とその番号への依存は ready にならない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"label":{"type":"string"},"parent":{"type":"integer"},"milestone":{"type":"string"},"ready":{"type":"boolean"}}}"#
+        r#"{"type":"object","properties":{"query":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"label":{"type":"string"},"parent":{"type":"integer"},"milestone":{"type":"string"},"ready":{"type":"boolean"}},"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: SearchArgs = parse(params)?;
@@ -147,7 +147,7 @@ impl Tool for IssueUpdate {
         "既存 issue のメタデータ（status/priority/labels/dependson など）や本文を変更するときに使う。渡したフィールドだけ更新する。同番号 source が複数あれば ambiguity error で全 sibling を不変に保つ。status を書けるのはその issue を担当する session だけ（単一書き手）で、root/main のチェックアウトでは拒否される。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"number":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":["integer","null"]},"milestone":{"type":["string","null"]},"body":{"type":"string"}},"required":["number"]}"#
+        r#"{"type":"object","properties":{"number":{"type":"integer"},"title":{"type":"string"},"status":{"type":"string","enum":["todo","in-progress","done"]},"priority":{"type":"string","enum":["high","medium","low"]},"labels":{"type":"array","items":{"type":"string"}},"dependson":{"type":"array","items":{"type":"integer"}},"related":{"type":"array","items":{"type":"integer"}},"parent":{"type":["integer","null"]},"milestone":{"type":["string","null"]},"body":{"type":"string"}},"required":["number"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: UpdateArgs = parse(params)?;
@@ -171,7 +171,7 @@ impl Tool for IssueDelete {
         "不要になった issue を番号指定で削除するときに使う。同番号 source が複数あれば ambiguity error で 1 件も削除しない。git 追跡下のため session worktree 内でのみ実行でき、成功した削除は元に戻せない。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"]}"#
+        r#"{"type":"object","properties":{"number":{"type":"integer"}},"required":["number"],"additionalProperties":false}"#
     }
     fn call(&self, params: &str, store_root: &Path) -> Result<String, ToolError> {
         let args: NumberArgs = parse(params)?;
