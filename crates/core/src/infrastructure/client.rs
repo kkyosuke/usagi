@@ -19,8 +19,8 @@ use crate::infrastructure::ipc::request::{
 };
 use crate::infrastructure::ipc::{
     Bootstrap, BuildIdentity, CURRENT_PROTOCOL_REVISION, Capability, ClientHello, ClientId,
-    ClientWorkspace, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode, GenerationRole,
-    ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, ServerHello,
+    ClientWorkspace, DEFAULT_MAX_FRAME_BYTES, DaemonGeneration, Envelope, EnvelopeKind, ErrorCode,
+    GenerationRole, ProtocolError, ProtocolRange, ProtocolVersion, ResponseOutcome, ServerHello,
     TERMINAL_WIRE_GENERATION, TerminalInputReplayMode, TerminalSnapshotMode,
     client_advertised_capabilities, client_required_capabilities, is_workspace_mismatch,
     read_json_frame, require_user_decision_delivery, terminal_input_replay_mode,
@@ -74,6 +74,7 @@ pub struct IpcClient<S> {
     /// capability, not the negotiated revision alone, decides whether snapshots
     /// may be treated as semantic checkpoints.
     server_capabilities: Vec<String>,
+    max_frame_bytes: usize,
     next_request: u64,
     policy: ClientPolicy,
 }
@@ -190,9 +191,9 @@ impl<S: Read + Write> IpcClient<S> {
             build,
             workspace: Some(workspace),
         });
-        write_json_frame(&mut stream, &hello, 1_048_576)
+        write_json_frame(&mut stream, &hello, DEFAULT_MAX_FRAME_BYTES)
             .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?;
-        match read_json_frame::<Bootstrap>(&mut stream, 1_048_576)
+        match read_json_frame::<Bootstrap>(&mut stream, DEFAULT_MAX_FRAME_BYTES)
             .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?
         {
             Some(Bootstrap::ServerHello(hello)) => {
@@ -200,6 +201,13 @@ impl<S: Read + Write> IpcClient<S> {
                     return Err(ClientError::Protocol(ProtocolError::new(
                         ErrorCode::Unauthenticated,
                         "daemon hello nonce does not match this connection",
+                    )));
+                }
+                let max_frame_bytes = usize::try_from(hello.limits.max_frame_bytes).unwrap_or(0);
+                if max_frame_bytes == 0 || max_frame_bytes > DEFAULT_MAX_FRAME_BYTES {
+                    return Err(ClientError::Protocol(ProtocolError::new(
+                        ErrorCode::ProtocolMismatch,
+                        "daemon advertised an invalid max_frame_bytes limit",
                     )));
                 }
                 if let Some(owner) = expected_owner {
@@ -211,6 +219,7 @@ impl<S: Read + Write> IpcClient<S> {
                     daemon_generation: hello.daemon_generation,
                     server_build: hello.build,
                     server_capabilities: hello.capabilities,
+                    max_frame_bytes,
                     next_request: 0,
                     policy,
                 })
@@ -358,10 +367,10 @@ impl<S: Read + Write> DaemonClient for IpcClient<S> {
                 body: serde_json::to_value(request).expect("daemon request serializes"),
             },
         };
-        write_json_frame(&mut self.stream, &envelope, 1_048_576)
+        write_json_frame(&mut self.stream, &envelope, self.max_frame_bytes)
             .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?;
         loop {
-            let response = read_json_frame::<Envelope>(&mut self.stream, 1_048_576)
+            let response = read_json_frame::<Envelope>(&mut self.stream, self.max_frame_bytes)
                 .map_err(|error| ClientError::Unavailable(transport_failure(&error)))?
                 .ok_or_else(|| {
                     ClientError::Unavailable("daemon closed while awaiting response".into())
@@ -2152,6 +2161,7 @@ mod tests {
             daemon_generation: DaemonGeneration("d".into()),
             server_build: server_build.clone(),
             server_capabilities: Vec::new(),
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             next_request: 0,
             policy: ClientPolicy::tui(),
         };
@@ -2168,6 +2178,7 @@ mod tests {
             daemon_generation: DaemonGeneration("d".into()),
             server_build: server_build.clone(),
             server_capabilities: Vec::new(),
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             next_request: 0,
             policy: ClientPolicy::tui(),
         };
@@ -2184,6 +2195,7 @@ mod tests {
             daemon_generation: DaemonGeneration("d".into()),
             server_build,
             server_capabilities: Vec::new(),
+            max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             next_request: 0,
             policy: ClientPolicy::tui(),
         };
@@ -2214,6 +2226,42 @@ mod tests {
             ..Scripted::default()
         };
         assert!(read_fails.flush().is_ok());
+    }
+
+    #[test]
+    fn client_rejects_out_of_range_negotiated_max_frame_bytes() {
+        let protocol = ProtocolVersion {
+            generation: 1,
+            revision: 1,
+        };
+        let over_limit = u32::try_from(DEFAULT_MAX_FRAME_BYTES).unwrap() + 1;
+        for invalid_limit in [0_u32, over_limit] {
+            let hello = Bootstrap::ServerHello(ServerHello {
+                connection_nonce: "nonce".into(),
+                connection_id: crate::infrastructure::ipc::ConnectionId("connection".into()),
+                daemon_generation: DaemonGeneration("daemon".into()),
+                generation_role: GenerationRole::Active,
+                protocol,
+                capabilities: vec![],
+                build: client_build(),
+                limits: crate::infrastructure::ipc::ProtocolLimits {
+                    max_frame_bytes: invalid_limit,
+                    ..crate::infrastructure::ipc::ProtocolLimits::default()
+                },
+                daemon_process: None,
+            });
+            assert!(matches!(
+                IpcClient::connect(
+                    bootstrap_script(&hello),
+                    "client".into(),
+                    "nonce".into(),
+                    ClientPolicy::tui(),
+                    client_build(),
+                    test_workspace(),
+                ),
+                Err(ClientError::Protocol(ref error)) if error.code == ErrorCode::ProtocolMismatch
+            ));
+        }
     }
 }
 

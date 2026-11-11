@@ -20,8 +20,8 @@ use usagi_core::infrastructure::paths::{self, DataHome};
 use usagi_core::infrastructure::persistence::json_file;
 
 use super::instance_lock::{
-    PrivateLockModePolicy, PrivateLockWait, lock_private_exclusive, open_private_lock,
-    verify_private_lock_path,
+    LockedPrivateFile, PrivateLockModePolicy, PrivateLockWait, lock_private_exclusive,
+    open_private_lock, verify_private_lock_path,
 };
 use super::{current_build, prepare_private_data_dir, reap_child};
 
@@ -54,7 +54,7 @@ impl Store {
         Self(data_dir.join("daemon"))
     }
 
-    fn lock(&self) -> io::Result<File> {
+    fn lock(&self) -> io::Result<LockedPrivateFile> {
         lock_private_exclusive(
             &self.0.join("pending-update.lock"),
             "pending daemon update state",
@@ -63,7 +63,7 @@ impl Store {
         )
     }
 
-    fn worker(&self) -> io::Result<Option<File>> {
+    fn worker(&self) -> io::Result<Option<LockedPrivateFile>> {
         let path = self.0.join("pending-update-worker.lock");
         let file = open_private_lock(
             &path,
@@ -71,8 +71,9 @@ impl Store {
             PrivateLockModePolicy::CrashResidue,
         )?;
         if worker_lock_acquired(file.try_lock_exclusive())? {
-            verify_private_lock_path(&path, &file, "pending daemon update worker")?;
-            Ok(Some(file))
+            let locked = LockedPrivateFile(file);
+            verify_private_lock_path(&path, &locked, "pending daemon update worker")?;
+            Ok(Some(locked))
         } else {
             Ok(None)
         }

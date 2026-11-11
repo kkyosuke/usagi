@@ -255,7 +255,7 @@ impl Tool for UserDecisionResolve {
         "user_decision_resolve"
     }
     fn description(&self) -> &'static str {
-        "pending decision に単一 option、複数 options、または許可された freeform を一度だけ記録する"
+        "pending decision に単一 option、複数 options、または許可された freeform を一度だけ記録する。人間の回答待ちでは代理送信せず user_decision_get で観測する"
     }
     fn input_schema(&self) -> &'static str {
         static SCHEMA: OnceLock<String> = OnceLock::new();
@@ -359,7 +359,7 @@ impl Tool for SessionDispatch {
         "認証済み caller が作成した session を upsert し、agent に prompt を即時実行させる。別 caller や人間が作成した同名 session は再利用できない"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"session":{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"}},"required":["name"],"additionalProperties":false},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]},"prompt":{"type":"string"}},"required":["session","agent","prompt"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"session":{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"}},"required":["name"],"additionalProperties":false},"agent":{"oneOf":[{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]},"prompt":{"type":"string","minLength":1}},"required":["session","agent","prompt"],"additionalProperties":false}"#
     }
 }
 pub struct SessionGet;
@@ -458,7 +458,7 @@ impl Tool for SessionCreate {
         "新しい作業用セッション（隔離された git worktree）を daemon に作らせるときに使う。認証済み Agent が作成した session はその exact caller だけが管理できる。name 必須。base_ref は任意の fully-qualified local/remote-tracking branch ref。agent_cli は deprecated で、runtime/model を使う。実行と状態の権威は daemon にあり、worktree 作成と lifecycle store 更新が完了してから応答する。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"base_ref":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"base_ref":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["name"],"additionalProperties":false}"#
     }
 }
 
@@ -503,7 +503,7 @@ impl Tool for SessionList {
         "認証済み Agent が自分で作成したセッションの一覧を素早く得るときに使う。daemon の state を軽量に読むだけで、worktree の git 状態などの重い情報は含まない（詳細は session_status）。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{}}"#
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#
     }
 }
 
@@ -518,7 +518,7 @@ impl Tool for SessionStatus {
         "認証済み Agent が自分で作成した各セッションの進捗（agent の phase、worktree の status/dirty/merged）を観測するときに使う。委譲したセッションが生存中か・変更が入っているかの判定に使う。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{}}"#
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#
     }
 }
 
@@ -533,7 +533,7 @@ impl Tool for SessionPrompt {
         "認証済み caller が作成した実行中の session agent に追加指示を送る。name と prompt は必須。live（既定）は live agent が無ければ失敗し、agent を起動したい場合は session_dispatch を使う。queue は次回起動まで待たせることを意図した場合だけ使う。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string"},"mode":{"type":"string","enum":["queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string","minLength":1},"mode":{"type":"string","enum":["queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"],"additionalProperties":false}"#
     }
 }
 
@@ -548,7 +548,7 @@ impl Tool for SessionComplete {
         "dispatch された自セッションの作業完了を、保存済み binding が示す直近 caller の durable inbox へ報告するときに使う。message 必須。宛先を推測せず、自セッション内からのみ呼べる。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}"#
+        r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}"#
     }
 }
 
@@ -578,7 +578,7 @@ impl Tool for SessionRemove {
         "認証済み caller が作成した不要なセッション（worktree）を破棄するときに使う。name 必須。未コミットの変更（dirty）がある場合は force が必要。force は成果物の保管失敗時も削除を続け、未保管の成果物を破棄する。integrity orphan の診断不能な残骸や未マージ commit も破棄するときだけ force と purge_orphan を両方指定する。応答は受理で、worktree の撤去は daemon が続ける。完了は session_list で観測する（deleting=進行中 / 消滅=完了 / failed=失敗と理由）。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"},"purge_orphan":{"type":"boolean"}},"required":["name"]}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"force":{"type":"boolean"},"purge_orphan":{"type":"boolean"}},"required":["name"],"additionalProperties":false}"#
     }
 }
 
@@ -593,7 +593,7 @@ impl Tool for SessionNoteGet {
         "現在のセッションの作業メモを参照するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{}}"#
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#
     }
 }
 
@@ -608,7 +608,7 @@ impl Tool for SessionNoteUpdate {
         "現在のセッションの作業メモを書き換えるときに使う。TUI に表示される人と agent の共有メモなので、ログ全文ではなく要点を1項目1行で記載し、日本語で40文字程度を目安に意味の区切りで改行する。既存の人のメモを意図せず消さないよう、先に session_note_get で内容を確認する。空文字を渡すとクリアする。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"note":{"type":"string"}},"required":["note"]}"#
+        r#"{"type":"object","properties":{"note":{"type":"string"}},"required":["note"],"additionalProperties":false}"#
     }
 }
 
@@ -623,7 +623,7 @@ impl Tool for SessionTodoList {
         "現在のセッションのチェックリストを参照するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{}}"#
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#
     }
 }
 
@@ -638,7 +638,7 @@ impl Tool for SessionTodoAdd {
         "現在のセッションのチェックリストに項目を追加するときに使う。text は trim され非空必須。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#
+        r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#
     }
 }
 
@@ -653,7 +653,7 @@ impl Tool for SessionTodoUpdate {
         "チェックリスト項目の完了状態や文言を index 指定で更新するときに使う。done と text の少なくとも一方が必須。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"index":{"type":"integer"},"done":{"type":"boolean"},"text":{"type":"string"}},"required":["index"]}"#
+        r#"{"type":"object","properties":{"index":{"type":"integer"},"done":{"type":"boolean"},"text":{"type":"string"}},"required":["index"],"additionalProperties":false}"#
     }
 }
 
@@ -668,7 +668,7 @@ impl Tool for SessionTodoRemove {
         "チェックリスト項目を index 指定で削除するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"index":{"type":"integer"}},"required":["index"]}"#
+        r#"{"type":"object","properties":{"index":{"type":"integer"}},"required":["index"],"additionalProperties":false}"#
     }
 }
 
@@ -683,7 +683,7 @@ impl Tool for SessionDecisionList {
         "セッションの意思決定ログを参照するときに使う。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{}}"#
+        r#"{"type":"object","properties":{},"additionalProperties":false}"#
     }
 }
 
@@ -698,7 +698,7 @@ impl Tool for SessionDecisionLog {
         "重要な判断を意思決定ログに追記するときに使う。text は trim され非空必須、時刻（at）はサーバが付与する。自セッション内限定。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#
+        r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}"#
     }
 }
 
@@ -715,6 +715,6 @@ impl Tool for SessionDelegateBrief {
     // `agent` は runtime/model だけの新規 agent selector である。作成前の session に
     // 既存 Agent が所属することはないため、`id` branch は公開しない（#611）。
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"brief":{"type":"string"},"name":{"type":"string"},"role":{"type":"string"},"agent":{"oneOf":[{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]}},"required":["brief","agent"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"brief":{"type":"string","minLength":1},"name":{"type":"string"},"role":{"type":"string"},"agent":{"oneOf":[{"type":"object","properties":{"runtime":{"type":"string"},"model":{"type":"string"}},"required":["runtime","model"],"additionalProperties":false}]}},"required":["brief","agent"],"additionalProperties":false}"#
     }
 }

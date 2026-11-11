@@ -909,7 +909,6 @@ pub(super) enum UserDecisionDispatchError {
     Transport(usagi_core::infrastructure::store::user_decision::UserDecisionPageError),
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_user_decision_round_trip_reaches_the_original_caller
 impl From<usagi_core::domain::user_decision::UserDecisionError> for UserDecisionDispatchError {
     fn from(error: usagi_core::domain::user_decision::UserDecisionError) -> Self {
         Self::Decision(error)
@@ -1333,7 +1332,6 @@ pub(super) fn dispatch_dispatch(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_delegate_brief_immediately_dispatches_an_isolated_triage_worker
 pub(super) fn session_id_by_name(snapshot: &serde_json::Value, name: &str) -> Option<SessionId> {
     session_lineage_by_name(snapshot, name).map(|(session_id, _)| session_id)
 }
@@ -1750,7 +1748,6 @@ pub(super) fn dispatch_session(
     session_response_envelope(action, result, request_id, hello)
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_hook_capture_works_without_an_inherited_credential
 pub(super) fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
     body.get("caller_context")
         .and_then(|context| context.get("credential"))
@@ -1982,7 +1979,6 @@ pub(super) fn session_response_envelope(
     }
 }
 
-#[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_session_remove_is_accepted_before_the_daemon_tears_the_worktree_down
 pub(super) fn exact_merged_pr_head(
     inventory: Option<usagi_core::infrastructure::ipc::PrSnapshot>,
     branch_head: Option<String>,
@@ -2945,6 +2941,75 @@ mod tests {
         assert_eq!(
             session::session_organization(child, &names, &missing),
             (None, 1, vec!["Director".to_owned(), "child".to_owned()],)
+        );
+    }
+
+    #[test]
+    fn pure_dispatch_helpers_cover_session_credential_pr_and_decision_conversions() {
+        use usagi_core::domain::pr_inventory::{PrEntry, PrState, canonicalize};
+        use usagi_core::domain::user_decision::UserDecisionError;
+        use usagi_core::infrastructure::ipc::PrSnapshot;
+
+        let converted = UserDecisionDispatchError::from(UserDecisionError::Terminal);
+        assert!(matches!(
+            converted,
+            UserDecisionDispatchError::Decision(UserDecisionError::Terminal)
+        ));
+
+        let session_id = SessionId::new();
+        let snapshot = serde_json::json!({
+            "sessions": [
+                {"name": "alpha", "lifecycle": "Available", "session_id": session_id},
+            ]
+        });
+        assert_eq!(session_id_by_name(&snapshot, "alpha"), None);
+        let snapshot = serde_json::json!({
+            "sessions": [
+                {"name": "alpha", "lifecycle": "available", "session_id": session_id},
+            ]
+        });
+        assert_eq!(session_id_by_name(&snapshot, "alpha"), Some(session_id));
+        assert_eq!(session_id_by_name(&snapshot, "missing"), None);
+
+        assert_eq!(
+            request_mcp_credential(&serde_json::json!({
+                "caller_context": {"credential": "from-context"},
+                "payload": {"_caller_credential": "from-payload"},
+            })),
+            Some("from-context")
+        );
+        assert_eq!(
+            request_mcp_credential(&serde_json::json!({
+                "payload": {"_caller_credential": "from-payload"},
+            })),
+            Some("from-payload")
+        );
+        assert_eq!(request_mcp_credential(&serde_json::json!({})), None);
+
+        let entry = |state: PrState, head_oid: Option<&str>| {
+            let mut pr =
+                PrEntry::new(canonicalize("https://github.com/example/repo/pull/1").unwrap());
+            pr.state = state;
+            pr.head_oid = head_oid.map(str::to_owned);
+            pr
+        };
+        assert_eq!(exact_merged_pr_head(None, Some("abc".to_owned())), None);
+        let pr_snapshot = PrSnapshot {
+            session_id,
+            revision: 1,
+            entries: vec![
+                entry(PrState::Open, Some("abc")),
+                entry(PrState::Merged, Some("def")),
+            ],
+        };
+        assert_eq!(exact_merged_pr_head(Some(pr_snapshot.clone()), None), None);
+        assert_eq!(
+            exact_merged_pr_head(Some(pr_snapshot.clone()), Some("abc".to_owned())),
+            None
+        );
+        assert_eq!(
+            exact_merged_pr_head(Some(pr_snapshot), Some("def".to_owned())),
+            Some("def".to_owned())
         );
     }
 }

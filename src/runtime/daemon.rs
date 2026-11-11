@@ -79,10 +79,10 @@ use pty::{daemon_pty_failure_entry, send_pty_observation, terminal_environment_f
 
 use instance_lock::{
     CensusConnectionFence, ExactProcessControl, FileInstanceLock, FileWorkspaceFence,
-    FileWorkspaceFences, FsCustodyProbe, InstanceLockCustody, PrivateLockModePolicy,
-    PrivateLockWait, acquire_lifecycle_lock_io_within, lock_private_exclusive,
-    process_instance_lock, request_replacement_while_locked, run_with_lifecycle_custody,
-    start_custody_worker,
+    FileWorkspaceFences, FsCustodyProbe, InstanceLockCustody, LockedPrivateFile,
+    PrivateLockModePolicy, PrivateLockWait, acquire_lifecycle_lock_io_within,
+    lock_private_exclusive, process_instance_lock, request_replacement_while_locked,
+    run_with_lifecycle_custody, start_custody_worker,
 };
 #[cfg(test)]
 use instance_lock::{
@@ -3653,8 +3653,8 @@ pub(crate) fn diagnostic_client(
 /// those steps. When absence was observed, the singleton lock is held too so a
 /// direct serve cannot publish until the no-op synchronization has linearized.
 pub(crate) struct ManagedUpdateLock {
-    _bootstrap: std::fs::File,
-    lifecycle: std::fs::File,
+    _bootstrap: LockedPrivateFile,
+    lifecycle: LockedPrivateFile,
     _absence: Option<FileInstanceLock>,
 }
 
@@ -4029,7 +4029,7 @@ pub(crate) fn replace_running_daemon_during_update(
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=explicit_artifact_replacement_runs_under_one_coalesced_operation
 fn request_replacement(
     policy: ClientPolicy,
-) -> Result<(std::fs::File, BuildRolloverTrigger), ClientError> {
+) -> Result<(LockedPrivateFile, BuildRolloverTrigger), ClientError> {
     let data_dir =
         paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
     let bootstrap = acquire_bootstrap_lock(&data_dir)?;

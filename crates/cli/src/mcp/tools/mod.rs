@@ -221,6 +221,7 @@ mod tests {
             let schema = &tool.schema;
             assert_eq!(schema["type"], "object");
             assert!(schema.get("properties").is_some());
+            assert_eq!(schema["additionalProperties"], false);
 
             if !matches!(tool.descriptor.route(), ToolRoute::Store(_)) {
                 assert!(

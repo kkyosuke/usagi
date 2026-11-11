@@ -276,7 +276,7 @@ pub fn parse_string_list(value: &str) -> Vec<String> {
         .unwrap_or(value);
     split_escaped_list(inner)
         .into_iter()
-        .map(|s| unescape_list_item(s.trim()))
+        .map(|s| unescape_list_item(s.trim_matches(' ')))
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -306,7 +306,7 @@ pub fn to_markdown(body: &str, write_fields: impl FnOnce(&mut String)) -> String
     let mut out = String::from("---\n");
     write_fields(&mut out);
     out.push_str("---\n\n");
-    out.push_str(body.trim_end_matches('\n'));
+    out.push_str(body.trim_end_matches(['\r', '\n']));
     out.push('\n');
     out
 }
