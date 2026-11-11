@@ -635,23 +635,79 @@ fn readiness_failures_are_named_by_a_closed_reason() {
 }
 
 #[test]
-fn readiness_is_distinct_from_install_and_rejects_unauthenticated_status() {
+fn readiness_separates_a_missing_signed_out_and_unresponsive_cli() {
     assert_eq!(
         readiness_from_observation(&ChildObservation::EmptyOutput),
         AgentReadiness::Ready
     );
     assert_eq!(
+        readiness_from_observation(&ChildObservation::SpawnFailed),
+        AgentReadiness::Missing
+    );
+    assert_eq!(
         readiness_from_observation(&ChildObservation::ExitFailure),
-        AgentReadiness::Unavailable
+        AgentReadiness::SignedOut
     );
-    assert_eq!(
-        readiness_from_observation(&ChildObservation::TimedOut),
-        AgentReadiness::Unavailable
-    );
-    assert_eq!(
-        readiness_from_observation(&ChildObservation::OutputTooLarge),
-        AgentReadiness::Unavailable
-    );
+    for observation in [
+        ChildObservation::TimedOut,
+        ChildObservation::OutputTooLarge,
+        ChildObservation::InvalidOutput,
+        ChildObservation::ObservationFailed,
+    ] {
+        assert_eq!(
+            readiness_from_observation(&observation),
+            AgentReadiness::Unavailable,
+            "{observation:?}"
+        );
+    }
+}
+
+#[test]
+fn only_a_hand_opened_pane_without_a_prompt_admits_a_signed_out_cli() {
+    use usagi_daemon::usecase::agent_ipc::{
+        AGENT_CLI_NOT_INSTALLED, AGENT_CLI_NOT_RESPONDING, AGENT_CLI_SIGNED_OUT,
+    };
+    for (watched, delivers_prompt, policy) in [
+        (true, false, ReadinessPolicy::Interactive),
+        (true, true, ReadinessPolicy::Required),
+        (false, false, ReadinessPolicy::Required),
+        (false, true, ReadinessPolicy::Required),
+    ] {
+        assert_eq!(
+            ReadinessPolicy::for_admission(watched, delivers_prompt),
+            policy,
+            "watched={watched}, delivers_prompt={delivers_prompt}"
+        );
+    }
+    for (readiness, interactive, required) in [
+        (AgentReadiness::Ready, None, None),
+        (
+            AgentReadiness::Missing,
+            Some(AGENT_CLI_NOT_INSTALLED),
+            Some(AGENT_CLI_NOT_INSTALLED),
+        ),
+        (AgentReadiness::SignedOut, None, Some(AGENT_CLI_SIGNED_OUT)),
+        (
+            AgentReadiness::Unavailable,
+            Some(AGENT_CLI_NOT_RESPONDING),
+            Some(AGENT_CLI_NOT_RESPONDING),
+        ),
+    ] {
+        for (policy, expected) in [
+            (ReadinessPolicy::Interactive, interactive),
+            (ReadinessPolicy::Required, required),
+        ] {
+            let verdict = readiness_verdict(readiness, policy);
+            assert_eq!(
+                verdict.as_ref().err().map(|error| error.message.as_str()),
+                expected,
+                "{readiness:?} under {policy:?}"
+            );
+            if let Err(error) = verdict {
+                assert_eq!(error.code, ErrorCode::Unavailable);
+            }
+        }
+    }
 }
 
 fn request_terminal_json(

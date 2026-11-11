@@ -2113,6 +2113,27 @@ fn concurrent_production_admission_uses_one_generation_transition_and_spawn() {
     );
 }
 
+/// A hand-opened launch may let a signed-out CLI start only while nothing
+/// would be typed into it at spawn; a queued prompt makes the launch deliver one.
+#[test]
+fn a_launch_delivers_a_prompt_only_while_one_is_queued_for_its_scope() {
+    let mut runtime = runtime();
+    let launch_intent = intent(None);
+    let workspace = launch_intent.workspace;
+    let session = launch_intent.session.unwrap();
+    assert!(!runtime.launch_delivers_prompt(&launch_intent).unwrap());
+    runtime
+        .prompt(workspace, Some(session), "queued work", PromptMode::Queue)
+        .unwrap();
+    assert!(runtime.launch_delivers_prompt(&launch_intent).unwrap());
+    // Another scope of the same workspace has nothing queued.
+    let root = AgentLaunchIntent {
+        session: None,
+        ..launch_intent
+    };
+    assert!(!runtime.launch_delivers_prompt(&root).unwrap());
+}
+
 // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
 #[allow(clippy::too_many_lines)]
 #[test]

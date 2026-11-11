@@ -33,11 +33,67 @@ pub(super) trait AgentReadinessProbe: Send + Sync {
     fn observe(&self, product: &str) -> AgentReadiness;
 }
 
+/// What one bounded status probe proved about a provider CLI.
+///
+/// The three failure kinds stay distinct because they call for different
+/// answers: a missing executable cannot be launched at all, a CLI that ran and
+/// reported failure is normally signed out (which an interactive pane can fix
+/// by signing in inside the CLI), and a probe that did not finish says nothing
+/// about the CLI except that it is not answering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum AgentReadiness {
     Ready,
+    /// The executable could not be started (absent from `PATH`).
+    Missing,
+    /// The status command ran and exited unsuccessfully.
+    SignedOut,
+    /// The probe timed out, was cancelled, or produced unusable output.
     #[default]
     Unavailable,
+}
+
+/// How strictly one admission depends on a proven-ready CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadinessPolicy {
+    /// Nobody is watching the pane, or a prompt is delivered at spawn: the CLI
+    /// must prove it is signed in, or the prompt lands in a login screen.
+    Required,
+    /// A user opens the pane by hand and no prompt is delivered at spawn, so a
+    /// signed-out CLI may start and let the user sign in inside it.
+    Interactive,
+}
+
+impl ReadinessPolicy {
+    /// `watched` is whether a user opened this pane by hand; any prompt
+    /// delivered at spawn keeps even a hand-opened launch strict.
+    pub(super) fn for_admission(watched: bool, delivers_prompt: bool) -> Self {
+        if watched && !delivers_prompt {
+            Self::Interactive
+        } else {
+            Self::Required
+        }
+    }
+}
+
+/// The single decision between a probe result and an admission policy. Only
+/// the safe, closed messages below ever reach the wire.
+pub(super) fn readiness_verdict(
+    readiness: AgentReadiness,
+    policy: ReadinessPolicy,
+) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
+    use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+    use usagi_daemon::usecase::agent_ipc::{
+        AGENT_CLI_NOT_INSTALLED, AGENT_CLI_NOT_RESPONDING, AGENT_CLI_SIGNED_OUT,
+    };
+    let message = match (readiness, policy) {
+        (AgentReadiness::Ready, _) | (AgentReadiness::SignedOut, ReadinessPolicy::Interactive) => {
+            return Ok(());
+        }
+        (AgentReadiness::Missing, _) => AGENT_CLI_NOT_INSTALLED,
+        (AgentReadiness::SignedOut, ReadinessPolicy::Required) => AGENT_CLI_SIGNED_OUT,
+        (AgentReadiness::Unavailable, _) => AGENT_CLI_NOT_RESPONDING,
+    };
+    Err(ProtocolError::new(ErrorCode::Unavailable, message))
 }
 
 /// The per-product half of one readiness probe's policy, resolved from the

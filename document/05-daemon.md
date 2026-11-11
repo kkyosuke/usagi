@@ -2159,6 +2159,28 @@ nonzero exit、timeout、不正 UTF-8、上限超過をいずれも credential �
 cancel 後も capture 上限内の利用可能な bytes と EOF を確認する。正常終了した child の reader が遅れて実行されても、
 閉じた pipe の完全な出力を timeout にせず、開いた pipe や上限を超えて出力し続ける descendant は bounded に拒否する。
 1Password の `op read` も同じ nonblocking capture と cleanup を使い、未完の出力を secret value として返さない。
+probe の結果は 3 種類の失敗に分けて扱い、wire の safe message もそれぞれ別にする。
+
+| probe の結果 | 意味 | wire message の要旨 |
+|---|---|---|
+| `spawn_failed` | executable を起動できない（未インストール・`PATH` に無い） | install して retry |
+| `exit_failure` | status command が失敗を返した（通常は未ログイン） | CLI で sign in して retry |
+| `timed_out` などその他 | status command が応答しない・出力が使えない | CLI が動くか確認して retry |
+
+`exit_failure` で launch を止めるかは、その launch に**画面を見ている利用者がいて、spawn 時に入力される prompt が無いか**で
+決まる。条件を満たす launch では CLI を起動し、利用者が Agent pane 内の CLI のログイン画面で sign in できるようにする。
+それ以外は spawn 前に拒否する。spawn 時に prompt が入力される launch を通すと、その prompt が CLI のログイン画面へ
+入力されて失われるためである。`spawn_failed` と応答しない probe は、どの launch でも spawn 前に拒否する。
+
+| launch の経路 | `exit_failure` の扱い |
+|---|---|
+| TUI からの手動 launch（scope に queue 済み prompt が無い） | 起動する |
+| TUI からの手動 launch（scope に queue 済み prompt がある） | 拒否する |
+| TUI からの手動 resume（prompt なし） | 起動する |
+| MCP からの resume、headless resume、repair resume | 拒否する |
+| `session_dispatch` / handoff による dispatch | 拒否する |
+| daemon restart 後の自動復帰 | 拒否する |
+
 preflight 後に owner lock を取り直し、operation idempotency、generation、
 scope、profile revision、current executable、config、concurrency を再検証してから reservation と spawn を行う。Doctor の
 `--version` は readiness とは別の typed probe であり、1 秒の deadline と各 16 KiB の output bound を自分で持ち、

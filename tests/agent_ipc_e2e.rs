@@ -1412,12 +1412,12 @@ fn wait_for_resume_completion(
     }
 }
 
-fn safe_readiness_error(error: ClientError) {
+fn safe_readiness_error(error: ClientError, guidance: &str) {
     let ClientError::Protocol(error) = error else {
         panic!("readiness failure must be a daemon protocol error");
     };
     assert_eq!(error.code, ErrorCode::Unavailable);
-    assert!(error.message.contains("install it and sign in"));
+    assert!(error.message.contains(guidance), "{error:?}");
     for private in ["PATH", "codex login status", "credential", "token", "argv"] {
         assert!(
             !error.message.contains(private),
@@ -1661,34 +1661,47 @@ fn root_ipc_fixture_codex_survives_disconnect_and_replays_final() {
 }
 
 #[test]
-fn root_ipc_missing_or_not_authenticated_codex_is_safe_and_redacted() {
+fn root_ipc_missing_codex_is_refused_safely_and_redacted() {
     let _serial = serial();
-    for ready_status in [None, Some(1)] {
-        let repo = fixture_repo();
-        let home = short_dir("usagi-");
-        let bin = home.path().join("bin");
-        let count = home.path().join("spawn-count");
-        fs::create_dir(&bin).unwrap();
-        if let Some(status) = ready_status {
-            write_codex(&bin, &count, status);
-        }
-        let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
-        let data_dir = channel_data_dir(home.path());
-        let mut client = client(&data_dir);
-        let (workspace, session, _) = available_scope(&mut client);
-        let operation = OperationId::new().to_string();
-        let request = || DaemonRequest::Agent {
-            operation_id: operation.clone(),
-            intent: AgentLaunchIntent {
-                workspace,
-                session: Some(session),
-                profile: Some(AgentProfileId::new("codex").unwrap()),
-            },
-        };
-        safe_readiness_error(client.request(request()).unwrap_err());
-        safe_readiness_error(client.request(request()).unwrap_err());
-        assert!(!count.exists(), "readiness failure must not spawn the PTY");
-    }
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("spawn-count");
+    fs::create_dir(&bin).unwrap();
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut client);
+    let operation = OperationId::new().to_string();
+    let request = || DaemonRequest::Agent {
+        operation_id: operation.clone(),
+        intent: AgentLaunchIntent {
+            workspace,
+            session: Some(session),
+            profile: Some(AgentProfileId::new("codex").unwrap()),
+        },
+    };
+    safe_readiness_error(client.request(request()).unwrap_err(), "install it");
+    safe_readiness_error(client.request(request()).unwrap_err(), "install it");
+    assert!(!count.exists(), "readiness failure must not spawn the PTY");
+}
+
+/// A hand-opened Agent pane starts a signed-out CLI so the user can sign in
+/// inside it; nothing is typed into its login screen.
+#[test]
+fn root_ipc_manual_launch_starts_a_signed_out_codex_for_in_pane_sign_in() {
+    let _serial = serial();
+    let repo = fixture_repo();
+    let home = short_dir("usagi-");
+    let bin = home.path().join("bin");
+    let count = home.path().join("spawn-count");
+    write_codex(&bin, &count, 1);
+    let _daemon = start_daemon(repo.path(), home.path(), &bin, None);
+    let data_dir = channel_data_dir(home.path());
+    let mut client = client(&data_dir);
+    let (workspace, session, _) = available_scope(&mut client);
+    launch(&mut client, workspace, session, Some("codex"));
+    wait_for_spawns(&count, 1);
 }
 
 #[test]

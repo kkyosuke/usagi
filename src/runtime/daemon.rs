@@ -47,12 +47,13 @@ use agent::{
 use workers::{
     AgentReadiness, AgentReadinessProbe, AutomaticOrphanCleanup, ClosePrProjectionOnExit,
     ConnectionCleanup, ConnectionCleanupInbox, DaemonBackgroundWorkers, InitialWorkspaceFence,
-    OrphanCleanupPass, ReadinessBounds, ShutdownOnIpcWorkerExit, ShutdownOnUnexpectedWorkerExit,
-    ShutdownOnWorkerPanic, ShutdownPipe, SignalShutdown, SigtermTerminator, SystemAgentReadiness,
-    retain_client_worker, spawn_critical_worker, spawn_orphan_cleanup_worker,
-    spawn_pr_refresh_worker, spawn_tenant_retire_worker, start_connection_cleanup_worker,
-    start_draining_collection_worker, start_lock_watchdog, start_pr_projection_worker,
-    start_retention_gc_worker, start_session_teardown_worker,
+    OrphanCleanupPass, ReadinessBounds, ReadinessPolicy, ShutdownOnIpcWorkerExit,
+    ShutdownOnUnexpectedWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe, SignalShutdown,
+    SigtermTerminator, SystemAgentReadiness, readiness_verdict, retain_client_worker,
+    spawn_critical_worker, spawn_orphan_cleanup_worker, spawn_pr_refresh_worker,
+    spawn_tenant_retire_worker, start_connection_cleanup_worker, start_draining_collection_worker,
+    start_lock_watchdog, start_pr_projection_worker, start_retention_gc_worker,
+    start_session_teardown_worker,
 };
 #[cfg(test)]
 use workers::{
@@ -634,9 +635,9 @@ fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness 
     match observation {
         // Status commands need not print a version or other public detail.
         ChildObservation::Success(_) | ChildObservation::EmptyOutput => AgentReadiness::Ready,
-        ChildObservation::SpawnFailed
-        | ChildObservation::ExitFailure
-        | ChildObservation::TimedOut
+        ChildObservation::SpawnFailed => AgentReadiness::Missing,
+        ChildObservation::ExitFailure => AgentReadiness::SignedOut,
+        ChildObservation::TimedOut
         | ChildObservation::OutputTooLarge
         | ChildObservation::InvalidOutput
         | ChildObservation::ObservationFailed => AgentReadiness::Unavailable,

@@ -46,6 +46,19 @@ impl AgentRuntime {
         self.readiness_ticket(profile).map(Some)
     }
 
+    /// Whether a launch of `intent` would type a queued prompt into the CLI at
+    /// spawn. Such a launch cannot fall back to an in-pane sign-in, because the
+    /// prompt would be entered into the provider's login screen.
+    pub fn launch_delivers_prompt(
+        &self,
+        intent: &AgentLaunchIntent,
+    ) -> Result<bool, ProtocolError> {
+        self.dispatch
+            .queued_prompt(intent.workspace, intent.session)
+            .map(|queued| queued.is_some())
+            .map_err(map_dispatch_storage_error)
+    }
+
     /// Captures the provider and owner generation for one exact resume without
     /// invoking an adapter or mutating durable state.
     pub fn prepare_resume_readiness(

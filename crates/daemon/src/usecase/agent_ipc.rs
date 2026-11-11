@@ -553,6 +553,16 @@ impl AgentRuntime {
 /// ([`crate::usecase::resources::allocator::CapacityPolicy`]).
 pub const AGENT_RUNTIME_LIMIT: usize = 16;
 
+/// Safe answer when the provider executable cannot be found or started.
+pub const AGENT_CLI_NOT_INSTALLED: &str = "agent CLI is not installed; install it, then retry";
+/// Safe answer when the provider's status command reports it is not ready,
+/// normally because it is signed out.
+pub const AGENT_CLI_SIGNED_OUT: &str =
+    "agent CLI is not signed in; sign in with the CLI (or open it in an Agent pane), then retry";
+/// Safe answer when the status command did not finish or its output was unusable.
+pub const AGENT_CLI_NOT_RESPONDING: &str =
+    "agent CLI did not answer its status check; check that the CLI runs, then retry";
+
 /// Immutable facts proved before an Agent readiness command runs outside the
 /// owner lock. Admission compares them with current owner state after the probe;
 /// the ticket is evidence of a completed check, never authority by itself.
@@ -699,7 +709,7 @@ impl AgentRuntime {
         {
             return Err(ProtocolError::new(
                 ErrorCode::Unavailable,
-                "agent CLI is unavailable or not authenticated; install it and sign in, then retry",
+                AGENT_CLI_NOT_INSTALLED,
             ));
         }
         Ok(())
@@ -2525,10 +2535,9 @@ fn map_orchestration_error(error: OrchestrationError) -> ProtocolError {
 
 fn map_runtime_error(error: RuntimeError) -> ProtocolError {
     let (code, message) = match error {
-        RuntimeError::Adapter(super::runtime::AdapterError::ExecutableUnavailable) => (
-            ErrorCode::Unavailable,
-            "agent CLI is unavailable or not authenticated; install it and sign in, then retry",
-        ),
+        RuntimeError::Adapter(super::runtime::AdapterError::ExecutableUnavailable) => {
+            (ErrorCode::Unavailable, AGENT_CLI_NOT_INSTALLED)
+        }
         RuntimeError::Adapter(_) => (
             ErrorCode::Unavailable,
             "agent pre-spawn setup is unavailable; retry after checking agent readiness",

@@ -30,21 +30,20 @@ pub(super) fn launch_context(
 }
 
 use super::{
-    AgentAdmission, AgentReadiness, AgentReadinessPreflight, AmbiguousIssueNumber, Arc, BTreeMap,
-    BTreeSet, ConnectionId, ConnectionWorkspace, CurrentLocatorFile, DEFAULT_GENERATION_LIMIT,
-    DaemonRequest, Deserialize, DispatchStore, DispatchToolAction, Envelope, EnvelopeKind,
-    ErrorCode, ErrorLog, GenerationFence, GenerationRegistry, GenerationRegistryFile,
-    INBOX_PAGE_MAX, InboxCursor, MetricsObserver, MetricsSample, OperationId, Ordering, Path,
-    PathBuf, PeerProcess, PendingDaemonAgentRestart, ResponseOutcome, SessionId,
-    SessionRuntimeError, SessionScopeResolver, SharedAgentRuntime, SharedMetricsBroker,
-    SharedPrInventory, SharedProcessResourceSampler, SharedSessionRuntime, SharedTerminalRuntime,
-    SystemGit, TeardownSignal, TerminalId, TerminalPipelineMetrics, UnixStandbyProbe,
-    UserDecisionStore, WorkspaceId, clear_pending_daemon_agent_restart, current_build,
-    observe_generation_process, output_pipeline_counters, paths, perform_compensating_remove,
-    perform_create, perform_delegated_create, perform_remove_with_merged_head,
-    pr_projection_counters, process_start_identity, recover_rollover,
-    restore_pending_daemon_agents, rollover_trigger, validate_owned_directory,
-    write_pending_daemon_agent_restart,
+    AgentAdmission, AgentReadinessPreflight, AmbiguousIssueNumber, Arc, BTreeMap, BTreeSet,
+    ConnectionId, ConnectionWorkspace, CurrentLocatorFile, DEFAULT_GENERATION_LIMIT, DaemonRequest,
+    Deserialize, DispatchStore, DispatchToolAction, Envelope, EnvelopeKind, ErrorCode, ErrorLog,
+    GenerationFence, GenerationRegistry, GenerationRegistryFile, INBOX_PAGE_MAX, InboxCursor,
+    MetricsObserver, MetricsSample, OperationId, Ordering, Path, PathBuf, PeerProcess,
+    PendingDaemonAgentRestart, ReadinessPolicy, ResponseOutcome, SessionId, SessionRuntimeError,
+    SessionScopeResolver, SharedAgentRuntime, SharedMetricsBroker, SharedPrInventory,
+    SharedProcessResourceSampler, SharedSessionRuntime, SharedTerminalRuntime, SystemGit,
+    TeardownSignal, TerminalId, TerminalPipelineMetrics, UnixStandbyProbe, UserDecisionStore,
+    WorkspaceId, clear_pending_daemon_agent_restart, current_build, observe_generation_process,
+    output_pipeline_counters, paths, perform_compensating_remove, perform_create,
+    perform_delegated_create, perform_remove_with_merged_head, pr_projection_counters,
+    process_start_identity, readiness_verdict, recover_rollover, restore_pending_daemon_agents,
+    rollover_trigger, validate_owned_directory, write_pending_daemon_agent_restart,
 };
 
 pub(super) struct DispatchToolContext<'a> {
@@ -2226,6 +2225,7 @@ pub(super) fn clean_orphan_session_resources(
     }))
 }
 
+#[allow(clippy::too_many_lines)] // Readiness policy, probe, and admission share one owner-lock sequence per request kind.
 #[coverage(off)]
 // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
 fn admit_agent_dispatch_request(
@@ -2236,25 +2236,43 @@ fn admit_agent_dispatch_request(
     launch_client: &AgentLaunchClient,
 ) -> Result<AgentAdmission, usagi_core::infrastructure::ipc::ProtocolError> {
     use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
-    let preflight = agent
+    let (preflight, delivers_prompt) = agent
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))
-        .and_then(|owner| match request {
-            AgentDispatchRequest::Launch(operation_id, intent) => {
-                owner.prepare_launch_readiness(operation_id, intent)
-            }
-            AgentDispatchRequest::Resume(operation_id, target, prompt) => match prompt {
-                Some(prompt) => {
-                    owner.prepare_headless_resume_readiness(operation_id, target, prompt)
+        .and_then(|owner| {
+            let (preflight, delivers_prompt) = match request {
+                AgentDispatchRequest::Launch(operation_id, intent) => (
+                    owner.prepare_launch_readiness(operation_id, intent)?,
+                    owner.launch_delivers_prompt(intent)?,
+                ),
+                AgentDispatchRequest::Resume(operation_id, target, Some(prompt)) => (
+                    owner.prepare_headless_resume_readiness(operation_id, target, prompt)?,
+                    true,
+                ),
+                AgentDispatchRequest::Resume(operation_id, target, None) => {
+                    (owner.prepare_resume_readiness(operation_id, target)?, false)
                 }
-                None => owner.prepare_resume_readiness(operation_id, target),
-            },
-            AgentDispatchRequest::RepairResume(operation_id, target, revision) => {
-                owner.prepare_current_integration_resume_readiness(operation_id, target, *revision)
-            }
-            _ => unreachable!("maintenance was handled before readiness"),
+                AgentDispatchRequest::RepairResume(operation_id, target, revision) => (
+                    owner.prepare_current_integration_resume_readiness(
+                        operation_id,
+                        target,
+                        *revision,
+                    )?,
+                    false,
+                ),
+                _ => unreachable!("maintenance was handled before readiness"),
+            };
+            Ok((preflight, delivers_prompt))
         })?;
-    run_agent_readiness(agent, preflight.as_ref())?;
+    // Only a pane a user opened by hand (an Agent launch, or a resume without an
+    // MCP caller) may start a signed-out CLI and let the user sign in inside it.
+    let watched = match request {
+        AgentDispatchRequest::Launch(..) => true,
+        AgentDispatchRequest::Resume(..) => resume_caller.is_none(),
+        _ => false,
+    };
+    let policy = ReadinessPolicy::for_admission(watched, delivers_prompt);
+    run_agent_readiness(agent, preflight.as_ref(), policy)?;
     let workspace = match request {
         AgentDispatchRequest::Launch(_, intent) => intent.workspace,
         AgentDispatchRequest::Resume(_, target, _)
@@ -2639,17 +2657,12 @@ pub(super) fn dispatch_agent(
 pub(super) fn run_agent_readiness(
     agent: &SharedAgentRuntime,
     preflight: Option<&AgentReadinessPreflight>,
+    policy: ReadinessPolicy,
 ) -> Result<(), usagi_core::infrastructure::ipc::ProtocolError> {
     let Some(preflight) = preflight else {
         return Ok(());
     };
-    match agent.readiness.observe(preflight.product()) {
-        AgentReadiness::Ready => Ok(()),
-        AgentReadiness::Unavailable => Err(usagi_core::infrastructure::ipc::ProtocolError::new(
-            usagi_core::infrastructure::ipc::ErrorCode::Unavailable,
-            "agent CLI is unavailable or not authenticated; install it and sign in, then retry",
-        )),
-    }
+    readiness_verdict(agent.readiness.observe(preflight.product()), policy)
 }
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_uses_the_trusted_root_before_and_after_session_creation
@@ -2670,7 +2683,9 @@ pub(super) fn dispatch_agent_after_preflight(
         .lock()
         .map_err(|_| ProtocolError::new(ErrorCode::Unavailable, "agent owner is unavailable"))?
         .prepare_dispatch_readiness(operation_id, intent)?;
-    run_agent_readiness(agent, preflight.as_ref())?;
+    // A dispatch always delivers its prompt at spawn, so the CLI must already be
+    // signed in.
+    run_agent_readiness(agent, preflight.as_ref(), ReadinessPolicy::Required)?;
     let _environment = agent.prepare_environment(intent.workspace, preflight.is_some())?;
     let mut agent = agent
         .lock()
