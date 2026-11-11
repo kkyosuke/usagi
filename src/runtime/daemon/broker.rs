@@ -528,14 +528,16 @@ pub(super) fn bootstrap_client<S: Read + Write>(
 /// [`ClientError::BootstrapContended`] rather than folded into "the daemon is
 /// unavailable": the daemon may be perfectly healthy and the caller should
 /// simply try again, which is exactly what the TUI's reattach backoff does.
-pub(super) fn acquire_bootstrap_lock(data_dir: &Path) -> Result<std::fs::File, ClientError> {
+pub(super) fn acquire_bootstrap_lock(
+    data_dir: &Path,
+) -> Result<super::LockedPrivateFile, ClientError> {
     acquire_bootstrap_lock_within(data_dir, PrivateLockWait::BOOTSTRAP)
 }
 
 pub(super) fn acquire_bootstrap_lock_within(
     data_dir: &Path,
     wait: PrivateLockWait,
-) -> Result<std::fs::File, ClientError> {
+) -> Result<super::LockedPrivateFile, ClientError> {
     acquire_bootstrap_lock_io_within(data_dir, wait)
         .map_err(|error| map_bootstrap_lock_error(&error))
 }
@@ -544,7 +546,7 @@ pub(super) fn acquire_bootstrap_lock_within(
 pub(super) fn acquire_bootstrap_lock_io_within(
     data_dir: &Path,
     wait: PrivateLockWait,
-) -> std::io::Result<std::fs::File> {
+) -> std::io::Result<super::LockedPrivateFile> {
     (|| {
         ensure_private_dir_all(data_dir)?;
         // `open_private_lock` runs `ensure_private_dir` on the lock's parent, so

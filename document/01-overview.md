@@ -52,7 +52,7 @@ shell を同じ pane model で起動できる。画面、キー操作、設定 U
 | `usagi doctor [--fix]` | 必要ツール、settings、既存 daemon を診断し、daemon / Agent lifecycle 以外の修復可能項目だけを修復する |
 | `usagi daemon restart [--restart-agents] [--force]` | daemon を入れ替える。`--restart-agents` は実行中の Agent も中断して同じ会話から作業を続行する。再開条件は [daemon の Agent 更新](05-daemon.md#daemon-restart-による-agent-integration-更新) を参照する |
 | `usagi clean [--dry-run\|--apply [--force]]` | 孤立 workspace data、worktree、branch、process を照合する。既定は dry-run |
-| `usagi update [-v]` | 最新 release、または `-v` で選択した release へ更新する（[利用手順](12-installation.md#更新)） |
+| `usagi update [-v] [--restart-agents]` | 最新 release、または `-v` で選択した release へ更新する（[利用手順](12-installation.md#更新)） |
 | `usagi completion <shell>` | shell 補完スクリプトを標準出力へ生成する（[設定例](12-installation.md#shell-補完)） |
 | `usagi version` / `usagi --version` | 配布 version を表示する |
 | `usagi daemon [command]` | daemon process lifecycle を操作する |

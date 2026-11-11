@@ -50,6 +50,8 @@ impl std::fmt::Display for CaptureInputError {
 
 impl std::error::Error for CaptureInputError {}
 
+const MAX_HOOK_PAYLOAD_BYTES: u64 = 1024 * 1024;
+
 /// Converts one documented Codex hook object into the private daemon request.
 /// Unknown fields, including `transcript_path`, are ignored and never opened.
 ///
@@ -61,8 +63,9 @@ pub fn request_from_hook(
     reader: &mut dyn Read,
     credential: Option<String>,
 ) -> Result<DaemonRequest, CaptureInputError> {
-    let input = serde_json::from_reader::<_, SessionStartInput>(reader)
-        .map_err(|_| CaptureInputError::InvalidPayload)?;
+    let input =
+        serde_json::from_reader::<_, SessionStartInput>(reader.take(MAX_HOOK_PAYLOAD_BYTES))
+            .map_err(|_| CaptureInputError::InvalidPayload)?;
     if input.hook_event_name != "SessionStart" {
         return Err(CaptureInputError::WrongEvent);
     }
@@ -136,6 +139,14 @@ mod tests {
         assert!(
             serde_json::to_value(request).unwrap()["caller_context"].is_null(),
             "hook credentials must not be inherited through the Agent environment"
+        );
+        let oversized = format!(
+            r#"{{"session_id":"secret-id","padding":"{}","hook_event_name":"SessionStart"}}"#,
+            "x".repeat(1024 * 1024)
+        );
+        assert_eq!(
+            request_from_hook(&mut Cursor::new(oversized), None).unwrap_err(),
+            CaptureInputError::InvalidPayload
         );
     }
 }

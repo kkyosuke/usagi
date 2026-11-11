@@ -242,8 +242,8 @@ impl MemoryStore {
     pub fn remove_with_outcome(&self, name: &str) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
         let path = self.dir().join(memory_file_name(name)?);
-        match fs::metadata(&path) {
-            Ok(_) => {}
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let repair = self.inner.repair_derived_locked();
                 return Ok(self.inner.finish_committed(false, repair));
@@ -251,7 +251,12 @@ impl MemoryStore {
             Err(error) => {
                 return Err(error).context(format!("failed to inspect {}", path.display()));
             }
-        }
+        };
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "failed to remove {}: refusing to remove symlink",
+            path.display()
+        );
         self.inner.mark_derived_dirty()?;
         fs::remove_file(&path).context(format!("failed to remove {}", path.display()))?;
         let refresh = self.inner.rebuild_derived().map(|_| ());
@@ -1137,16 +1142,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn remove_reports_a_source_metadata_error_without_mutation() {
+    fn remove_and_reads_reject_symlinks_and_metadata_errors_without_mutation() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(tmp.path());
         fs::create_dir_all(store.dir()).unwrap();
-        let path = store.dir().join("loop.md");
-        symlink("loop.md", &path).unwrap();
+        let target = tmp.path().join("outside.md");
+        fs::write(&target, memory("outside", "Outside").to_markdown()).unwrap();
+        let path = store.dir().join("linked.md");
+        symlink(&target, &path).unwrap();
 
-        assert!(store.remove("loop").is_err());
+        assert!(store.remove("linked").is_err());
         assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(!store.inner.derived_is_dirty());
+        assert!(store.get("linked").is_err());
+        assert!(store.summaries().is_err());
+
+        let overlong = "a".repeat(255);
+        assert!(store.remove(&overlong).is_err());
     }
 }
