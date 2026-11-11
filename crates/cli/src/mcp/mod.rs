@@ -4,7 +4,7 @@
 //! route ごとの実行先へ送る。
 //!
 //! stdio 上の JSON-RPC 2.0 の serve ループ（`initialize` / `tools/list` / `tools/call`）は
-//! [`serve`] が担う。issue / memory の Store route は接続時に固定した store root を core
+//! [`serve`] が担う。memory の Store route は接続時に固定した store root を core
 //! usecase 経由で操作し、session / agent / terminal route は core IPC client を
 //! 介して daemon-owned usecase へ委譲する。presentation 自身は business logic を所有しない。
 

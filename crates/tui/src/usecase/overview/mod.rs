@@ -30,7 +30,6 @@ pub enum Command {
     Daemon { arguments: String },
     Env { arguments: String },
     Garden { arguments: String },
-    Issue { arguments: String },
     Roles { arguments: String },
     Session { arguments: String },
 }
@@ -137,15 +136,6 @@ const DEFINITIONS: &[CommandDefinition] = &[
             long_description: "Open the session garden screen saver. Any key returns to Home.",
         },
         factory: |arguments| Command::Garden { arguments },
-    },
-    CommandDefinition {
-        info: CommandInfo {
-            name: "issue",
-            description: "Browse task issues",
-            usage: "issue [list|graph|gantt|show <number>]",
-            long_description: "List issues or inspect an issue, dependency graph, or gantt view.",
-        },
-        factory: |arguments| Command::Issue { arguments },
     },
     CommandDefinition {
         info: CommandInfo {
@@ -352,7 +342,6 @@ impl Command {
             Self::Daemon { .. } => "daemon",
             Self::Env { .. } => "env",
             Self::Garden { .. } => "garden",
-            Self::Issue { .. } => "issue",
             Self::Roles { .. } => "roles",
             Self::Session { .. } => "session",
         }
@@ -428,8 +417,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
-                "session"
+                "artifact", "clean", "config", "daemon", "env", "garden", "roles", "session"
             ]
         );
         assert!(
@@ -463,9 +451,6 @@ mod tests {
                 Command::Garden {
                     arguments: String::new()
                 },
-                Command::Issue {
-                    arguments: String::new()
-                },
                 Command::Roles {
                     arguments: String::new()
                 },
@@ -475,8 +460,7 @@ mod tests {
             ]
             .map(|command| command.name()),
             [
-                "artifact", "clean", "config", "daemon", "env", "garden", "issue", "roles",
-                "session"
+                "artifact", "clean", "config", "daemon", "env", "garden", "roles", "session"
             ]
         );
     }
@@ -550,7 +534,7 @@ mod tests {
         assert_eq!(completion("session z"), None);
         assert_eq!(completion("session create "), None);
         assert_eq!(completion("session create extra"), None);
-        assert_eq!(completion("issue list"), None);
+        assert_eq!(completion("roles global"), None);
     }
 
     #[test]
@@ -659,9 +643,9 @@ mod tests {
                 },
             ),
             (
-                "issue graph",
-                Command::Issue {
-                    arguments: "graph".to_owned(),
+                "roles global",
+                Command::Roles {
+                    arguments: "global".to_owned(),
                 },
             ),
             (

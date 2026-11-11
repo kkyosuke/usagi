@@ -141,7 +141,7 @@ git worktree である。したがって**独立した 2 つの durable state �
 付随する gap として、IPC handshake は client の workspace root を検証しない。`data_dir` を共有する workspace B の
 client が workspace A に束縛された daemon へ接続すると、A の session 一覧と scope を受け取る。fence を workspace
 単位にしても、この誤接続経路は fence では閉じない。wire schema と「どの client を免除するか」という別の判断を
-伴うため、[#548](../../.usagi/issues/548-fix-ipc-handshake-client-workspace-root.md) へ分離した。
+伴うため、#548 へ分離した。
 
 ## 設計 3: teardown worker と resume 契約
 
@@ -168,7 +168,7 @@ coverage 実行後の `target/llvm-cov-target` は数 GB あるため、削除�
   これが本設計の中心的な correctness 改善である。`Creating` / `Initializing` の `Failed` 化は変えない
   （create は effect を巻き戻せないため）。
 - client 表示は既存の投影で足りる。`snapshot()` は
-  [#529](../../.usagi/issues/529-fix-daemon-failed-session-remove.md) 以降すべての durable record を `lifecycle` 付きで
+  #529 以降すべての durable record を `lifecycle` 付きで
   投影し、[4. daemon IPC の managed session request](../04-ipc.md#managed-session-request) も `deleting` scope への
   launch を typed refusal として定義済みである。TUI は `deleting` 行を削除中の行として描画するだけでよい。
 - 冪等性は、同一 `operation_id` の再送は既存の journal replay、`Deleting` な session への**新しい** `operation_id` は

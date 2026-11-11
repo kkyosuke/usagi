@@ -1,14 +1,12 @@
-//! MCP tool アダプタの置き場。tool は系統ごとにファイルを分け（`issue` / `memory` /
-//! `session` / `terminal`）、各 tool が 1 struct として `Tool` を実装する。各系統の
+//! MCP tool アダプタの置き場。tool は系統ごとにファイルを分け（`memory` / `session` /
+//! `terminal`）、各 tool が 1 struct として `Tool` を実装する。各系統の
 //! registry は metadata、schema validator、typed execution route、caller policy を 1 つの
 //! `ToolDescriptor` に束ねる。
 //!
-//! 各アダプタは presentation に徹する — issue / memory の Store route は usagi-core の
+//! 各アダプタは presentation に徹する — memory の Store route は usagi-core の
 //! store usecase を直接呼び、session / agent / terminal route は usagi-core の
 //! IPC client 経由で daemon に委譲する（独自のビジネスロジックは持たない）。
 
-pub mod issue;
-mod issue_wire;
 pub mod memory;
 pub mod session;
 pub mod terminal;
@@ -19,7 +17,6 @@ use std::fmt;
 
 use super::tool::{ToolDescriptor, ToolRoute, validate_schema_definition};
 use usagi_core::domain::agent::mcp_tools::McpToolFamilies;
-use usagi_core::infrastructure::ipc::SessionAction;
 
 /// A descriptor and its parsed, validated schema for one MCP connection.
 pub(super) struct RegisteredTool {
@@ -27,7 +24,7 @@ pub(super) struct RegisteredTool {
     pub(super) schema: serde_json::Value,
 }
 
-/// 公開する全 MCP tool のレジストリ（issue / memory / session / terminal を連結）。
+/// 公開する全 MCP tool のレジストリ（memory / session / terminal を連結）。
 ///
 /// # Panics
 ///
@@ -50,19 +47,10 @@ pub(super) fn registry() -> Vec<RegisteredTool> {
 #[must_use]
 pub(super) fn registry_with_families(families: McpToolFamilies) -> Vec<RegisteredTool> {
     let mut tools = Vec::new();
-    if families.issue {
-        tools.extend(issue::tools());
-    }
     if families.memory {
         tools.extend(memory::tools());
     }
-    tools.extend(session::tools().into_iter().filter(|tool| {
-        families.issue
-            || !matches!(
-                tool.route(),
-                ToolRoute::Session(SessionAction::DelegateIssue)
-            )
-    }));
+    tools.extend(session::tools());
     tools.extend(terminal::tools());
     validate_registry(tools).expect("invalid MCP tool descriptor registry")
 }
@@ -222,7 +210,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 51); // issue 6 + memory 4 + session 39 + terminal 2
+        assert_eq!(reg.len(), 44); // memory 4 + session 38 + terminal 2
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -452,57 +440,29 @@ mod tests {
     /// 系統ごとの tool 数を固定する（IF の増減に気づけるように）。
     #[test]
     fn each_category_contributes_its_tools() {
-        assert_eq!(super::issue::tools().len(), 6);
         assert_eq!(super::memory::tools().len(), 4);
-        assert_eq!(super::session::tools().len(), 39);
+        assert_eq!(super::session::tools().len(), 38);
         assert_eq!(super::terminal::tools().len(), 2);
     }
 
     #[test]
-    fn registry_filters_issue_and_memory_families_independently() {
-        let without_issue = registry_with_families(McpToolFamilies {
-            issue: false,
-            ..McpToolFamilies::all()
-        });
+    fn registry_filters_the_memory_family() {
+        let with_memory = registry_with_families(McpToolFamilies::all());
         assert!(
-            without_issue
-                .iter()
-                .all(|tool| !tool.descriptor.name().starts_with("issue_")
-                    && tool.descriptor.name() != "session_delegate_issue")
-        );
-        assert!(
-            without_issue
+            with_memory
                 .iter()
                 .any(|tool| tool.descriptor.name() == "memory_search")
         );
 
-        let without_memory = registry_with_families(McpToolFamilies {
-            memory: false,
-            ..McpToolFamilies::all()
-        });
+        let without_memory = registry_with_families(McpToolFamilies { memory: false });
         assert!(
             without_memory
                 .iter()
                 .all(|tool| !tool.descriptor.name().starts_with("memory_"))
         );
+        assert_eq!(without_memory.len(), 40);
         assert!(
             without_memory
-                .iter()
-                .any(|tool| tool.descriptor.name() == "issue_search")
-        );
-        assert!(
-            without_memory
-                .iter()
-                .any(|tool| tool.descriptor.name() == "session_delegate_issue")
-        );
-
-        let neither = registry_with_families(McpToolFamilies {
-            issue: false,
-            memory: false,
-        });
-        assert_eq!(neither.len(), 40);
-        assert!(
-            neither
                 .iter()
                 .any(|tool| tool.descriptor.name() == "session_dispatch")
         );
@@ -511,7 +471,7 @@ mod tests {
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 51);
+        assert_eq!(registry.len(), 44);
         for tool in &registry {
             let descriptor = &tool.descriptor;
             assert_ne!(descriptor.description(), "");
@@ -540,16 +500,10 @@ mod tests {
         use CallerPolicy::{AgentCredential, Public, SessionCredential};
         use DispatchToolAction as Dispatch;
         use SessionAction as Session;
-        use StoreRoot::{Memory, Workspace};
+        use StoreRoot::Memory;
         use ToolRoute::{AgentInventory, AgentResume, Store};
 
         let expected = vec![
-            ("issue_create", Store(Workspace), Public),
-            ("issue_get", Store(Workspace), Public),
-            ("issue_to_prompt", Store(Workspace), Public),
-            ("issue_search", Store(Workspace), Public),
-            ("issue_update", Store(Workspace), Public),
-            ("issue_delete", Store(Workspace), Public),
             ("memory_save", Store(Memory), Public),
             ("memory_get", Store(Memory), Public),
             ("memory_search", Store(Memory), Public),
@@ -629,11 +583,6 @@ mod tests {
             (
                 "session_decision_log",
                 ToolRoute::Session(Session::DecisionLog),
-                SessionCredential,
-            ),
-            (
-                "session_delegate_issue",
-                ToolRoute::Session(Session::DelegateIssue),
                 SessionCredential,
             ),
             (
@@ -774,7 +723,7 @@ mod tests {
             Err(ToolError::Unimplemented(_))
         ));
         let duplicate_name = vec![
-            ToolDescriptor::workspace_store(FixtureTool("same")),
+            ToolDescriptor::memory_store(FixtureTool("same")),
             ToolDescriptor::session(FixtureTool("same"), SessionAction::List),
         ];
         assert!(
@@ -810,7 +759,7 @@ mod tests {
             SchemaFixture("call", "{}").call("{}", Path::new(".")),
             Err(ToolError::Unimplemented(_))
         ));
-        let unsupported_schema = vec![ToolDescriptor::workspace_store(UnsupportedSchema)];
+        let unsupported_schema = vec![ToolDescriptor::memory_store(UnsupportedSchema)];
         assert!(
             validate_registry(unsupported_schema)
                 .err()
@@ -824,43 +773,12 @@ mod tests {
             SchemaFixture("not_object", r#"{"type":"array","properties":{}}"#),
             SchemaFixture("no_properties", r#"{"type":"object"}"#),
         ] {
-            assert!(validate_registry(vec![ToolDescriptor::workspace_store(fixture)]).is_err());
+            assert!(validate_registry(vec![ToolDescriptor::memory_store(fixture)]).is_err());
         }
 
         assert!(matches!(
             super::memory::MemoryGet.call("{}", Path::new(".")),
             Err(ToolError::InvalidParams(_))
-        ));
-    }
-
-    fn assert_invalid_issue_json(tool: &dyn Tool) {
-        let error = tool.call("{", Path::new(".")).unwrap_err();
-        let actual = std::mem::discriminant(&error);
-        let expected = std::mem::discriminant(&ToolError::InvalidParams(String::new()));
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn every_issue_adapter_maps_malformed_json_to_invalid_params() {
-        assert_invalid_issue_json(&super::issue::IssueCreate);
-        assert_invalid_issue_json(&super::issue::IssueGet);
-        assert_invalid_issue_json(&super::issue::IssueToPrompt);
-        assert_invalid_issue_json(&super::issue::IssueSearch);
-        assert_invalid_issue_json(&super::issue::IssueUpdate);
-        assert_invalid_issue_json(&super::issue::IssueDelete);
-
-        let temp = tempfile::tempdir().unwrap();
-        let store = usagi_core::infrastructure::store::issue::IssueStore::new(temp.path());
-        assert_eq!(
-            super::issue::IssueGet::call_with_store(r#"{"number":4294967295}"#, &store).unwrap(),
-            "null"
-        );
-
-        std::fs::create_dir_all(temp.path().join(".usagi")).unwrap();
-        std::fs::write(temp.path().join(".usagi/issues"), "not a directory").unwrap();
-        assert!(matches!(
-            super::issue::IssueGet::call_with_store(r#"{"number":1}"#, &store),
-            Err(ToolError::Execution(_))
         ));
     }
 }

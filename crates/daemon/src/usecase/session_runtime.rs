@@ -32,7 +32,6 @@ use usagi_core::infrastructure::session_snapshot::{
     SessionListItem, SessionListLifecycle, SessionListSnapshot, SessionRuntimeObservation,
     SessionStatusItem, SessionStatusSnapshot, SessionWorktreeStatus,
 };
-use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::lifecycle::DaemonLifecycleStore;
 
 use crate::usecase::session_teardown::{
@@ -71,7 +70,6 @@ pub enum SessionRuntimeError {
     PermissionDenied,
     AgentFailure { code: ErrorCode, message: String },
     Delivery(String),
-    AmbiguousIssue(AmbiguousIssueNumber),
     Delegation(DelegationFailure),
     Rejected,
     Storage,
@@ -211,7 +209,6 @@ impl SessionRuntimeError {
             | Self::DurableFailure(message)
             | Self::AgentFailure { message, .. }
             | Self::Delivery(message) => message.clone(),
-            Self::AmbiguousIssue(error) => error.to_string(),
             Self::Delegation(failure) => failure.message.clone(),
             Self::UnknownSession => "session was not found".into(),
             Self::ScopeUnavailable => "session scope is not available".into(),
@@ -1081,7 +1078,6 @@ impl SessionRuntime {
             | SessionAction::TodoRemove
             | SessionAction::DecisionList
             | SessionAction::DecisionLog
-            | SessionAction::DelegateIssue
             | SessionAction::DelegateBrief => Err(SessionRuntimeError::InvalidRequest),
         }
     }

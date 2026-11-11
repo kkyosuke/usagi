@@ -67,7 +67,6 @@ fn settings_default_uses_the_system_theme() {
     assert_eq!(settings.modal_selection_mode, ModalSelectionMode::Action);
     assert_eq!(settings.default_model, DefaultModel::OpenAi);
     assert_eq!(settings.terminal_max_concurrent.get(), 64);
-    assert!(settings.issue_enabled);
     assert!(settings.memory_enabled);
     assert!(settings.env.is_empty());
 }
@@ -108,7 +107,6 @@ fn settings_round_trip_through_json() {
         terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
-        issue_enabled: false,
         memory_enabled: false,
         team_template: TeamTemplate::Pipeline,
         env: bindings(&[("GH_TOKEN", "op://Private/GitHub/token")]),
@@ -121,7 +119,7 @@ fn settings_round_trip_through_json() {
     assert!(json.contains("\"terminal_max_concurrent\":128"));
     assert!(json.contains("\"default_model\":\"claude\""));
     assert!(json.contains("\"default_branch\":\"refs/heads/main\""));
-    assert!(json.contains("\"issue_enabled\":false"));
+    assert!(!json.contains("issue_enabled"));
     assert!(json.contains("\"memory_enabled\":false"));
     let back: Settings = serde_json::from_str(&json).unwrap();
     assert_eq!(back, settings);
@@ -443,7 +441,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
         terminal_max_concurrent: TerminalConcurrencyLimit::default(),
         default_model: DefaultModel::Claude,
         default_branch: None,
-        issue_enabled: true,
         memory_enabled: false,
         team_template: TeamTemplate::Hierarchical,
         env: EnvBindings::new(),
@@ -451,7 +448,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
     let local = LocalSettings {
         default_model: Some(DefaultModel::OpenAi),
         default_branch: Some("refs/remotes/origin/main".to_owned()),
-        issue_enabled: Some(false),
         team_template: Some(TeamTemplate::Flat),
         ..LocalSettings::default()
     };
@@ -469,7 +465,6 @@ fn local_settings_overlay_only_workspace_owned_fields() {
             terminal_max_concurrent: TerminalConcurrencyLimit::default(),
             default_model: DefaultModel::OpenAi,
             default_branch: Some("refs/remotes/origin/main".to_owned()),
-            issue_enabled: false,
             memory_enabled: false,
             team_template: TeamTemplate::Flat,
             env: EnvBindings::new(),
@@ -549,7 +544,6 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
         terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
-        issue_enabled: false,
         memory_enabled: false,
         ..Settings::default()
     };
@@ -560,7 +554,6 @@ fn a_global_config_save_keeps_fields_owned_by_other_settings_surfaces() {
     assert_eq!(saved.terminal_max_concurrent.get(), 128);
     assert_eq!(saved.default_model, DefaultModel::Claude);
     assert_eq!(saved.default_branch, None);
-    assert!(!saved.issue_enabled);
     assert!(!saved.memory_enabled);
     assert_eq!(saved.env, latest.env);
 }
@@ -649,7 +642,6 @@ fn full_settings_convert_to_workspace_owned_values_only() {
         terminal_max_concurrent: TerminalConcurrencyLimit::new(128).unwrap(),
         default_model: DefaultModel::Claude,
         default_branch: Some("refs/heads/main".to_owned()),
-        issue_enabled: false,
         memory_enabled: true,
         team_template: TeamTemplate::Pipeline,
         env: EnvBindings::new(),
@@ -665,7 +657,6 @@ fn full_settings_convert_to_workspace_owned_values_only() {
             terminal_max_concurrent: TerminalConcurrencyLimit::default(),
             default_model: DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
-            issue_enabled: false,
             memory_enabled: true,
             team_template: TeamTemplate::Pipeline,
             env: EnvBindings::new(),
@@ -677,4 +668,27 @@ fn full_settings_convert_to_workspace_owned_values_only() {
     assert!(!json.contains("modal_selection_mode"));
     assert!(format!("{local:?}").contains("Claude"));
     assert_eq!(local.clone(), local);
+}
+
+#[test]
+fn retired_issue_enabled_keys_are_ignored_on_load_and_dropped_on_save() {
+    let settings: Settings =
+        serde_json::from_str(r#"{"theme":"dark","issue_enabled":false,"memory_enabled":false}"#)
+            .unwrap();
+    assert_eq!(settings.theme, Theme::Dark);
+    assert!(!settings.memory_enabled);
+    assert!(
+        !serde_json::to_string(&settings)
+            .unwrap()
+            .contains("issue_enabled")
+    );
+
+    let local: LocalSettings =
+        serde_json::from_str(r#"{"issue_enabled":true,"memory_enabled":false}"#).unwrap();
+    assert_eq!(local.memory_enabled, Some(false));
+    assert!(
+        !serde_json::to_string(&local)
+            .unwrap()
+            .contains("issue_enabled")
+    );
 }

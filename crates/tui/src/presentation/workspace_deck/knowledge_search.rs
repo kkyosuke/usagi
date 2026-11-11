@@ -1,8 +1,8 @@
-//! Issue / Memory picker and exact-source reader, with stale response fences.
+//! Memory picker and exact-source reader, with stale response fences.
 use super::{DeckOverlay, Key, OverlayIntent, WorkspaceDeck, modal};
 use crate::presentation::knowledge_search::{Request, Response};
 use crate::presentation::widgets::TextInput;
-use crate::usecase::application::knowledge_search::{Document, Kind, QUERY_LIMIT, Results};
+use crate::usecase::application::knowledge_search::{Document, QUERY_LIMIT, Results};
 use crate::usecase::terminal_input::LiveTerminalAction;
 use usagi_core::domain::presentation_text::sanitize_presentation_line;
 
@@ -13,7 +13,6 @@ pub(super) struct Search {
     revision: u64,
     requested: Option<u64>,
     results: Results,
-    filter: usize,
     cursor: usize,
     document: Option<Document>,
     lines: Vec<String>,
@@ -24,15 +23,7 @@ pub(super) struct Search {
 
 impl Search {
     fn rows(&self) -> Vec<&Document> {
-        self.results
-            .documents
-            .iter()
-            .filter(|doc| match self.filter {
-                1 => doc.kind == Kind::Issue,
-                2 => doc.kind == Kind::Memory,
-                _ => true,
-            })
-            .collect()
+        self.results.documents.iter().collect()
     }
 
     fn refresh(&mut self) {
@@ -90,10 +81,6 @@ impl Search {
                     self.status = "Loading document…".into();
                 }
             }
-            Key::Tab => {
-                self.filter = (self.filter + 1) % 3;
-                self.cursor = 0;
-            }
             Key::Up | Key::PageUp => {
                 self.cursor =
                     self.cursor
@@ -115,7 +102,7 @@ impl Search {
 
     fn summary(&self) -> String {
         format!(
-            "{} results · {} omitted · {} unavailable (max 100 per store)",
+            "{} results · {} omitted · {} unavailable (max 100)",
             self.results.documents.len(),
             self.results.omitted,
             self.results.errors.len()
@@ -238,10 +225,7 @@ pub(super) fn render(
             search.input.cursor(),
             search.input.selection(),
         ));
-        body.push(format!(
-            "{} · Tab filter · Ctrl-O m refresh",
-            ["All", "Issues", "Memory"][search.filter]
-        ));
+        body.push("Memory · Ctrl-O m refresh".to_owned());
         body.extend(
             search
                 .results
@@ -255,13 +239,12 @@ pub(super) fn render(
             && search.requested == Some(search.revision)
             && search.status != "Searching…"
         {
-            body.push("No matching documents in this filter".into());
+            body.push("No matching memories".into());
         }
         for (index, document) in rows.iter().enumerate().take(end).skip(start) {
             body.push(sanitize_presentation_line(&format!(
-                "{} {:?} {} · {}",
+                "{} {} · {}",
                 modal::selection_marker(index == search.cursor),
-                document.kind,
                 document.title,
                 document.detail
             )));
@@ -277,7 +260,7 @@ pub(super) fn render(
         height,
         width,
         base,
-        "Search Issue / Memory",
+        "Search Memory",
         inner,
         body.len(),
         body,

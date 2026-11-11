@@ -2373,22 +2373,22 @@ mod tests {
         let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
         let _ = runtime.handle_key(Key::Char(':'));
         let before = runtime.state().selected();
-        type_str(&mut runtime, "issue");
-        let _ = runtime.handle_key(Key::Backspace); // "issu"
+        type_str(&mut runtime, "roles");
+        let _ = runtime.handle_key(Key::Backspace); // "role"
         let _ = runtime.handle_key(Key::Left); // caret motion
         let _ = runtime.handle_key(Key::Right);
-        let _ = runtime.handle_key(Key::Tab); // complete → "issue"
+        let _ = runtime.handle_key(Key::Tab); // complete → "roles"
         let _ = runtime.handle_key(Key::Up); // no history yet → candidate move
         let _ = runtime.handle_key(Key::Down);
         assert_eq!(runtime.state().selected(), before);
-        assert_eq!(runtime.overview_modal().unwrap().input(), "issue");
+        assert_eq!(runtime.overview_modal().unwrap().input(), "roles");
     }
 
     #[test]
     fn overview_palette_selects_and_replaces_with_emacs_and_shift_keys() {
         let workspace = WorkspaceId::new();
         let mut runtime = overview_on(workspace);
-        type_str(&mut runtime, "issue");
+        type_str(&mut runtime, "roles");
         // Ctrl-A/Ctrl-E move the caret to the line edges without opening a session.
         let _ = runtime.handle_key(Key::LineStart);
         assert_eq!(runtime.overview_modal().unwrap().cursor(), 0);

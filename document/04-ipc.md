@@ -1114,7 +1114,7 @@ routing 契約は `usagi-core` の `infrastructure::owner_routing` が正本で�
 
 | request | 配送先 |
 |---|---|
-| workspace / session / issue / Agent launch / generic terminal launch 等の control operation | active generation |
+| workspace / session / Agent launch / generic terminal launch 等の control operation | active generation |
 | scope inventory（`inventory` / `completed_inventory`） | trusted な全 generation。完全な `TerminalRef` で merge / dedup する |
 | attach / resume / resync / input / `input_outcome` / resize / detach / `observe` / `dismiss` | request が持つ完全な `TerminalRef.daemon_generation` の owner endpoint |
 | unknown / retired / forged generation | typed `stale_target`。current endpoint や同名 terminal へ fallback しない |

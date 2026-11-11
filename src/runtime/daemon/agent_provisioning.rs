@@ -124,7 +124,7 @@ pub(super) fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
 
 /// The registry's bounded in-memory replay buffer already serves reconnect
 /// within retention; a durable on-disk output journal is intentionally deferred
-/// with daemon-crash PTY FD continuation (out of scope for this issue).
+/// with daemon-crash PTY FD continuation (out of scope here).
 pub(super) struct DiscardJournal;
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl OutputJournal for DiscardJournal {

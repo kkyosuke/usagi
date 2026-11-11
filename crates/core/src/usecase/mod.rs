@@ -2,8 +2,6 @@
 //! TUI 面・daemon 面の両方から呼ばれるロジックだけを置き、
 //! v2 では必要になった時点で実装を追加する。
 //!
-//! - [`issue`] — issue の CRUD（create（採番）/ get / list / update / delete）。
-//!   人間向け CLI と MCP tool の双方が呼ぶ。
 //! - [`memory`] — memory の CRUD（save（slug・upsert）/ get / list / delete）。
 //! - [`env`] — global / workspace の環境変数 binding を子プロセス環境へ解決する
 //!   （literal はそのまま、`op://` は注入された [`env::SecretResolver`] 経由）。
@@ -27,7 +25,6 @@ pub mod agent_phase;
 pub mod claude_sandbox;
 pub mod clean;
 pub mod env;
-pub mod issue;
 pub mod memory;
 pub mod note;
 pub mod ports;

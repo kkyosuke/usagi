@@ -16,13 +16,12 @@
 詳細は下表の担当文書を参照する。開発者は加えて [2. アーキテクチャ](02-architecture.md) と
 [6. 開発規約](06-conventions.md) を読む。同じ事実を複数文書へ複製せず、概要文書は担当する正本へリンクする。
 
-文書は次のクラスに分ける。矛盾した場合は current spec の担当文書を現在契約とし、history や backlog を仕様の根拠にしない。
+文書は次のクラスに分ける。矛盾した場合は current spec の担当文書を現在契約とし、history を仕様の根拠にしない。
 
 | クラス | 所在 | 役割 |
 |---|---|---|
 | current spec | 本 README の番号付き文書 | 実装済みの外部挙動、architecture、運用規約のトピック別 SSoT |
 | proposal history | [`proposals/`](proposals/README.md) | 採用・却下を含む設計判断の履歴。現在契約は番号付き文書へ畳み込み、proposal 自体は正本にしない |
-| backlog | [`.usagi/issues/`](../.usagi/issues/) | 未完了作業、改善案、進捗状態。実装済みとみなさず、現在契約は current spec で確認する |
 | agent runbook | [`.agents/`](../.agents/) | session、worktree、PR の作業手順。製品仕様は current spec を参照する |
 
 ## 仕様文書

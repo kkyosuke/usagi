@@ -102,11 +102,11 @@ source に含めない。remove は mirror 内の worktree を子から順に Gi
 `GIT_DIR` 等が入っていても対象 repository は `-C` で指したものだけになる
 （[2. アーキテクチャ#Git subprocess の環境 confine](02-architecture.md#git-subprocess-の環境-confine)）。
 
-Git workspace を daemon が最初に開くと、`.usagi/.gitignore` に usagi 管理の ignore rules を書く。`issues/`
-と `memory/` は共有・追跡対象のままにし、session tree、derived index、lock、その他の local metadata は
+Git workspace を daemon が最初に開くと、`.usagi/.gitignore` に usagi 管理の ignore rules を書く。`memory/`
+は共有・追跡対象のままにし、session tree、derived index、lock、その他の local metadata は
 ignore する。この `/*` の既定 ignore が、[workspace fence](#単一-daemon-の-2-段-fence) の
 `<workspace>/.usagi/daemon/daemon.lock` も git 追跡外に保つ。旧版が repository root の `.gitignore` に書いた
-usagi 専用行は削除するが、他の行は保持する。
+usagi 専用行（廃止済みの `.usagi/issues/` 行を含む）は削除するが、他の行は保持する。
 
 workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり。runtime mode 別の子 directory
 （`dev/` / `local/`）は project runtime state のためのものであり、workspace fence はそれらの兄弟として置く。
@@ -711,8 +711,7 @@ hard crash では unique temporary が残り得るが、後続 save は別名を
 serve し、request ごとに role 付きの lease を発行し、client worker を shutdown 半分とともに保持する
 （[client worker の保持](#client-worker-の保持)）。したがって role が `draining` へ移れば control と spawn は
 次の request から拒否される。rollover は internal producer を止め、lease を drain してから authority を渡し、
-draining generation の resource claim が 0 になった時点で endpoint と process を回収する。この順序の設計経緯は
-完了済みの [#559](../.usagi/issues/559-feat-daemon-standby-serve-owner-shard-seamless-rollover.md) に残す。
+draining generation の resource claim が 0 になった時点で endpoint と process を回収する。
 正常終了後の discovery は stale socket への `ConnectionRefused` ではなく `NotFound` になる。client bootstrap は
 locator 自体の `NotFound` では replacement を一度起動する。検証済み locator の endpoint 検証または connect 後の
 `NotFound` は `ConnectionRefused` 相当に分類し、上記の fenced recovery が完了した場合だけ起動する。その他の接続失敗、
@@ -1045,7 +1044,7 @@ serve 中 workspace にも現れない。その generation はまだそこの te
 standby から昇格した generation は workspace fence も単一インスタンス lock も持たない（[planned replacement](#planned-replacement)）。
 返すものが無い一方、その generation の起動 workspace は旧 owner が fence を返した後どの process にも fence されない。
 別 mode の daemon がその workspace を取れてしまうこの穴は昇格の時点から存在し、本節の解放はそれを早めるだけで
-作り出してはいない（issue #771）。
+作り出してはいない。
 
 ### workspace state subtree
 
@@ -1867,9 +1866,6 @@ spawn より先にこの記録を保存する。prompt の内容や client が�
 旧 IPC の直接 dispatch は既存の起動と dispatch binding の互換を保つが、監査記録の `caller` と `caller_operation_id` は
 空のままにする。新しい MCP tool の認証済み dispatch と区別でき、TUI の作成元は **Unknown** と表示する。
 保存済みデータの旧分類や未知の分類は `unknown` として読み込み、作成元を推測しない。
-
-`session_delegate_issue` は prompt を queue へ保存するだけなので、この時点では runtime の起動記録を作らない。
-後で人が `agent` を実行した場合、起動元は `manual` であり、仕事を委譲した caller は既存の dispatch binding に残る。
 
 `usagi session agents` は現在の workspace の root / session runtime を session 名とともに JSON で列挙する。
 例えば同じ session の `created.source: manual` と `created.source: mcp` を区別し、MCP の `caller.agent_id` と
@@ -3087,7 +3083,6 @@ current generation の exact fence は stale request の誤適用を防ぎ、own
 typed `draining collection pending` で拒否し、slot を空けるために live PTY を落とさない。shipping binary・2 daemon
 process・実 PTY を通す契約の正本は本節で、最終回帰は
 [`tests/agent_ipc_e2e.rs`](../tests/agent_ipc_e2e.rs) が固定する。
-[#574](../.usagi/issues/574-test-daemon-seamless-rollover-product-e2e-2-daemon-process-pty.md) はその実装履歴である。
 
 spawn reservation は process spawn より先に保存する。crash 後に process identity を証明できない terminal は
 `identity_unknown` として扱い、replacement spawn、input、kill を自動で行わない。PID の生存だけでは ownership

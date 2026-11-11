@@ -491,7 +491,7 @@ mod tests {
         }
         // MCP tool は配線した server の面としてそのまま通す。
         assert_eq!(
-            classify_tool("mcp__usagi__issue_get", ["number"]),
+            classify_tool("mcp__usagi__memory_get", ["name"]),
             ToolGuard::Unrestricted
         );
     }

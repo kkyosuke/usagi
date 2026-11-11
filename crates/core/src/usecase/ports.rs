@@ -5,107 +5,14 @@
 //! transaction callback, keeping read-modify-write operations atomic without
 //! exposing a concrete lock type to the application layer.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Result;
 
-use crate::domain::issue::{Issue, IssueSummary};
 use crate::domain::memory::{Memory, MemorySummary};
 use crate::domain::recent::Unite;
 use crate::domain::workspace::Workspace;
 use crate::domain::workspace_state::WorkspaceState;
-
-/// One parseable issue and the filename identity observed with it.
-#[derive(Debug, Clone)]
-pub struct IssueSource {
-    pub issue: Issue,
-    pub file: String,
-    pub filename_number: Option<u32>,
-}
-
-impl IssueSource {
-    #[must_use]
-    pub fn summary(self) -> IssueSummary {
-        self.issue.summary(&self.file)
-    }
-}
-
-/// One consistent issue-source observation used for readiness calculation.
-#[derive(Debug, Clone, Default)]
-pub struct IssueSourceSnapshot {
-    pub sources: Vec<IssueSource>,
-    pub claims: BTreeMap<u32, Vec<PathBuf>>,
-}
-
-/// Operations available while an issue repository transaction is locked.
-pub trait IssueTransaction {
-    /// Read a single issue from the locked source set.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the identity is ambiguous or cannot be read.
-    fn get(&self, number: u32) -> Result<Option<Issue>>;
-
-    /// Capture all parseable sources and filename claims under the same lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the source directory cannot be enumerated.
-    fn source_snapshot(&self) -> Result<IssueSourceSnapshot>;
-
-    /// Reserve the next workspace-wide issue number.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the durable sequence cannot be updated.
-    fn reserve_next_number(&self) -> Result<u32>;
-
-    /// Commit one issue source.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the source cannot be committed.
-    fn save(&self, issue: &Issue) -> Result<()>;
-}
-
-/// Persistence required by issue CRUD usecases.
-pub trait IssueRepository {
-    /// Run `operation` while holding the repository's write lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lock cannot be acquired or `operation` fails.
-    fn transact<T>(&self, operation: impl FnOnce(&dyn IssueTransaction) -> Result<T>) -> Result<T>;
-
-    /// Read one issue outside a larger transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the issue cannot be read unambiguously.
-    fn get(&self, number: u32) -> Result<Option<Issue>>;
-
-    /// Read issue summaries.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when neither the derived index nor sources can be read.
-    fn summaries(&self) -> Result<Vec<IssueSummary>>;
-
-    /// Capture one consistent source snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the source directory cannot be observed.
-    fn source_snapshot(&self) -> Result<IssueSourceSnapshot>;
-
-    /// Delete one issue.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the identity is ambiguous or removal fails.
-    fn delete(&self, number: u32) -> Result<bool>;
-}
 
 /// One memory source and the exact filename from which it was read.
 #[derive(Debug, Clone)]
@@ -270,11 +177,4 @@ pub trait WorkspaceRepository {
     ///
     /// Returns an error when state cannot be read or parsed.
     fn workspace_state(&self, root: &Path) -> Result<Option<WorkspaceState>>;
-
-    /// Load issue summaries for one workspace.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when issue sources cannot be read.
-    fn issue_summaries(&self, root: &Path) -> Result<Vec<IssueSummary>>;
 }

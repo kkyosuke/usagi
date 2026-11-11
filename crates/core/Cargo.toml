@@ -11,7 +11,7 @@ repository.workspace = true
 license.workspace = true
 publish = false
 
-# domain の Workspace / Issue / Memory は時刻に chrono、JSON 表現の (de)serialize に
+# domain の Workspace / Memory は時刻に chrono、JSON 表現の (de)serialize に
 # serde を使う。infrastructure（永続化）は serde_json / anyhow / fs2 / dirs / rayon / sha2 を
 # 使う。version はルート Cargo.toml で一元管理する。
 [dependencies]

@@ -1409,27 +1409,6 @@ fn rejects_invalid_requests_duplicates_missing_sessions_and_git_failures() {
 }
 
 #[test]
-fn ambiguous_issue_error_preserves_number_and_sorted_exact_paths() {
-    let files = vec![
-        PathBuf::from("/repo/.usagi/issues/001-first.md"),
-        PathBuf::from("/repo/.usagi/issues/001-second.md"),
-    ];
-    let error = SessionRuntimeError::AmbiguousIssue(AmbiguousIssueNumber {
-        number: 1,
-        files: files.clone(),
-    });
-
-    assert_eq!(
-        error,
-        SessionRuntimeError::AmbiguousIssue(AmbiguousIssueNumber { number: 1, files })
-    );
-    let message = error.safe_message();
-    assert!(message.contains("issue #1 is ambiguous"));
-    assert!(message.contains("/repo/.usagi/issues/001-first.md"));
-    assert!(message.contains("/repo/.usagi/issues/001-second.md"));
-}
-
-#[test]
 fn role_errors_preserve_their_derived_value_contract() {
     let errors = [
         SessionRuntimeError::RoleConflict(

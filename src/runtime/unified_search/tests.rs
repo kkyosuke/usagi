@@ -220,7 +220,6 @@ fn unified_search_bounds_artifacts_reports_errors_and_cancels_between_sources() 
         port.search(&query, Arc::new(AtomicBool::new(true))),
         Results::default()
     );
-    assert!(!tmp.path().join(".usagi/issues/index.json").exists());
     assert!(!tmp.path().join(".usagi/memory/index.json").exists());
 }
 
@@ -229,9 +228,11 @@ fn unified_search_cancels_knowledge_lock_wait_and_joins_without_partial_results(
     use std::sync::mpsc;
     use std::time::Duration;
     let tmp = tempfile::tempdir().unwrap();
-    let store = tmp.path().join(".usagi/issues");
+    let store = tmp.path().join(".usagi/memory");
     fs::create_dir_all(&store).unwrap();
-    fs::write(store.join("001-report.md"), "---\nnumber: 1\ntitle: Report\nstatus: todo\npriority: high\ndependson: []\ncreated_at: 2026-10-20T00:00:00Z\nupdated_at: 2026-10-20T00:00:00Z\n---\nreport\n").unwrap();
+    fs::write(store.join("report.md"), "---\nname: report\ntitle: Report\ntype: project\ncreated_at: 2026-10-20T00:00:00Z\nupdated_at: 2026-10-20T00:00:00Z\n---\nreport\n").unwrap();
+    // A pending derived repair makes the read wait for the store lock.
+    fs::write(store.join(".derived-dirty"), "repair").unwrap();
     let held =
         usagi_core::infrastructure::persistence::store_lock::StoreLock::acquire(&store).unwrap();
     let mut port = UnifiedSearch::new(tmp.path(), Box::<Terminals>::default());
