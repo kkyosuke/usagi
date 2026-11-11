@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
 use usagi_core::infrastructure::bounded_process::{
@@ -197,17 +197,20 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
     }
 
     fn run_setup_command(&self, session_root: &Path, command: &str) -> anyhow::Result<()> {
-        let status = Command::new("/bin/sh")
-            .args(["-lc", command])
-            .current_dir(session_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()?;
-        if status.success() {
+        let mut child = Command::new("/bin/sh");
+        child.args(["-lc", command]).current_dir(session_root);
+        let output = execute_command_output(
+            child,
+            ChildPolicy {
+                timeout: Duration::from_secs(300),
+                terminate_grace: Duration::from_millis(100),
+                output_limit: 8 * 1024 * 1024,
+            },
+        )?;
+        if output.success {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("setup command exited with {status}"))
+            Err(anyhow::anyhow!("setup command exited with non-zero status"))
         }
     }
 
@@ -524,7 +527,7 @@ mod tests {
                 .run_setup_command(session.path(), "exit 7")
                 .unwrap_err()
                 .to_string()
-                .contains("exit status: 7")
+                .contains("non-zero status")
         );
     }
     #[test]
