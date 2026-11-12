@@ -18,9 +18,17 @@ assert_classification() {
 
 assert_classification $'rust=true\nmarkdown=false' crates/core/src/lib.rs
 assert_classification $'rust=false\nmarkdown=true' document/06-conventions.md
+assert_classification $'rust=true\nmarkdown=true' crates/cli/src/orchestration-guide.md
+assert_classification $'rust=true\nmarkdown=false' coverage-off-allowlist.json
+assert_classification $'rust=true\nmarkdown=false' coverage-off-budget.json
 assert_classification $'rust=false\nmarkdown=false' document/assets/update-selector.svg
 assert_classification $'rust=true\nmarkdown=true' README.md scripts/coverage.sh
 assert_classification $'rust=true\nmarkdown=false' unknown/new-format.data
+
+if "$subject" changed deadbeefdeadbeefdeadbeefdeadbeefdeadbeef HEAD 2>/dev/null; then
+  echo "changed accepted an invalid base commit SHA" >&2
+  exit 1
+fi
 
 # Rust PR: all Rust aggregates report the heavy jobs; Markdown reports a skip.
 for context in test full-test coverage; do
