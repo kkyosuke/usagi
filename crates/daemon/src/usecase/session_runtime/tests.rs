@@ -5783,6 +5783,14 @@ fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
         .is_err()
     );
     assert!(
+        remove_teardown_tree(
+            &FakeSessionGit::fail(),
+            &MultiRepoIo { fail_repos: false },
+            &teardown,
+        )
+        .is_err()
+    );
+    assert!(
         delete_teardown_branch(
             &FakeSessionGit::ok(),
             &MultiRepoIo { fail_repos: true },

@@ -630,6 +630,12 @@ pub fn perform_delegated_create(
     perform_create_from(runtime, git, CreateOrigin::Delegated, operation_id, payload)
 }
 
+fn lock_runtime(
+    runtime: &Mutex<SessionRuntime>,
+) -> Result<std::sync::MutexGuard<'_, SessionRuntime>, SessionRuntimeError> {
+    runtime.lock().map_err(|_| SessionRuntimeError::Storage)
+}
+
 fn perform_create_from(
     runtime: &Mutex<SessionRuntime>,
     git: &dyn GitRunner,
@@ -638,26 +644,22 @@ fn perform_create_from(
     payload: &Value,
 ) -> Result<SessionReply, SessionRuntimeError> {
     let pre_orphan = pre_inspect_create_orphan(runtime, git, payload)?;
-    let step = runtime
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .begin_create_with_orphan(origin, operation_id, payload, pre_orphan)?;
+    let step = lock_runtime(runtime)?.begin_create_with_orphan(
+        origin,
+        operation_id,
+        payload,
+        pre_orphan,
+    )?;
     match step {
         SessionCreateStep::Done(reply) => Ok(reply),
         SessionCreateStep::Pending(in_flight) => {
             let result = SessionRuntime::execute_create(git, &in_flight);
-            let completion = runtime
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .finish_create(*in_flight, result)?;
+            let completion = lock_runtime(runtime)?.finish_create(*in_flight, result)?;
             match completion {
                 SessionCreateCompletion::Done(reply) => Ok(reply),
                 SessionCreateCompletion::Initializing(in_flight) => {
                     let result = SessionRuntime::execute_initialize(&in_flight);
-                    runtime
-                        .lock()
-                        .map_err(|_| SessionRuntimeError::Storage)?
-                        .finish_initialize(in_flight, result)
+                    lock_runtime(runtime)?.finish_initialize(in_flight, result)
                 }
             }
         }
@@ -671,7 +673,7 @@ fn pre_inspect_create_orphan(
 ) -> Result<Option<OrphanDiagnosis>, SessionRuntimeError> {
     let name = session_name(payload)?;
     let target = {
-        let guard = runtime.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let guard = lock_runtime(runtime)?;
         let untracked_orphan = !guard
             .state()?
             .sessions
@@ -757,7 +759,7 @@ pub fn perform_removal_identity(
     name: &str,
 ) -> Result<(SessionId, Option<String>), SessionRuntimeError> {
     let (session_id, repo_root) = {
-        let guard = runtime.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let guard = lock_runtime(runtime)?;
         let session_id = guard
             .state()?
             .sessions
@@ -795,10 +797,13 @@ fn perform_remove_as(
     merged_head_oid: Option<String>,
 ) -> Result<SessionReply, SessionRuntimeError> {
     let pre_orphan = pre_inspect_remove_orphan(runtime, payload)?;
-    let step = runtime
-        .lock()
-        .map_err(|_| SessionRuntimeError::Storage)?
-        .begin_remove_with_orphan(kind, operation_id, payload, merged_head_oid, pre_orphan)?;
+    let step = lock_runtime(runtime)?.begin_remove_with_orphan(
+        kind,
+        operation_id,
+        payload,
+        merged_head_oid,
+        pre_orphan,
+    )?;
     match step {
         SessionRemoveStep::Settled(reply) => Ok(reply),
         SessionRemoveStep::Accepted { reply, .. } => {
@@ -818,7 +823,7 @@ fn pre_inspect_remove_orphan(
 ) -> Result<Option<OrphanDiagnosis>, SessionRuntimeError> {
     let name = session_name(payload)?;
     let target = {
-        let guard = runtime.lock().map_err(|_| SessionRuntimeError::Storage)?;
+        let guard = lock_runtime(runtime)?;
         let is_integrity_orphan = guard.state()?.sessions.iter().any(|session| {
             session.name == name
                 && session

@@ -143,7 +143,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
             return Ok(vec![PathBuf::new()]);
         }
         let mut repositories = Vec::new();
-        collect_workspace_repositories(self, workspace_root, workspace_root, &mut repositories)?;
+        collect_workspace_repositories(self, workspace_root, Path::new(""), &mut repositories)?;
         if repositories.is_empty() {
             repositories.push(PathBuf::new());
         }
@@ -258,8 +258,8 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
 
 fn collect_workspace_repositories(
     io: &SystemSessionWorktreeIo,
-    workspace_root: &Path,
     directory: &Path,
+    relative_prefix: &Path,
     repositories: &mut Vec<PathBuf>,
 ) -> anyhow::Result<()> {
     let Ok(entries) = std::fs::read_dir(directory) else {
@@ -276,12 +276,11 @@ fn collect_workspace_repositories(
         if !entry.file_type()?.is_dir() || io.is_linked_worktree(&path) {
             continue;
         }
+        let relative = relative_prefix.join(&name);
         if io.is_repo_root(&path) {
-            if let Ok(relative) = path.strip_prefix(workspace_root) {
-                repositories.push(relative.to_path_buf());
-            }
+            repositories.push(relative);
         } else {
-            collect_workspace_repositories(io, workspace_root, &path, repositories)?;
+            collect_workspace_repositories(io, &path, &relative, repositories)?;
         }
     }
     Ok(())

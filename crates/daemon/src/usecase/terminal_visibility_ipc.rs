@@ -207,7 +207,9 @@ mod tests {
         let kept = terminal();
         let evicted = terminal();
         let visibility = SharedTerminalVisibility::open(temp.path());
+        assert!(!visibility.observe(&kept, 99).is_success());
         assert!(visibility.observe(&kept, 0).is_success());
+        assert!(!visibility.dismiss(&evicted, 99).is_success());
         assert!(visibility.dismiss(&evicted, 0).is_success());
 
         let reopened = SharedTerminalVisibility::open(temp.path());
