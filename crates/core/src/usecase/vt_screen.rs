@@ -1423,11 +1423,11 @@ fn decode_row(
 
 fn sanitize_decoded_row(cells: &mut [Cell]) {
     let cols = cells.len();
+    for cell in &mut cells[..cols.saturating_sub(1)] {
+        cell.wrapped = false;
+    }
     let mut col = 0;
     while col < cols {
-        if col + 1 < cols {
-            cells[col].wrapped = false;
-        }
         if cells[col].continuation {
             cells[col].ch = ' ';
             cells[col].continuation = false;
@@ -1437,9 +1437,6 @@ fn sanitize_decoded_row(cells: &mut [Cell]) {
         let width = UnicodeWidthChar::width(cells[col].ch).unwrap_or(1);
         if width == 2 {
             if col + 1 < cols && cells[col + 1].continuation {
-                if col + 2 < cols {
-                    cells[col + 1].wrapped = false;
-                }
                 col += 2;
             } else {
                 cells[col].ch = '\u{fffd}';
