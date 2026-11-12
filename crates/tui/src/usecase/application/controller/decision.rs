@@ -314,16 +314,16 @@ pub(super) fn update_decision_editor(
         }
         AppKey::SetDecisionFreeform(text) => {
             if editor.decision.allow_freeform {
-                editor.freeform = text;
+                editor.freeform = composition::sanitize_decision_text(&text);
                 follow_decision_freeform(editor);
             }
         }
         AppKey::Char(ch) if editor.decision.allow_freeform && editor.input_freeform => {
-            editor.freeform.push(ch);
+            composition::push_decision_char(&mut editor.freeform, ch);
             follow_decision_freeform(editor);
         }
         AppKey::Backspace if editor.decision.allow_freeform && editor.input_freeform => {
-            editor.freeform.pop();
+            composition::pop_decision_grapheme(&mut editor.freeform);
             follow_decision_freeform(editor);
         }
         AppKey::Paste(text) if editor.decision.allow_freeform && editor.input_freeform => {
@@ -373,7 +373,9 @@ fn follow_decision_freeform(editor: &mut DecisionEditor) {
 }
 
 fn paste_decision_freeform(editor: &mut DecisionEditor, text: &str) {
-    editor.freeform.push_str(text);
+    editor
+        .freeform
+        .push_str(&composition::sanitize_decision_text(text));
     follow_decision_freeform(editor);
 }
 

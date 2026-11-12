@@ -1,6 +1,7 @@
 //! Shared multiline environment-source editor used by Config and Home overlays.
 
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use usagi_core::domain::presentation_text::presentation_character_is_safe;
 use usagi_core::domain::settings::{EnvBindings, is_valid_env_name, validate_env_limits};
 
 /// Terminal-independent editing state for `NAME=value` source.
@@ -16,7 +17,7 @@ pub struct EnvironmentSourceEditor {
 impl EnvironmentSourceEditor {
     #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
-        let value = value.into();
+        let value = sanitize_multiline_source(&value.into());
         let cursor = value.len();
         Self {
             value,
@@ -42,7 +43,7 @@ impl EnvironmentSourceEditor {
     }
 
     pub fn replace(&mut self, value: impl Into<String>) {
-        self.value = value.into();
+        self.value = sanitize_multiline_source(&value.into());
         self.cursor = self.value.len();
         self.save_focused = false;
         self.vertical_column = None;
@@ -63,13 +64,14 @@ impl EnvironmentSourceEditor {
         if self.save_focused {
             return;
         }
-        self.value.insert_str(self.cursor, text);
-        self.cursor += text.len();
+        let clean = sanitize_multiline_source(text);
+        self.value.insert_str(self.cursor, &clean);
+        self.cursor += clean.len();
         self.vertical_column = None;
     }
 
     pub fn paste(&mut self, text: &str) {
-        self.insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
+        self.insert(text);
     }
 
     pub fn newline(&mut self) {
@@ -81,7 +83,7 @@ impl EnvironmentSourceEditor {
             return;
         }
         let previous = self.value[..self.cursor]
-            .char_indices()
+            .grapheme_indices(true)
             .next_back()
             .map_or(0, |(index, _)| index);
         self.value.drain(previous..self.cursor);
@@ -94,9 +96,9 @@ impl EnvironmentSourceEditor {
             return;
         }
         let next = self.value[self.cursor..]
-            .chars()
+            .graphemes(true)
             .next()
-            .map_or(self.cursor, |character| self.cursor + character.len_utf8());
+            .map_or(self.cursor, |grapheme| self.cursor + grapheme.len());
         self.value.drain(self.cursor..next);
         self.vertical_column = None;
     }
@@ -106,10 +108,12 @@ impl EnvironmentSourceEditor {
             return;
         }
         if forward {
-            if let Some(character) = self.value[self.cursor..].chars().next() {
-                self.cursor += character.len_utf8();
+            if let Some(grapheme) = self.value[self.cursor..].graphemes(true).next() {
+                self.cursor += grapheme.len();
             }
-        } else if let Some((index, _)) = self.value[..self.cursor].char_indices().next_back() {
+        } else if let Some((index, _)) =
+            self.value[..self.cursor].grapheme_indices(true).next_back()
+        {
             self.cursor = index;
         }
         self.vertical_column = None;
@@ -170,34 +174,39 @@ impl EnvironmentSourceEditor {
     }
 }
 
-fn display_width(value: &str) -> usize {
-    value
+fn sanitize_multiline_source(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
         .chars()
-        .map(|character| {
-            if character == '\t' {
-                1
-            } else {
-                UnicodeWidthChar::width(character).unwrap_or(0)
-            }
+        .filter(|character| {
+            matches!(*character, '\n' | '\t' | '\0') || presentation_character_is_safe(*character)
         })
-        .sum()
+        .collect()
+}
+
+fn grapheme_display_width(grapheme: &str) -> usize {
+    if grapheme == "\t" {
+        1
+    } else {
+        crate::presentation::widgets::display_width(grapheme)
+    }
+}
+
+fn display_width(value: &str) -> usize {
+    value.graphemes(true).map(grapheme_display_width).sum()
 }
 
 fn byte_offset_at_display_column(value: &str, column: usize) -> usize {
     let mut width = 0;
-    for (index, character) in value.char_indices() {
+    for (index, grapheme) in value.grapheme_indices(true) {
         if width >= column {
             return index;
         }
-        let character_width = if character == '\t' {
-            1
-        } else {
-            UnicodeWidthChar::width(character).unwrap_or(0)
-        };
-        if width.saturating_add(character_width) > column {
+        let grapheme_width = grapheme_display_width(grapheme);
+        if width.saturating_add(grapheme_width) > column {
             return index;
         }
-        width += character_width;
+        width += grapheme_width;
     }
     value.len()
 }
@@ -229,6 +238,15 @@ pub fn parse_environment_source(source: &str) -> Result<EnvBindings, String> {
         if value.contains('\0') {
             return Err(format!("line {}: values cannot contain NUL", index + 1));
         }
+        if !value
+            .chars()
+            .all(|character| character == '\t' || presentation_character_is_safe(character))
+        {
+            return Err(format!(
+                "line {}: values cannot contain control characters",
+                index + 1
+            ));
+        }
         bindings.insert(name.to_owned(), value.to_owned());
     }
     validate_env_limits(&bindings).map_err(|error| error.to_string())?;
@@ -255,11 +273,16 @@ mod tests {
 
     #[test]
     fn editing_is_unicode_safe_and_shared_validation_runs() {
-        let mut editor = EnvironmentSourceEditor::new("A=é");
+        let mut editor = EnvironmentSourceEditor::new("A=e\u{301}");
         editor.backspace();
-        editor.insert("1\nB=2");
+        editor.insert("1\nB=2\u{1b}");
         editor.delete_forward();
         assert_eq!(editor.parse().unwrap().len(), 2);
+        assert!(
+            super::parse_environment_source("A=val\u{7}")
+                .unwrap_err()
+                .contains("cannot contain control characters")
+        );
     }
 
     #[test]

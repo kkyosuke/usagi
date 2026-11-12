@@ -202,7 +202,12 @@ fn wrapped_memo(
                 caret_row = rows.len();
             }
             rows.push(if is_caret && show_cursor {
-                block_caret(&line, cursor - local_start, &style)
+                let caret_offset =
+                    usagi_core::domain::presentation_text::sanitize_presentation_line(
+                        &segment[..(cursor - local_start).min(segment.len())],
+                    )
+                    .len();
+                block_caret(&line, caret_offset, &style)
             } else {
                 style.paint(&line)
             });

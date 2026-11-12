@@ -108,7 +108,9 @@ fn pr_row(pr: &PrEntry, selected: bool, inner: usize) -> String {
         .paint(&format!("#{:<5}", pr.number()));
     let (label, style) = state_label(pr);
     let badge = style.paint(&format!("{label:<10}"));
-    let title = pr.title.as_deref().unwrap_or("(no title)");
+    let title = usagi_core::domain::presentation_text::sanitize_presentation_line(
+        pr.title.as_deref().unwrap_or("(no title)"),
+    );
     let hint = if pr.refresh == PrRefreshState::Pending {
         Some("refresh pending")
     } else if pr.refresh == PrRefreshState::BackingOff {
