@@ -428,7 +428,7 @@ mod tests {
             "ToolSearch",
             "TodoWrite",
             "AskUserQuestion",
-            "mcp__usagi__issue_get",
+            "mcp__usagi__memory_get",
         ] {
             let allowed = payload(
                 &worktree,

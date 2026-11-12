@@ -6161,13 +6161,7 @@ fn removed_local_llm_setting_is_ignored_before_daemon_provisioning() {
     let data_home = paths::DataHome::new(base.path(), paths::RuntimeMode::Production);
     let storage = Storage::new(data_home.selected());
     let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
-    assert_eq!(
-        tools.families,
-        McpToolFamilies {
-            issue: true,
-            memory: true,
-        }
-    );
+    assert_eq!(tools.families, McpToolFamilies { memory: true });
 
     std::fs::create_dir_all(storage.dir()).unwrap();
     std::fs::write(
@@ -6176,13 +6170,7 @@ fn removed_local_llm_setting_is_ignored_before_daemon_provisioning() {
     )
     .unwrap();
     let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
-    assert_eq!(
-        tools.families,
-        McpToolFamilies {
-            issue: true,
-            memory: true,
-        }
-    );
+    assert_eq!(tools.families, McpToolFamilies { memory: true });
 }
 
 #[test]
@@ -6197,7 +6185,7 @@ fn tool_families_follow_the_registered_workspace_and_fail_closed_when_unreadable
     // The workspace layer decides, exactly as it does for `usagi mcp`.
     store
         .save(&LocalSettings {
-            issue_enabled: Some(false),
+            memory_enabled: Some(false),
             ..LocalSettings::default()
         })
         .unwrap();
@@ -6205,10 +6193,7 @@ fn tool_families_follow_the_registered_workspace_and_fail_closed_when_unreadable
         configured_mcp_tools(&data_home, workspace.path())
             .unwrap()
             .families,
-        McpToolFamilies {
-            issue: false,
-            memory: true,
-        }
+        McpToolFamilies { memory: false }
     );
 
     // A prompt that advertised tools the MCP server cannot register would be
@@ -6259,10 +6244,7 @@ fn system_prompt_arguments_follow_scope_once_and_stay_parseable() {
 
     // The families the injected server registers reach both products through
     // the one composition, so neither adapter can describe a different set.
-    let families = McpToolFamilies {
-        issue: false,
-        memory: true,
-    };
+    let families = McpToolFamilies { memory: true };
     let expected = launch_system_prompt(PromptScope::Session, Some(families), None);
     assert_eq!(
         claude_system_prompt_arguments(SandboxMode::Session, Some(families), None),
@@ -6998,7 +6980,7 @@ fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
         std::fs::create_dir_all(&selected).unwrap();
         Storage::new(&selected)
             .save_settings(&Settings {
-                issue_enabled: false,
+                memory_enabled: false,
                 ..Settings::default()
             })
             .unwrap();
@@ -7006,7 +6988,7 @@ fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
             !configured_mcp_tools(&data_home, home.path())
                 .unwrap()
                 .families
-                .issue
+                .memory
         );
 
         // 3. Root sandbox scope: daemon bootstrap is brokered out of process,
@@ -7207,10 +7189,15 @@ fn agy_workspace_arguments_materialize_only_outside_the_write_surface() {
     let fixture = tempfile::tempdir_in("target").unwrap();
     let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
     let workspace = WorkspaceId::new();
+    let repository = fixture.path().join("repo");
+    let worktree = repository.join(".usagi/sessions/issue");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let repository = repository.canonicalize().unwrap();
+    let worktree = worktree.canonicalize().unwrap();
     let policy = SandboxPolicyInputs {
         mode: SandboxMode::Root,
         agent: DefaultModel::Agy,
-        workspace_root: Path::new("/workspace"),
+        workspace_root: &repository,
         launch_roots: &[],
         tmpdir: None,
         home: None,
@@ -7226,16 +7213,24 @@ fn agy_workspace_arguments_materialize_only_outside_the_write_surface() {
         false,
         false,
         &policy,
+        &worktree,
     )
     .unwrap();
     let prompt_integration = prompt_integration.unwrap();
     assert!(prompt_integration.ends_with("agy/prompt-only"));
+    let prompt_alias = repository
+        .join(".usagi")
+        .join(agy_workspace_alias_name(&prompt_integration));
     assert_eq!(
         prompt_arguments,
         [
             "--add-dir".to_owned(),
-            prompt_integration.to_str().unwrap().to_owned()
+            prompt_alias.to_str().unwrap().to_owned()
         ]
+    );
+    assert_eq!(
+        std::fs::read_link(&prompt_alias).unwrap(),
+        prompt_integration
     );
     let (arguments, isolated) = agy_workspace_arguments(
         &data_home,
@@ -7244,16 +7239,19 @@ fn agy_workspace_arguments_materialize_only_outside_the_write_surface() {
         true,
         false,
         &policy,
+        &repository,
     )
     .unwrap();
     let isolated = isolated.unwrap();
+    let alias = repository
+        .join(".usagi")
+        .join(agy_workspace_alias_name(&isolated));
+    assert_ne!(alias, prompt_alias, "variants must not share one alias");
     assert_eq!(
         arguments,
-        [
-            "--add-dir".to_owned(),
-            isolated.to_str().unwrap().to_owned()
-        ]
+        ["--add-dir".to_owned(), alias.to_str().unwrap().to_owned()]
     );
+    assert_eq!(std::fs::read_link(&alias).unwrap(), isolated);
 
     let temporary = tempfile::tempdir().unwrap();
     let temporary_data = paths::DataHome::new(temporary.path(), paths::RuntimeMode::Production);
@@ -7269,10 +7267,196 @@ fn agy_workspace_arguments_materialize_only_outside_the_write_surface() {
             true,
             false,
             &temporary_policy,
+            &worktree,
         )
         .is_err()
     );
     assert!(!temporary.path().join("agent-integrations").exists());
+}
+
+/// AGY sorts its workspaces and runs commands in the first one, so the alias
+/// must follow every working directory a launch can have, and the integration
+/// must stay readable through it.
+#[test]
+fn agy_workspace_alias_keeps_the_worktree_as_the_command_directory() {
+    std::fs::create_dir_all("target").unwrap();
+    let fixture = tempfile::tempdir_in("target").unwrap();
+    let repository = fixture.path().join("repo");
+    std::fs::create_dir(&repository).unwrap();
+    let repository = repository.canonicalize().unwrap();
+    let integration = fixture.path().join("integration");
+    std::fs::create_dir_all(integration.join(".agents")).unwrap();
+    std::fs::write(integration.join(".agents/hooks.json"), "{}").unwrap();
+    let integration = integration.canonicalize().unwrap();
+
+    // `.usagi/` is created when the workspace has none yet.
+    let alias = publish_agy_workspace_alias(&repository, &integration).unwrap();
+    assert_eq!(
+        alias,
+        repository
+            .join(".usagi")
+            .join(agy_workspace_alias_name(&integration))
+    );
+    assert_eq!(
+        std::fs::read(alias.join(".agents/hooks.json")).unwrap(),
+        b"{}"
+    );
+    // Republishing an unchanged alias keeps it.
+    assert_eq!(
+        publish_agy_workspace_alias(&repository, &integration).unwrap(),
+        alias
+    );
+    // A stale target is replaced atomically, leaving no staging entry.
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(fixture.path(), &alias).unwrap();
+    assert_eq!(
+        publish_agy_workspace_alias(&repository, &integration).unwrap(),
+        alias
+    );
+    assert_eq!(std::fs::read_link(&alias).unwrap(), integration);
+    let mut entries = std::fs::read_dir(repository.join(".usagi"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries, [alias.file_name().unwrap().to_owned()]);
+
+    for working_directory in [
+        repository.clone(),
+        repository.join(".usagi/sessions/issue"),
+        repository.join(".usagi/sessions/zzz"),
+        repository.join(".usagi/sessions/~"),
+    ] {
+        let (arguments, read_only) =
+            agy_arguments_for_integration(&working_directory, &alias, &integration).unwrap();
+        assert_eq!(
+            arguments,
+            ["--add-dir".to_owned(), alias.to_str().unwrap().to_owned()]
+        );
+        assert_eq!(read_only.as_deref(), Some(integration.as_path()));
+    }
+    // A working directory that would sort after the alias fails closed rather
+    // than letting AGY run commands inside the read-only integration.
+    assert!(agy_arguments_for_integration(&alias, &alias, &integration).is_err());
+    assert!(
+        agy_arguments_for_integration(&repository.join(".usagi/zzz"), &alias, &integration)
+            .is_err()
+    );
+
+    // User content at the alias path is never replaced.
+    let occupied = fixture.path().join("occupied");
+    std::fs::create_dir_all(occupied.join(".usagi")).unwrap();
+    let occupied = occupied.canonicalize().unwrap();
+    let occupant = occupied
+        .join(".usagi")
+        .join(agy_workspace_alias_name(&integration));
+    std::fs::write(&occupant, "user").unwrap();
+    assert!(publish_agy_workspace_alias(&occupied, &integration).is_err());
+    assert_eq!(std::fs::read(&occupant).unwrap(), b"user");
+    std::fs::remove_file(&occupant).unwrap();
+    std::fs::create_dir(&occupant).unwrap();
+    assert!(publish_agy_workspace_alias(&occupied, &integration).is_err());
+    assert!(occupant.is_dir());
+    // The alias keeps the spelling of the workspace root the working
+    // directory is derived from, so both sort consistently.
+    let spelled = fixture.path().canonicalize().unwrap().join("spelled");
+    std::os::unix::fs::symlink(&repository, &spelled).unwrap();
+    let spelled_alias = publish_agy_workspace_alias(&spelled, &integration).unwrap();
+    assert_eq!(
+        spelled_alias,
+        spelled.join(".usagi").join(alias.file_name().unwrap())
+    );
+    assert!(
+        agy_arguments_for_integration(
+            &spelled.join(".usagi/sessions/issue"),
+            &spelled_alias,
+            &integration
+        )
+        .is_ok()
+    );
+    assert!(publish_agy_workspace_alias(Path::new("repo"), &integration).is_err());
+    // A missing workspace or a `.usagi` that is not a real directory fails.
+    assert!(publish_agy_workspace_alias(&fixture.path().join("missing"), &integration).is_err());
+    let redirected = fixture.path().join("redirected");
+    std::fs::create_dir(&redirected).unwrap();
+    std::os::unix::fs::symlink(fixture.path(), redirected.join(".usagi")).unwrap();
+    assert!(publish_agy_workspace_alias(&redirected, &integration).is_err());
+}
+
+/// AGY rewrites `bin/agentapi` in place, which never changes an existing
+/// file's mode, so the anchor must be executable for `run_command` to work.
+#[test]
+fn agy_writable_paths_keep_the_agentapi_helper_executable() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    assert_eq!(agentapi_repair_mode(0o100_600), Some(0o700));
+    assert_eq!(agentapi_repair_mode(0o644), Some(0o744));
+    assert_eq!(agentapi_repair_mode(0o4_600), Some(0o700));
+    assert_eq!(agentapi_repair_mode(0o755), None);
+    assert_eq!(agentapi_repair_mode(0o700), None);
+
+    assert_eq!(
+        prepare_agy_writable_paths(None).unwrap(),
+        Vec::<PathBuf>::new()
+    );
+    std::fs::create_dir_all("target").unwrap();
+    let fixture = tempfile::tempdir_in("target").unwrap();
+    let home = fixture.path().canonicalize().unwrap();
+    let state = home.join(".gemini/antigravity-cli");
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+
+    let granted = prepare_agy_writable_paths(Some(&home)).unwrap();
+    let expected = [
+        "conversations",
+        "brain",
+        "presence",
+        "crashes",
+        "conversation_summaries.db",
+        "conversation_summaries.db-shm",
+        "conversation_summaries.db-wal",
+        "bin/agentapi",
+    ]
+    .map(|relative| state.join(relative));
+    assert_eq!(granted, expected);
+    assert_eq!(mode(&state.join("bin/agentapi")), 0o700);
+    assert_eq!(mode(&state.join("conversation_summaries.db")), 0o600);
+    assert!(
+        !granted.iter().any(|path| path == &state.join("bin")),
+        "bin/ itself must stay read-only"
+    );
+
+    // An anchor left without the execute bit by an earlier release is
+    // repaired, while the SQLite files keep their private mode.
+    let agentapi = state.join("bin/agentapi");
+    std::fs::write(&agentapi, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&agentapi, std::fs::Permissions::from_mode(0o600)).unwrap();
+    prepare_agy_writable_paths(Some(&home)).unwrap();
+    assert_eq!(mode(&agentapi), 0o700);
+    assert_eq!(std::fs::read(&agentapi).unwrap(), b"#!/bin/sh\nexit 0\n");
+    assert!(
+        std::process::Command::new(&agentapi)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // AGY's own executable helper is left as it is.
+    std::fs::set_permissions(&agentapi, std::fs::Permissions::from_mode(0o755)).unwrap();
+    prepare_agy_writable_paths(Some(&home)).unwrap();
+    assert_eq!(mode(&agentapi), 0o755);
+
+    // A symlinked or foreign anchor fails closed instead of being followed.
+    std::fs::remove_file(&agentapi).unwrap();
+    std::os::unix::fs::symlink(home.join("elsewhere"), &agentapi).unwrap();
+    assert!(prepare_agy_writable_paths(Some(&home)).is_err());
+    assert!(!home.join("elsewhere").exists());
+    std::fs::remove_file(&agentapi).unwrap();
+    std::fs::create_dir(&agentapi).unwrap();
+    assert!(prepare_agy_writable_paths(Some(&home)).is_err());
+    std::fs::remove_dir(&agentapi).unwrap();
+    std::fs::remove_dir_all(state.join("presence")).unwrap();
+    std::os::unix::fs::symlink(&home, state.join("presence")).unwrap();
+    assert!(prepare_agy_writable_paths(Some(&home)).is_err());
+    assert!(prepare_agy_writable_paths(Some(&home.join("missing"))).is_err());
 }
 
 #[test]
@@ -7281,10 +7465,13 @@ fn agy_workspace_arguments_reject_invalid_materialization_inputs() {
     let fixture = tempfile::tempdir_in("target").unwrap();
     let data_home = paths::DataHome::new(fixture.path(), paths::RuntimeMode::Production);
     let workspace = WorkspaceId::new();
+    let repository = fixture.path().join("repo");
+    std::fs::create_dir(&repository).unwrap();
+    let repository = repository.canonicalize().unwrap();
     let policy = SandboxPolicyInputs {
         mode: SandboxMode::Root,
         agent: DefaultModel::Agy,
-        workspace_root: Path::new("/workspace"),
+        workspace_root: &repository,
         launch_roots: &[],
         tmpdir: None,
         home: None,
@@ -7305,6 +7492,23 @@ fn agy_workspace_arguments_reject_invalid_materialization_inputs() {
             true,
             true,
             &policy,
+            &repository,
+        )
+        .is_err()
+    );
+    let missing_workspace = SandboxPolicyInputs {
+        workspace_root: &fixture.path().join("missing-workspace"),
+        ..policy
+    };
+    assert!(
+        agy_workspace_arguments(
+            &data_home,
+            workspace,
+            Path::new("usagi"),
+            true,
+            false,
+            &missing_workspace,
+            &repository,
         )
         .is_err()
     );
@@ -7314,7 +7518,8 @@ fn agy_workspace_arguments_reject_invalid_materialization_inputs() {
         use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
 
         let invalid_command = PathBuf::from(OsString::from_vec(vec![0xff]));
-        assert!(agy_arguments_for_integration(&invalid_command).is_err());
+        let invalid_alias = repository.join(OsString::from_vec(vec![b'z', 0xff]));
+        assert!(agy_arguments_for_integration(&repository, &invalid_alias, &repository).is_err());
         assert!(
             agy_workspace_arguments(
                 &data_home,
@@ -7323,6 +7528,7 @@ fn agy_workspace_arguments_reject_invalid_materialization_inputs() {
                 true,
                 true,
                 &policy,
+                &repository,
             )
             .is_err()
         );
@@ -7343,6 +7549,7 @@ fn agy_workspace_arguments_reject_invalid_materialization_inputs() {
                     true,
                     true,
                     &policy,
+                    &repository,
                 )
                 .is_err()
             );

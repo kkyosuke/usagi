@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::domain::issue::IssueSummary;
 use crate::domain::recent::{LastProjectSet, Unite};
 use crate::domain::settings::Settings;
 use crate::domain::workspace::{Workspace, validate_workspace_name};
@@ -19,7 +18,6 @@ use crate::domain::workspace_state::WorkspaceState;
 use crate::infrastructure::paths::data_dir;
 use crate::infrastructure::persistence::json_file;
 use crate::infrastructure::persistence::store_lock::StoreLock;
-use crate::infrastructure::store::issue::IssueStore;
 use crate::infrastructure::store::state::WorkspaceStateStore;
 use crate::usecase::ports::{WorkspaceRegistryTransaction, WorkspaceRepository};
 
@@ -251,10 +249,6 @@ impl WorkspaceRepository for Storage {
     fn workspace_state(&self, root: &Path) -> Result<Option<WorkspaceState>> {
         WorkspaceStateStore::new(root).load()
     }
-
-    fn issue_summaries(&self, root: &Path) -> Result<Vec<IssueSummary>> {
-        IssueStore::new(root).summaries()
-    }
 }
 
 #[cfg(test)]
@@ -347,7 +341,6 @@ mod tests {
             terminal_max_concurrent: crate::domain::settings::TerminalConcurrencyLimit::default(),
             default_model: crate::domain::settings::DefaultModel::Claude,
             default_branch: Some("refs/heads/main".to_owned()),
-            issue_enabled: false,
             memory_enabled: false,
             team_template: crate::domain::settings::TeamTemplate::Hierarchical,
             env: [(

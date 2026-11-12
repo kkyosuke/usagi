@@ -23,8 +23,11 @@ use super::runtime::{
 };
 
 /// Revision 4 uses native workspace configuration and transient system hooks,
-/// and supports a new headless turn in an exact conversation.
-pub const PROFILE_REVISION: u32 = 4;
+/// and supports a new headless turn in an exact conversation. Revision 5 adds
+/// the integration through an alias that keeps the launch's working directory
+/// first in AGY's sorted workspace list, keeps the `run_command` helper
+/// executable, and grants the conversation lock and crash report state.
+pub const PROFILE_REVISION: u32 = 5;
 
 /// Private launch context consumed by the provider-native system prompt hook.
 /// Values exist only in the spawned process environment, never in snapshots.

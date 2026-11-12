@@ -6,7 +6,7 @@
 >
 > **Baseline:** 原版 commit `c0601f8c466d5cafadf738fe9ac92109d2b3fa68`（2026-07-24）。本文は semantic terminal checkpoint を導入した時点の snapshot であり、現在仕様ではない。現行仕様は [daemon IPC](../04-ipc.md#snapshot-payload-と-revision) と [TUI](../03-tui.md#snapshot-negotiation-と-legacy-限定表示) を参照する。
 
-本書は [#524](../../.usagi/issues/524-fix-terminal-raw-64kib-tail-vt-parser-safe-snapshot.md)（P1 correctness）の設計記録である。attach / resync snapshot を「blank parser に任意の raw 64 KiB tail」から **versioned semantic screen checkpoint** へ置き換え、daemon を terminal grid/scrollback の唯一の権威とする設計判断を確定した。
+本書は #524（P1 correctness）の設計記録である。attach / resync snapshot を「blank parser に任意の raw 64 KiB tail」から **versioned semantic screen checkpoint** へ置き換え、daemon を terminal grid/scrollback の唯一の権威とする設計判断を確定した。
 
 **この設計は実装済みであり、正本は [4. daemon IPC](../04-ipc.md#snapshot-payload-と-revision)（snapshot schema / capability / revision / geometry / offset / allocation 上限）と [3. TUI](../03-tui.md#snapshot-negotiation-と-legacy-限定表示)（visible + primary/copy-history restore と legacy 限定表示）に移った**。本書は採用に至った判断（なぜ daemon が parser を持つ必要があるか、なぜ checkpoint + contiguous suffix に分けるか）の記録として残す。以降の記述は当時の設計判断であり、現在の挙動は上記の正本を参照する。
 
@@ -43,8 +43,8 @@ trim で失われた pre-window state を復元する方法は「**daemon が VT
 
 ## 非目標
 
-- [#472](../../.usagi/issues/472-fix-daemon-terminal-output-pipeline-bounded-frame-safe.md) が所有する end-to-end の byte/frame bound と bounded journal 自体は再実装しない。本設計は bounded window を**維持したまま**、その window を raw bytes から semantic checkpoint へ置き換える。
-- [#473](../../.usagi/issues/473-fix-daemon-exited-pty-map-entry-fd.md) の exited PTY transport / FD 回収は変更しない。
+- #472 が所有する end-to-end の byte/frame bound と bounded journal 自体は再実装しない。本設計は bounded window を**維持したまま**、その window を raw bytes から semantic checkpoint へ置き換える。
+- #473 の exited PTY transport / FD 回収は変更しない。
 - snapshot restore を理由に PTY を respawn しない。child PID / spawn count は reattach 前後で不変を保つ。
 - daemon crash 後の terminal 継続（broker / FD handoff）は [7. PTY crash 継続](07-pty-crash-continuation.md) の範囲であり、本設計はその explicit orphan 契約を変えない。
 
@@ -215,11 +215,11 @@ decode は **算術検証 → 予算検証 → 確保** の順に行い、途中
 
 | Phase | issue | 内容 | テスト |
 |---|---|---|---|
-| 1 | [#532](../../.usagi/issues/532-refactor-core-vt-parser-usagi-core.md) | **core: VT parser 抽出**。`TerminalScreen` の state+parser+resize を `usagi-core` の `VtScreen` へ移し、TUI は core screen を wrap して描画のみ担当。挙動不変の pure refactor | 既存 test を core へ移送 |
-| 2 | [#533](../../.usagi/issues/533-feat-core-screencheckpoint-bounded-hostile-decode.md) | **core: checkpoint 型と bounded decode**。`ScreenCheckpoint` / `from_checkpoint` / `checkpoint` と全上限・checked 算術・typed rejection | #2 / #4 |
-| 3 | [#534](../../.usagi/issues/534-feat-daemon-terminal-grid-authority-revision-2-checkpoint-snapshot.md) | **daemon: grid authority**。`TerminalRegistry` に per-terminal `VtScreen` を持たせ append_output/resize で feed。revision 2 の `Snapshot.screen` 生成、frame/aggregate bound 強制、`terminal.screen-checkpoint.v1` 広告 | #5 / #6 |
-| 4 | [#535](../../.usagi/issues/535-fix-tui-checkpoint-negotiation-screen-reconstruct-legacy-fail-closed.md) | **wire + tui: negotiation と reconstruct**。revision 2 negotiation、`TerminalAttach` を checkpoint 版へ、`TerminalSession::replace` を `from_checkpoint`+suffix へ、legacy fail-closed。**この Phase で P1 correctness が解消** | #3 |
-| 5 | [#536](../../.usagi/issues/536-test-daemon-pty-reattach-checkpoint-e2e-proposal.md) | **E2E + docs 畳み込み**。実 daemon + 実 PTY の reattach 一致。[04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md) を更新し、本提案を「畳み込み済み」に落とす | #1 |
+| 1 | #532 | **core: VT parser 抽出**。`TerminalScreen` の state+parser+resize を `usagi-core` の `VtScreen` へ移し、TUI は core screen を wrap して描画のみ担当。挙動不変の pure refactor | 既存 test を core へ移送 |
+| 2 | #533 | **core: checkpoint 型と bounded decode**。`ScreenCheckpoint` / `from_checkpoint` / `checkpoint` と全上限・checked 算術・typed rejection | #2 / #4 |
+| 3 | #534 | **daemon: grid authority**。`TerminalRegistry` に per-terminal `VtScreen` を持たせ append_output/resize で feed。revision 2 の `Snapshot.screen` 生成、frame/aggregate bound 強制、`terminal.screen-checkpoint.v1` 広告 | #5 / #6 |
+| 4 | #535 | **wire + tui: negotiation と reconstruct**。revision 2 negotiation、`TerminalAttach` を checkpoint 版へ、`TerminalSession::replace` を `from_checkpoint`+suffix へ、legacy fail-closed。**この Phase で P1 correctness が解消** | #3 |
+| 5 | #536 | **E2E + docs 畳み込み**。実 daemon + 実 PTY の reattach 一致。[04-ipc.md](../04-ipc.md) / [03-tui.md](../03-tui.md) を更新し、本提案を「畳み込み済み」に落とす | #1 |
 
 root は committed の #524 が todo かつ生存 session が無い状態を ready 候補として扱えるため、実装は Phase 1（#532）から `dependson` の順に session 委譲する。#524 自体は最終 Phase（#536）完了時に `done` にする。
 

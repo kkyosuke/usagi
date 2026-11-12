@@ -12,7 +12,7 @@
 //!   1Password CLI（実 subprocess）。
 //! - [`persistence`] — entity 非依存の永続化基盤（アトミック書き込み・ロック・
 //!   markdown ＋ 派生 `index.json` の汎用ストア）。
-//! - [`store`] — entity 別ストア（issue / memory / workspace レジストリ / state.json）。
+//! - [`store`] — entity 別ストア（memory / workspace レジストリ / state.json）。
 //! - [`daemon`] — daemon lifecycle レコード（`daemon.json`）の store。
 //! - [`workspace_state`] — workspace ごとの daemon state subtree の解決（digest・
 //!   `root.json` による所属証明・legacy layout からの移行）。

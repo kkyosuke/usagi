@@ -80,7 +80,7 @@ pub struct Results {
 /// Owned by one cancellable background worker, never called by the frame thread.
 pub trait UnifiedSearchPort: Send {
     fn search(&mut self, query: &Query, cancelled: Arc<AtomicBool>) -> Results;
-    /// Read an exact Issue / Memory source through the existing bounded reader.
+    /// Read an exact Memory source through the existing bounded reader.
     /// # Errors
     /// Returns safe feedback for unavailable or invalid sources.
     fn read(&mut self, path: &str) -> Result<Vec<String>, String>;

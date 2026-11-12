@@ -101,11 +101,7 @@ expect_fail "$tmp/team-guide" 'orchestration guide does not use the hierarchical
 
 make_fixture "$tmp/history-authority"
 printf '\n[古い提案](proposals/01-entry-surfaces.md) が正本である。\n' >> "$tmp/history-authority/document/09-env.md"
-expect_fail "$tmp/history-authority" '09-env.md makes proposal or issue history the current specification authority'
-
-make_fixture "$tmp/issue-authority"
-printf '\n[完了 issue](../.usagi/issues/999-example.md) の契約に従う。\n' >> "$tmp/issue-authority/document/09-env.md"
-expect_fail "$tmp/issue-authority" '09-env.md uses issue history as current specification authority'
+expect_fail "$tmp/history-authority" '09-env.md makes proposal history the current specification authority'
 
 make_fixture "$tmp/source-doc-link"
 sed -i.bak 's#document/05-daemon.md#document/proposals/missing.md#' "$tmp/source-doc-link/crates/daemon/src/lib.rs"

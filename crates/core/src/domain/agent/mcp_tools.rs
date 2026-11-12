@@ -21,8 +21,6 @@ use crate::domain::settings::Settings;
 /// this same value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpToolFamilies {
-    /// The `issue_*` family (and `session_delegate_issue`) is registered.
-    pub issue: bool,
     /// The `memory_*` family is registered.
     pub memory: bool,
 }
@@ -36,7 +34,6 @@ impl McpToolFamilies {
     #[must_use]
     pub const fn from_settings(settings: &Settings) -> Self {
         Self {
-            issue: settings.issue_enabled,
             memory: settings.memory_enabled,
         }
     }
@@ -45,10 +42,7 @@ impl McpToolFamilies {
     /// the registry validation and its tests exercise.
     #[must_use]
     pub const fn all() -> Self {
-        Self {
-            issue: true,
-            memory: true,
-        }
+        Self { memory: true }
     }
 }
 
@@ -61,10 +55,7 @@ mod tests {
     fn the_effective_configuration_decides_every_family() {
         assert_eq!(
             McpToolFamilies::from_settings(&Settings::default()),
-            McpToolFamilies {
-                issue: true,
-                memory: true,
-            }
+            McpToolFamilies { memory: true }
         );
 
         let settings = Settings {
@@ -73,10 +64,7 @@ mod tests {
         };
         assert_eq!(
             McpToolFamilies::from_settings(&settings),
-            McpToolFamilies {
-                issue: true,
-                memory: false,
-            }
+            McpToolFamilies { memory: false }
         );
     }
 
@@ -86,22 +74,16 @@ mod tests {
         // `with_local` loses the workspace layer instead of getting a second,
         // divergent rule.
         let local = LocalSettings {
-            issue_enabled: Some(false),
+            memory_enabled: Some(false),
             ..LocalSettings::default()
         };
         let effective = Settings::default().with_local(&local);
-        assert!(!McpToolFamilies::from_settings(&effective).issue);
-        assert!(McpToolFamilies::from_settings(&Settings::default()).issue);
+        assert!(!McpToolFamilies::from_settings(&effective).memory);
+        assert!(McpToolFamilies::from_settings(&Settings::default()).memory);
     }
 
     #[test]
     fn all_enables_every_family() {
-        assert_eq!(
-            McpToolFamilies::all(),
-            McpToolFamilies {
-                issue: true,
-                memory: true,
-            }
-        );
+        assert_eq!(McpToolFamilies::all(), McpToolFamilies { memory: true });
     }
 }

@@ -126,11 +126,9 @@ Worker → Manager → Director と一段ずつ返る。`delegation` block を�
 `manager` とする。Director/Managerが実行者を委譲するときは `role = "worker"` を明示し、既定値に依存しない。
 sidebar は各session名の横に `◆ Manager` / `● Worker` と階層インデントを常時表示し、Garden は `role-icon Role · parent › session` の nameplate と session 内の Agent を表すうさぎを表示する。Director drawerは `♛ Director` をrootとする親子ツリーを表示する。
 
-`session_delegate_issue` のように worker launch を後で行う入口も、queued prompt に authenticated caller を保存する。
-したがって launch 方法によらず同じ dispatch binding が作られ、worker の `session_complete` は直近の親 inbox だけへ届く。
+委譲は authenticated caller を dispatch binding に保存するため、worker の `session_complete` は直近の親 inbox だけへ届く。
 子の inbox commit 後は、live な Manager には通知を送り、停止中なら通知を next-launch queue に永続化する。
-いずれかの effective role に `delegation` block がある場合は、credential のない `session_delegate_issue` を拒否する。
-`max_concurrency` は同じ親 session の実行中の子だけでなく未起動の delegated prompt も予約枠として数える。
+`max_concurrency` は同じ親 session の実行中の子を予約枠として数える。
 root Agent からの委譲は workspace の root scope を1つの親として数え、Agent の runtime/model を変更しても
 同じ親の利用数と絶対深度を引き継ぐ。上限判定と一時枠の取得は dispatch store の同じ lock 内で行い、session
 作成や worker spawn の前に予約する。成功時は durable queue/run が枠を引き継ぎ、失敗時は guard が解放するため、並行 request
@@ -151,7 +149,7 @@ usagi session create implementation --role worker
 この例の `worker` は `hierarchical` / `flat` Team に含まれる。Team が `none` の場合は、先に
 `roles workspace` または `roles global` で同じ ID の session-scope role を定義する。
 
-MCP の `session_create` / `session_delegate_issue` / `session_delegate_brief` は top-level `role`、`session_dispatch` は
+MCP の `session_create` / `session_delegate_brief` は top-level `role`、`session_dispatch` は
 `session.role` を受け取る。wire に送るのは role ID だけで、instruction は送らない。
 
 | 対象 | selector 省略 | selector 指定 |
@@ -202,17 +200,15 @@ adapter は単一 `developer_instructions=<TOML string>` 値として ephemeral 
 cancelled / expired を承認とみなさず、人の回答を代理送信しないよう指示する。
 
 各行は launch scope に依存せず真である文にする。行が述べるのは「どこで何が受理されるか」で、
-「この agent が何をしてよいか」ではない。例えば issue の書き込みは session worktree でだけ受理されるので、
-session では許可、root では拒否として同じ 1 行が両方で真になる。scope 別の variant を作らない。
+「この agent が何をしてよいか」ではない。scope 別の variant を作らない。
 
 | 行 | 条件 |
 |---|---|
 | `- session:` | MCP を配線する launch では常に載る（session 系統は無効化できない） |
 | `- user decision:` | MCP を配線する launch では常に載る |
-| `- issue:` | effective `issue_enabled` |
 | `- memory:` | effective `memory_enabled` |
 
-`issue_enabled` / `memory_enabled` の effective 値は、Global 設定に **daemon に登録された workspace root** の
+`memory_enabled` の effective 値は、Global 設定に **daemon に登録された workspace root** の
 `.usagi/settings.json` を重ねて解決する。設定を tool 系統へ写す規則は `usagi-core` の `domain::agent::mcp_tools` に
 1 つだけあり、`usagi mcp` が registry を組むときも同じ関数を通る。prompt が述べる系統と `tools/list` が登録する
 系統が同じ設定から出ることは、この共有によって構造的に保証する。session worktree は `.usagi/settings.json` を

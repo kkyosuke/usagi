@@ -12,4 +12,4 @@ daemon process lifecycle と配置は [2. アーキテクチャ](../02-architect
 [5. daemon](../05-daemon.md) を正本とする。
 
 未実装の計画・acceptance 条件はここへ残さない。将来の作業候補と依存関係は
-[issue store](../../.usagi/issues/) で管理する。
+issue store で管理する。

@@ -50,9 +50,8 @@ production graph の検査方法は [Production screen graph harness](03-tui.md#
 
 #625 で `crates/cli/src/**` の `migration_debt` 22 件を返済し、CLI/MCP の parser、route selection、
 schema projection、caller policy、error mapping を coverage 対象へ戻した。cwd、global/workspace settings、
-runtime executable snapshot を束ねる `serve_with_client` を `composition` 例外として残す。また、shipping binary と別に
-単相化される issue adapter の `cfg(test)` instance だけを `generic_monomorphization` 例外とし、shipping instance は coverage
-対象に保つ。direct unit と production E2E の双方で parser・store error・projection を検証する。
+runtime executable snapshot を束ねる `serve_with_client` を `composition` 例外として残す。direct unit と production E2E の
+双方で parser・store error・projection を検証する。
 
 #626 は root 側の `migration_debt` 14 件を返済し、判断と error mapping を coverage 対象へ戻した。その後も
 例外数は変動しているため、過去の返済結果を現在の残存許可数としては使わない。path 別の現在件数は

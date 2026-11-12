@@ -38,7 +38,7 @@ pre-commit:
         fi
         echo "✗ workspace root で直接コミットしようとしています" >&2
         echo "  usagi では変更は必ず session (.usagi/sessions/<name>/) 内で行います。" >&2
-        echo "  root/コーディネータは issue の定義・delegate のみを行い、実装コミットはしません。" >&2
+        echo "  root/コーディネータは delegate のみを行い、実装コミットはしません。" >&2
         echo "  → session を作成 (usagi session create / MCP session_create) し、その worktree でコミットしてください。" >&2
         echo "  緊急時のみ: LEFTHOOK=0 git commit ... または --no-verify (原則使わない)" >&2
         exit 1

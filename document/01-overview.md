@@ -19,7 +19,7 @@
 
 `usagi` はセッション・worktree オーケストレータである。リポジトリごとに隔離された
 worktree（セッション）を作り、複数の AI エージェント・シェルを並行して走らせ、
-issue の委譲から PR の作成・マージまでのループを回す。
+作業の委譲から PR の作成・マージまでのループを回す。
 
 ## 設計方針
 
@@ -119,8 +119,8 @@ agent ── stdio MCP ──┘
 - daemon は managed lifecycle と live runtime の単一書き手である。
 - client は daemon が発行した workspace / session / worktree / terminal / operation identity を使い、名前や
   path だけから effect 対象を推測しない。
-- issue は caller worktree の `.usagi/issues/`、daemon-provisioned memory は Git 追跡外の workspace store を使う
-  （手動 MCP は cwd root の互換経路）。どちらも Markdown source が権威で、derived index は再構築可能である。
+- daemon-provisioned memory は Git 追跡外の workspace store を使う（手動 MCP は cwd root の互換経路）。
+  Markdown source が権威で、derived index は再構築可能である。
 - settings は Global と Workspace の2層、role catalog は Global / Workspace / repository の合成で解決する。
 - 非対話環境では TUI entry の1フレームを出力して終了し、Doctor は診断結果と終了 status を返す。
 
@@ -138,5 +138,5 @@ agent ── stdio MCP ──┘
 | 子プロセスへ渡す環境変数 | [9. 環境変数設定](09-env.md) |
 | session role と prompt 合成 | [10. session role](10-session-roles.md) |
 
-設計提案、採用理由、却下案は [proposals](proposals/README.md)、未完了作業は issue store を参照する。
-proposal と issue は現在仕様の正本ではない。
+設計提案、採用理由、却下案は [proposals](proposals/README.md) を参照する。
+proposal は現在仕様の正本ではない。

@@ -189,7 +189,7 @@ pub enum LiveTerminalAction {
     OpenWorkspaceSwitcher,
     /// Find open sessions, observed tabs, and existing commands (`Ctrl-O k`).
     OpenCommandPalette,
-    /// Search the active workspace Issue and Memory stores.
+    /// Search the active workspace Memory store.
     OpenKnowledgeSearch,
     /// Search all sources with switchable scope.
     OpenUnifiedSearch,
@@ -609,7 +609,7 @@ const PREFIX_SHORTCUTS: &[PrefixShortcut] = &[
         prefix_shortcut!(KeyCode::Char('m'), legacy = 13 => LiveTerminalAction::OpenKnowledgeSearch),
         PrefixHelpScope::Workspace,
         "Ctrl-O m",
-        "search Issue and Memory",
+        "search Memory",
     ),
     with_help(
         prefix_shortcut!(KeyCode::Char('/') => LiveTerminalAction::OpenOutputSearch),

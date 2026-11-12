@@ -1887,7 +1887,6 @@ fn project_deck_composition_helpers_cover_safe_fallbacks() {
             alpha.workspace,
             0,
             0,
-            0,
         ))),
         vec![PathBuf::from("/tmp/alpha")]
     );
@@ -2616,7 +2615,7 @@ fn command_palette_pending_tab_visit_survives_idle_ticks_until_restore_completes
 }
 
 #[test]
-fn knowledge_search_frame_owns_queries_and_refresh_preserves_query_and_filter() {
+fn knowledge_search_frame_owns_queries_and_refresh_preserves_the_query() {
     let snapshot = snapshot("knowledge-search");
     let mut deck = WorkspaceDeck::new(&snapshot);
     let mut factory = CountingBackendFactory::new();
@@ -2625,7 +2624,6 @@ fn knowledge_search_frame_owns_queries_and_refresh_preserves_query_and_filter() 
         Key::Paste("search body".into()),
         Key::Passthrough(vec![3]),
         Key::Enter,
-        Key::Tab,
         Key::Live(LiveTerminalAction::OpenKnowledgeSearch),
         Key::Escape,
         Key::CtrlQ,
@@ -2652,10 +2650,13 @@ fn knowledge_search_frame_owns_queries_and_refresh_preserves_query_and_filter() 
         .iter()
         .rev()
         .map(|frame| frame.join("\n"))
-        .find(|frame| frame.contains("Search Issue / Memory"))
+        .find(|frame| frame.contains("Search Memory"))
         .expect("search was drawn after refresh");
     assert!(refreshed.contains("search body"), "{refreshed}");
-    assert!(refreshed.contains("Issues · Tab filter"), "{refreshed}");
+    assert!(
+        refreshed.contains("Memory · Ctrl-O m refresh"),
+        "{refreshed}"
+    );
 }
 
 mod knowledge_cancellation {

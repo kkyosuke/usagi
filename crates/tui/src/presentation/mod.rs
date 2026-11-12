@@ -2707,7 +2707,7 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
         workspaces
             .into_iter()
             .filter(|workspace| !projected.contains(&workspace.path))
-            .map(|workspace| WorkspaceOverview::new(workspace, 0, 0, 0)),
+            .map(|workspace| WorkspaceOverview::new(workspace, 0, 0)),
     );
     Open::with_overviews(open_overviews).with_history(recent.to_vec())
 }

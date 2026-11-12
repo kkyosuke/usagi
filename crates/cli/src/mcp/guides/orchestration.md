@@ -9,11 +9,11 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
   session の worktree や lifecycle state を自身では変更しない。
 - **各 session は隔離された git worktree**で動く。git 追跡ファイルの変更はその worktree の
   ブランチに乗り、PR 経由で基点ブランチへ反映される。
-- **root/coordinator は git 追跡ファイルを直接書かない**。実装や backlog の変更は対象 session
-  の worktree で行う。
+- **root/coordinator は git 追跡ファイルを直接書かない**。実装の変更は対象 session の worktree
+  で行う。
 - **認証済み Agent が管理できるのは、自身が作成した直下 session だけ**。同じ workspace や親 session にある
   別 Agent・人間・legacy の session は一覧に現れず、名前や ID を指定しても操作できない。
-- **issue / memory の tool 系統は workspace 設定で無効化できる**。無効な系統は `tools/list` に
+- **memory の tool 系統は workspace 設定で無効化できる**。無効な系統は `tools/list` に
   現れず、名前を直接呼んでも実行されない。このガイドは有効な場合の手順を書いているので、
   掲載されていない tool は使わない。
 
@@ -26,7 +26,6 @@ session lifecycle 利用手順である。tool の名前・引数は `tools/list
 | 追加指示 | `session_prompt` | 自身が作成した session の live Agent PTY または durable next-launch queue へ prompt を配送する |
 | resume 候補の観測 | `agent_resume_inventory` | 自身が作成した session の Agent history から provider ID を含まない safe metadata と exact target を返す |
 | 明示 resume | `session_resume` | inventory が返した exact target から新しい daemon-owned Agent runtime を起動する |
-| issue 委譲 | `session_delegate_issue` | session 作成と prompt queue 投入を不可分に行う |
 | ブリーフ委譲 | `session_delegate_brief` | session 作成と authenticated worker の即時 dispatch を不可分に行う |
 | PR 観測 | `session_pr` | `name` 省略時は呼び出し元自身、指定時は対象 session の daemon-owned PR inventory と merged 集約を返す |
 | 完了報告 | `session_complete` | 呼び出し元 session を credential から復元し、dispatch binding が示す直近 caller の inbox へ報告する |
@@ -69,7 +68,7 @@ reviewer は `agent_messages {"unread_only":true}` を読み、編集せず指�
 `session_status` / `session_prompt` / `session_remove` / 明示 `session_pr` で操作することはできない。
 coordinator は session の生存を `session_status`、成果の統合を `session_pr` の `merged` で判定する。
 認証済み worker は `session_pr {}` で自分の session を読み、coordinator は
-`session_pr {"name":"issue-403"}` のように対象名を明示する。name 省略時に caller credential が無ければ、
+`session_pr {"name":"fix-cache"}` のように対象名を明示する。name 省略時に caller credential が無ければ、
 daemon は cwd や branch から session を推測しない。
 
 `session_prompt` の `mode` は `live`（既定）/ `queue` である。`live` は live Agent の PTY へ送り、
@@ -79,7 +78,7 @@ live Agent がいる場合はエラーになる。
 
 ```json
 {"jsonrpc":"2.0","id":3,"method":"tools/call",
- "params":{"name":"session_prompt","arguments":{"name":"issue-403","prompt":"追加の回帰テストも固定してください"}}}
+ "params":{"name":"session_prompt","arguments":{"name":"fix-cache","prompt":"追加の回帰テストも固定してください"}}}
 ```
 
 ## 中断 Agent を明示 resume する
@@ -95,10 +94,8 @@ inventory の取得、workspace open、daemon reconnect だけでは発火しな
 
 ## delegate
 
-committed issue は `session_delegate_issue`、事前 issue の無い依頼は `session_delegate_brief` を使う。
-`session_delegate_issue` は daemon が worktree を作成した後、同じ session identity の queue へ初回 prompt を
-保存する。`session_delegate_brief` は caller credential を検証してから worktree を作成し、worker を直ちに
-dispatch する。brief の `agent` には allowlist にある
+新しい依頼の委譲には `session_delegate_brief` を使う。`session_delegate_brief` は caller credential を
+検証してから worktree を作成し、worker を直ちに dispatch する。brief の `agent` には allowlist にある
 `{"runtime":"codex","model":"gpt-5"}` 形式だけを指定する。この呼び出しが新しい session と
 worker を作るため、既存 agent の `id` は指定できない。
 実行可能な selector が 1 つも無い場合、この tool 自体が `tools/list` に現れない。credential・selector・session 作成のいずれかが
@@ -123,8 +120,8 @@ effect を起こす前に拒否される。新規 worker の runtime/model は `
 global/workspace `roles.toml` に存在し、session scopeを許可する必要がある。未知IDやscope不一致はdaemonが拒否する。
 
 ```json
-{"name":"session_dispatch","arguments":{"session":{"name":"issue-123","role":"worker"},
- "agent":{"runtime":"codex","model":"gpt-5"},"prompt":"issue #123 を実装する"}}
+{"name":"session_dispatch","arguments":{"session":{"name":"fix-cache","role":"worker"},
+ "agent":{"runtime":"codex","model":"gpt-5"},"prompt":"キャッシュ無効化の不具合を修正する"}}
 ```
 
 成功応答には durable `run_id`、`agent_id`、daemon-owned `terminal` が入る。既存 worker を再利用する場合は
@@ -156,7 +153,7 @@ worker は宛先 ID や `:root` を指定しない。親から dispatch され�
 
 ## worker を観測する
 
-`session_get {"name":"issue-123"}` は session 内の agent と現在または最後の task を返す。
+`session_get {"name":"fix-cache"}` は session 内の agent と現在または最後の task を返す。
 `agent_list` は `session` / `status` で任意に絞り込み、`agent_get {"agent_id":"..."}` はその agent の
 run 履歴を返す。返るのは caller が作成した session に属する Agent だけで、別 session の ID を明示しても拒否される。
 これらは daemon の dispatch store を読み、MCP server のローカル推測を返さない。
@@ -231,7 +228,7 @@ workerが報告せず終了した場合もdaemonが`no_report`を配送する。
 
 `memory_save` で残した判断・制約・再発防止策は、daemon data home の workspace 専用 store に保存される。
 Git 追跡対象ではなく、同じ workspace の root と session worker から検索できる。作業固有の進捗は session の
-scratchpad、次の run にも再利用する知見は memory、実装 backlog は issue と使い分ける。
+scratchpad、次の run にも再利用する知見は memory と使い分ける。
 
 ## session を作成する
 

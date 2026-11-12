@@ -58,7 +58,7 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `serde_json` | `index.json` / `workspaces.json` / `daemon.json` の (de)serialize、`usagi-cli` の MCP サーバの stdio JSON-RPC、`usagi-daemon` の IPC メッセージの wire JSON | 本依存 |
 | `toml` | `usagi-core` infrastructure による `.usagi/config.toml` の runtime/model allowlist・session setup command と global/workspace `roles.toml` の解析 | 本依存 |
 | `toml_edit` | Workspace Config から `.usagi/config.toml` の session setup command だけをコメント・順序を保持して更新 | 本依存 |
-| `sha2` | issue / memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity、self-update の embedded installer identity | 本依存・build 依存 |
+| `sha2` | memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity、self-update の embedded installer identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当）と、結合テストの重い E2E 直列化ロック | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
@@ -75,7 +75,7 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `tempfile` | 合成ルートの本人専用 Artifact 表示コピー、ユニットテスト用の一時ディレクトリ | 本依存・dev |
 | `syn` | Rust source の AST 検査（architecture・coverage attribute などの構造テスト） | dev |
 
-`usagi-core` の `domain/`（`Workspace` / `Issue` / `Memory` / `DaemonRecord` / `Recent` / typed ID …）は
+`usagi-core` の `domain/`（`Workspace` / `Memory` / `DaemonRecord` / `Recent` / typed ID …）は
 `chrono` / `serde` / `uuid` だけを使う。`serde_json` / `anyhow` / `fs2` / `dirs` / `rayon` は
 `infrastructure/`（永続化）が使い、`serde_json` は加えて `usagi-cli` の MCP サーバ（stdio
 JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う。`toml` は `usagi-core` の infrastructure
@@ -87,7 +87,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `unicode-segmentation` は `usagi-tui` の入力 widget・表示の折り返しと省略・出力選択で使い、domain には持ち込まない。
 `clap` / `clap_complete` は `usagi-cli` が使う。
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、runtime が workspace・executable 別の bootstrap broker endpoint、IPC contract が rollover operation ID を
-作るほか、root runtime が設定 env の secret cache を分離する `op read` credential identity を作り、
+作るほか、root runtime が設定 env の secret cache を分離する `op read` credential identity と managed AGY の workspace alias 名を作り、
 `usagi-cli` が配布 binary に同梱した self-update installer の identity 検証にも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
 エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire と、ルート結合テストの[重い E2E の直列化](#重い-e2e-の直列化)も直列化する。
@@ -118,12 +118,6 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 
 - タイトルは Conventional Commits 形式に合わせる。
 - 本文には「目的 / 変更内容 / テスト・確認方法」を含める。
-- 本文の `Internal-Issue` は、内部 issue を実装する変更では `#<number>`、内部 issue が無い変更では `none` とする。
-  番号を記した PR は対応する `.usagi/issues/<number>-*.md` を同じ差分で `done` にし、CI がこの同期を検証する。
-- **自動生成 PR も本文の SSoT はこのマーカーである**。本文を自分で組み立てられる生成元
-  （`create-release-pr.yml` のリリース PR）は生成時に `Internal-Issue: none` を書き込む。本文を差し込めない
-  Dependabot だけは author 名（`dependabot[bot]`）で `none` とみなす。この免除は「マーカーを省ける」だけで、
-  issue を `done` へ動かす差分が混ざれば同じように CI が失敗する。
 - 単独 PR と stacked PR の最下段のベースブランチは `main`。stack の上段は直前の PR の
   head branch をベースにし、各 PR の本文で順序と前段を示す。現在の必須 CI は `main` 向け PR が
   対象のため、各段を一時的に `main` 向けにして最終 head の CI を検証してからベースを前段へ変更する。
@@ -140,7 +134,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 - **現在のビルドで動作する仕様だけを書く**。未実装・予定の機能、「coming soon」「移植予定」、`✅` / `🚧`
   などの実装状況マーカーは置かない（あると「どこまで本当か」を読者が判断できなくなる）。
 - 記述は**現在形・断定形**で書く（「実装します」「移植していきます」ではなく「〜する」「〜である」）。
-- ロードマップを残したい場合は、本仕様ドキュメントと混ぜず別管理にする（issue ストア `.usagi/issues/`）。
+- ロードマップを残したい場合は、本仕様ドキュメントと混ぜず別管理にする。
 
 ### SSoT（単一情報源）
 

@@ -28,7 +28,7 @@ env は 2 層で持つ。global は全 workspace が継承し、workspace はそ
 - どちらも `name → value` の map で、名前順に並ぶ。値は**平文**か**secret reference**のいずれか
   （[binding の書式と検証](#binding-の書式と検証)）。**解決済みの secret は保存しない**。
 - settings file は Config の設定と共有する。Config 画面の保存は scope lock 内で最新 file を読み直し、global / workspace
-  どちらの `env` も保持する。Workspace Config は Agent / Issue / Memory の値だけを書き換え、実効値の merge 結果を
+  どちらの `env` も保持する。Workspace Config は Agent / Memory の値だけを書き換え、実効値の merge 結果を
   workspace ファイルへ写し取らない（詳しい field ownership は [TUI](03-tui.md#settings-scope-と-workspace-entry)を正本とする）。
 
 ## binding の書式と検証

@@ -1,7 +1,7 @@
 //! Open 画面（登録済み workspace を開く）。
 //!
 //! welcome の Open から開く画面。usagi に登録済みの workspace を一覧で並べ、選んで開く。
-//! 各 row は workspace 名に続けて session 数、未完了 issue 数、最終更新の相対時刻を
+//! 各 row は workspace 名に続けて session 数と最終更新の相対時刻を
 //! 2 行で出し、リストの下に選択中の絶対パスを添える。
 //! 状態（[`Open`]）は端末 IO を持たない純粋な値で、[`render`] が 1 フレーム分の行
 //! （ANSI 付き `Vec<String>`）に変換する。マスコット・タイトル・フッタの配置は共通の
@@ -118,7 +118,7 @@ impl Open {
         Self::with_overviews(
             workspaces
                 .into_iter()
-                .map(|workspace| WorkspaceOverview::new(workspace, 0, 0, 0))
+                .map(|workspace| WorkspaceOverview::new(workspace, 0, 0))
                 .collect(),
         )
     }
@@ -472,7 +472,7 @@ impl Open {
             .find(|current| current.workspace.path == workspace.path)
         else {
             self.workspaces
-                .insert(0, WorkspaceOverview::new(workspace.clone(), 0, 0, 0));
+                .insert(0, WorkspaceOverview::new(workspace.clone(), 0, 0));
             return;
         };
         current.workspace = workspace.clone();
@@ -551,8 +551,7 @@ fn workspace_stats_row(overview: &WorkspaceOverview, now: DateTime<Utc>) -> Stri
     let session_label = if sessions == 1 { "session" } else { "sessions" };
     let updated = widgets::relative_time(overview.workspace.updated_at, now);
     Style::new().dim().paint(&format!(
-        "    ⎇ {sessions} {session_label}  ·  ● {} open  ·  ◷ updated {updated}",
-        overview.open_issue_count,
+        "    ⎇ {sessions} {session_label}  ·  ◷ updated {updated}"
     ))
 }
 
@@ -810,8 +809,8 @@ mod tests {
     #[test]
     fn recent_picker_renders_groups_scrolls_and_never_unregisters_a_hidden_project() {
         let members = vec![
-            WorkspaceOverview::new(workspace("alpha", 1), 0, 0, 0),
-            WorkspaceOverview::new(workspace("beta", 2), 0, 0, 0),
+            WorkspaceOverview::new(workspace("alpha", 1), 0, 0),
+            WorkspaceOverview::new(workspace("beta", 2), 0, 0),
         ];
         let mut history = vec![Recent::Unite(
             usagi_core::domain::recent::UniteOverview::new(members),
@@ -819,7 +818,6 @@ mod tests {
         history.extend((0..12).map(|i| {
             Recent::Workspace(WorkspaceOverview::new(
                 workspace(&format!("item-{i}"), i),
-                0,
                 0,
                 0,
             ))
@@ -1089,13 +1087,13 @@ mod tests {
         zeta.updated_at = now() - Duration::hours(2);
         let alpha = workspace("Alpha", 5);
         let open = Open::with_overviews(vec![
-            WorkspaceOverview::new(zeta, 3, 2, 1),
-            WorkspaceOverview::new(alpha, 1, 0, 0),
+            WorkspaceOverview::new(zeta, 3, 1),
+            WorkspaceOverview::new(alpha, 1, 0),
         ]);
 
         assert_eq!(open.workspaces()[0].name, "Alpha");
         let joined = rendered(&open);
-        assert!(joined.contains("⎇ 3 sessions  ·  ● 2 open  ·  ◷ updated 2h ago"));
+        assert!(joined.contains("⎇ 3 sessions  ·  ◷ updated 2h ago"));
         assert!(joined.contains("Projects"));
         assert!(!joined.contains("A–Z"));
     }
@@ -1105,7 +1103,7 @@ mod tests {
         // 端末に収まらない行は Frame が黙って捨てるので、溢れた分は窓を動かして届かせる。
         let open = Open::with_overviews(
             (0..12)
-                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0, 0))
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0))
                 .collect(),
         );
         let frame = render(24, 80, &open, now());
@@ -1134,7 +1132,7 @@ mod tests {
         for height in 12..=20 {
             let open = Open::with_overviews(
                 (0..3)
-                    .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i}"), 1), 0, 0, 0))
+                    .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i}"), 1), 0, 0))
                     .collect(),
             );
             let frame = render(height, 80, &open, now());
@@ -1161,7 +1159,7 @@ mod tests {
         // フッタは最下行に残る。
         let mut open = Open::with_overviews(
             (0..3)
-                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i}"), 1), 0, 0, 0))
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i}"), 1), 0, 0))
                 .collect(),
         );
         open.set_notice(Some("daemon refused the workspace ".repeat(40)));
@@ -1179,7 +1177,7 @@ mod tests {
     fn scrolling_past_the_window_keeps_the_selected_row_visible() {
         let mut open = Open::with_overviews(
             (0..12)
-                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0, 0))
+                .map(|i| WorkspaceOverview::new(workspace(&format!("ws{i:02}"), 1), 0, 0))
                 .collect(),
         );
         for _ in 0..11 {

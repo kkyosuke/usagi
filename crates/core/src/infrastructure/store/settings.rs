@@ -1,4 +1,4 @@
-//! Workspace-local Agent, Issue, and Memory settings persistence.
+//! Workspace-local Agent and Memory settings persistence.
 
 use std::path::{Path, PathBuf};
 
@@ -112,7 +112,6 @@ mod tests {
 
         let settings = LocalSettings {
             default_model: Some(DefaultModel::Claude),
-            issue_enabled: Some(false),
             ..LocalSettings::default()
         };
         let _lock = store.lock().unwrap();
@@ -172,7 +171,6 @@ mod tests {
         let initial = LocalSettings {
             default_model: Some(DefaultModel::Claude),
             default_branch: Some("refs/heads/main".to_owned()),
-            issue_enabled: Some(false),
             memory_enabled: Some(true),
             team_template: Some(crate::domain::settings::TeamTemplate::Flat),
             env: [("PROJECT".to_owned(), "usagi".to_owned())]

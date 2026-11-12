@@ -124,14 +124,8 @@ numbered_docs.each_with_index do |path, position|
   unless contents_labels == body_headings
     failures << "#{basename} top-level contents do not match body heading order"
   end
-  if content.match?(/\]\((?:proposals\/|\.\.\/\.usagi\/issues\/)[^)]+\)\s*が正本/)
-    failures << "#{basename} makes proposal or issue history the current specification authority"
-  end
-  content.split(/\n{2,}/).each do |paragraph|
-    next unless paragraph.include?("../.usagi/issues/")
-    next if paragraph.match?(/設計経緯|実装履歴|履歴参照|完了済み/)
-
-    failures << "#{basename} uses issue history as current specification authority"
+  if content.match?(/\]\(proposals\/[^)]+\)\s*が正本/)
+    failures << "#{basename} makes proposal history the current specification authority"
   end
   if content.lines.length > 300 && !content.include?("## この文書の読み方")
     failures << "#{basename} exceeds 300 lines without a reading map"

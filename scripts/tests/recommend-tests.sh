@@ -53,7 +53,7 @@ cp "$map" "$tmp/scripts/recommend-tests.tsv"
 touch "$tmp/Cargo.toml" "$tmp/crates/core/Cargo.toml" "$tmp/crates/core/src/lib.rs" "$tmp/crates/core/src/other.rs" "$tmp/crates/core/src/infrastructure/ipc/mod.rs"
 touch "$tmp/crates/core/tests/agent_contract.rs" "$tmp/crates/daemon/src/lib.rs" "$tmp/crates/daemon/tests/agent_real_pty.rs"
 touch "$tmp/crates/tui/src/lib.rs" "$tmp/crates/tui/tests/parity_suite.rs" "$tmp/crates/cli/src/lib.rs"
-touch "$tmp/crates/core/src/domain/issue.rs" "$tmp/crates/core/src/usecase/issue.rs" "$tmp/crates/daemon/src/usecase/start.rs"
+touch "$tmp/crates/core/src/domain/memory.rs" "$tmp/crates/core/src/usecase/memory.rs" "$tmp/crates/daemon/src/usecase/start.rs"
 touch "$tmp/crates/tui/src/presentation/frame.rs" "$tmp/crates/cli/src/mcp/serve.rs"
 touch "$tmp/src/runtime/cli.rs" "$tmp/src/runtime/daemon.rs" "$tmp/src/runtime/tui.rs" "$tmp/src/runtime/bootstrap.rs" "$tmp/tests/agent_ipc_e2e.rs"
 touch "$tmp/tests/support/mod.rs" "$tmp/.github/workflows/test.yml" "$tmp/unknown.file"
@@ -70,8 +70,8 @@ assert_has "$out" "empty diff — no selected-test set can be proven safe"
 
 for fixture in \
   "crates/core/src/lib.rs|cargo test -p usagi-core" \
-  "crates/core/src/domain/issue.rs|cargo test -p usagi-core" \
-  "crates/core/src/usecase/issue.rs|cargo test -p usagi-core" \
+  "crates/core/src/domain/memory.rs|cargo test -p usagi-core" \
+  "crates/core/src/usecase/memory.rs|cargo test -p usagi-core" \
   "crates/daemon/src/lib.rs|cargo test -p usagi-daemon" \
   "crates/daemon/src/usecase/start.rs|cargo test -p usagi-daemon" \
   "crates/tui/src/lib.rs|cargo test -p usagi-tui" \

@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(modal.input(), "");
         assert_eq!(modal.cursor(), 0);
         assert_eq!(modal.selected(), 0);
-        assert_eq!(modal.matches().len(), 9);
+        assert_eq!(modal.matches().len(), 8);
         // derive された Clone / Debug / Eq も触れる。
         assert!(format!("{modal:?}").contains("OverviewModal"));
         assert_eq!(modal.clone(), modal);
@@ -445,17 +445,17 @@ mod tests {
     fn typing_filters_by_prefix_and_resets_the_selection() {
         let mut modal = OverviewModal::new();
         modal.select_next(); // selected = 1
-        type_str(&mut modal, "i");
-        // "i" 前方一致: issue。
+        type_str(&mut modal, "g");
+        // "g" 前方一致: garden。
         let names: Vec<&str> = modal.matches().iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["issue"]);
+        assert_eq!(names, vec!["garden"]);
         // 入力で選択は先頭へ。
         assert_eq!(modal.selected(), 0);
         // さらに入力しても候補は変わらない。
-        type_str(&mut modal, "ss");
+        type_str(&mut modal, "ar");
         assert_eq!(
             modal.matches().iter().map(|c| c.name).collect::<Vec<_>>(),
-            vec!["issue"]
+            vec!["garden"]
         );
     }
 
@@ -474,14 +474,14 @@ mod tests {
             vec!["clean", "config"]
         );
         modal.backspace();
-        assert_eq!(modal.matches().len(), 9);
+        assert_eq!(modal.matches().len(), 8);
     }
 
     #[test]
     fn selection_wraps_over_the_matches() {
         let mut modal = OverviewModal::new();
-        modal.select_prev(); // wrap to last (8)
-        assert_eq!(modal.selected(), 8);
+        modal.select_prev(); // wrap to last (7)
+        assert_eq!(modal.selected(), 7);
         modal.select_next(); // wrap to 0
         assert_eq!(modal.selected(), 0);
     }
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn history_recall_moves_between_submissions_without_duplicating_them() {
         let mut modal = OverviewModal::new();
-        type_str(&mut modal, "issue list");
+        type_str(&mut modal, "env global");
         modal.record_submission();
         modal.record_submission();
         modal = OverviewModal::new();
@@ -615,7 +615,7 @@ mod tests {
         for _ in 0..11 {
             modal.backspace();
         }
-        type_str(&mut modal, "issue list");
+        type_str(&mut modal, "env global");
         modal.record_submission();
         modal = modal.clone();
         modal.backspace();
@@ -623,11 +623,11 @@ mod tests {
             modal.backspace();
         }
         assert!(modal.recall_previous());
-        assert_eq!(modal.input(), "issue list");
+        assert_eq!(modal.input(), "env global");
         assert!(modal.recall_previous());
         assert_eq!(modal.input(), "session list");
         assert!(modal.recall_next());
-        assert_eq!(modal.input(), "issue list");
+        assert_eq!(modal.input(), "env global");
         assert!(modal.recall_next());
         assert_eq!(modal.input(), "");
         // Past the newest entry there is nothing to recall forward to.
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn home_end_and_selection_edit_the_palette_input() {
         let mut modal = OverviewModal::new();
-        type_str(&mut modal, "issue");
+        type_str(&mut modal, "roles");
         modal.cursor_home();
         assert_eq!(modal.cursor(), 0);
         modal.cursor_end();
@@ -717,10 +717,10 @@ mod tests {
     #[test]
     fn render_says_matches_when_filtering_and_marks_the_selection() {
         let mut modal = OverviewModal::new();
-        type_str(&mut modal, "is"); // issue のみ
+        type_str(&mut modal, "ro"); // roles のみ
         let text = joined(&modal);
         assert!(text.contains("matches"));
-        assert!(text.contains("issue"));
+        assert!(text.contains("roles"));
         assert!(text.contains('›')); // 選択マーカー
     }
 

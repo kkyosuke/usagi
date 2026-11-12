@@ -64,7 +64,7 @@ Codex を daemon が起動するときは、注入した `usagi` stdio server �
 認可を省略するものではなく、daemon は credential、live runtime、dispatch
 binding と claimed peer PID を引き続き照合するため、credential の欠落・偽造・失効は state を変更せず拒否する。
 daemon-provisioned MCP child には同時に daemon が解決した workspace root を一時的に渡す。session worktree の
-cwd から起動した server も、この trusted root にある Workspace 設定を Global 設定へ重ねて issue / memory の
+cwd から起動した server も、この trusted root にある Workspace 設定を Global 設定へ重ねて memory の
 tool availability を解決する。同じ trusted root は daemon 接続時に申告する workspace にもなる
 （正本は [4. daemon IPC#workspace fence](04-ipc.md#workspace-fence)）。workspace root は認可上の caller identity
 には使用しない。
@@ -138,16 +138,15 @@ serve ループが応答するメソッドは次のとおり。1 行 = 1 メッ�
 ## tool 面
 
 tool は系統ごとに分かれ、tool descriptor が `name` / description / `inputSchema`、runtime
-validator、execution route、caller policy の正本である。Issue / Memory がともに有効な場合も、tool 件数は descriptor
+validator、execution route、caller policy の正本である。Memory が有効な場合も、tool 件数は descriptor
 registry から導出し、本書へ転記しない。
 接続開始時に descriptor registry を一度だけ検証し、runtime/model snapshot を反映した実効 schema とともに
 保持する。`tools/list` と `tools/call` はこの同じ集合・schema を参照するため、掲載された tool は必ず
 1 つの実行経路と caller policy を持つ。request ごとの引数検証・caller policy 適用は毎回行い、
 設定・runtime availability の変更は再接続時に反映する。`tools/call` の実挙動は次のとおりである。
 
-MCP server は起動時に Global と Workspace の `issue_enabled` / `memory_enabled` を解決し、server lifetime 中は
-同じ availability snapshot を使う。`issue_enabled = false` では `issue_*` と `session_delegate_issue`、
-`memory_enabled = false` では `memory_*` の adapter を descriptor registry に登録しない。無効な tool は `tools/list` に
+MCP server は起動時に Global と Workspace の `memory_enabled` を解決し、server lifetime 中は
+同じ availability snapshot を使う。`memory_enabled = false` では `memory_*` の adapter を descriptor registry に登録しない。無効な tool は `tools/list` に
 現れず、名前を直接 `tools/call` しても `Method not found` となり、store / daemon の effect を起こさない。
 session / agent など無効化対象ではない MCP tool は引き続き公開する。
 `session_delegate_brief` は executable を含む runtime/model が 1 組以上ある場合だけ公開する。selector が空なら
@@ -173,14 +172,13 @@ trusted root、daemon は登録済み workspace root を権威にする。この
 | `session_prompt` | 認証済み Agent が作成した session の live PTY または durable queue にだけ配送する。`live`（既定）は handshake で fence した対象 PTY へ prompt と Enter キーを配送して即時実行し、live Agent が無ければ失敗する。`queue` は次回 Agent launch まで待たせることを明示した場合だけ使う。停止中の Agent を起動する入口は `session_dispatch` とする |
 | `agent_resume_inventory` | 認証済み Agent が作成した session の Agent inventory から provider ID を含まない safe metadata と opaque な exact resume target を列挙する |
 | `session_resume` | `agent_resume_inventory` が返した、自身が作成した session の exact target を受け取り、新しい daemon-owned Agent runtime を明示的に起動する。AGY は optional な `headless_prompt`（非空・NUL 不可）で新しい turn を headless 実行する。省略時は対話再開。`usagi session` の subcommand 名 `resume-inventory` / `resume-exact` とは wire 名が異なる |
-| `session_delegate_issue` | session 作成と durable prompt queue 投入を 1 回の daemon request で完了する |
 | `session_delegate_brief` | session を作成し、認証済み caller が一意に選択した worker へ brief を直ちに dispatch する。失敗時は作成した session を巻き戻す（[delegation の atomicity](#delegation-の-atomicity)） |
 | `session_pr` | daemon-owned PR inventory の revision、PR entry、merged 集約を返す。`name` 省略時は caller credential から同一 session の stable identity を解決し、credential が無ければ cwd / branch から推測せず拒否する。認証済み Agent が `name` を明示する場合は自身が作成した session だけを読める |
 | `session_complete` | 認証済み session Agent の成功報告を dispatch binding が示す直近 caller の durable inbox へ配送する。binding の無い session では root を推測せず拒否する |
 | `session_note_*` / `session_todo_*` / `session_decision_*` | 認証済み MCP child 自身の session ID に属する machine-local scratchpad を core usecase 経由で読み書きする（[保存先](#session-scratchpad)） |
 | `user_decision_request` / `user_decision_get` / `user_decision_ack` / `user_decision_list` / `user_decision_resolve` / `user_decision_cancel` / `user_decision_expire` | caller credential を daemon 側の live Agent runtime と照合し、credential から一括解決した workspace/run/caller が handshake workspace と一致するときだけ user-decision store を操作する。request は durable な pending decision を作成して即時に返し、回答は get で観測する。agent 経路は作成した owner/run の decision と、exact resume で引き継いだ同じ会話の decision だけを操作できる |
 | `terminal_list` / `terminal_read` | caller credential から daemon が解決した exact workspace/session/worktree scope の generic terminal だけを列挙・観測する。`terminal_read` は semantic screen checkpoint から ANSI-free の末尾を返し、attach、subscription、input、resize を行わない |
-| `issue_*` / `memory_*` | issue は authenticated caller の trusted worktree（root caller は workspace root）、memory は daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
+| `memory_*` | daemon data home 内の workspace 専用共有 store を core usecase 経由で操作する |
 | `session_dispatch` / `session_get` / `agent_list` / `agent_get` / `agent_complete` / `agent_fail` / `agent_inbox` / `agent_inbox_ack` | caller credential を live Agent runtime と照合する。session/agent の作成・再利用・観測は caller が作成した session に限定し、report/inbox は authenticated current run と保存済み binding に限定する |
 
 ### Session scratchpad
@@ -422,7 +420,7 @@ exact resume の新しい dispatch binding は元の caller を引き継ぎ、`a
 この明示がない場合は、利用者が Agent を終了して `usagi daemon restart` を再実行するまで旧 daemon の
 control authority を維持する。Doctor はこの lifecycle に関与しない。
 
-session 作成系は optional role selector を受け取る。`session_create` / `session_delegate_issue` /
+session 作成系は optional role selector を受け取る。`session_create` /
 `session_delegate_brief` は top-level `role`、`session_dispatch` は `session.role` を使う。daemon が current catalog と
 保存済み assignment を検証し、instruction 本文は MCP wire に載せない。catalog・default・conflict の正本は
 [10. session role](10-session-roles.md) を参照する。
@@ -457,8 +455,8 @@ daemon の selected data directory に
 `agent-integrations/<workspace-id>/agy/workspace/.agents/` を materialize し、その synthetic workspace を
 managed launch の private `--add-dir` にだけ渡す。`.agents/mcp_config.json` から同じ `usagi mcp` child を起動し、
 integration root は全実効 writable surface との overlap を拒否した上で sandbox から read-only のままにする。managed AGY では
-`~/.gemini` 全体を writable にせず、`~/.gemini/antigravity-cli/conversations/`・`brain/`（`invoke_subagent` と会話 artifact）、
-state 直下の `conversation_summaries.db{,-shm,-wal}`、`run_command` が使う `bin/agentapi` ファイルだけを書き込める。認証は OS keyring を使う。この allowlist により、
+`~/.gemini` 全体を writable にせず、[agent state の writable root](02-architecture.md#agent-state-の-writable-root) の
+runtime state だけを書き込める。認証は OS keyring を使う。この allowlist により、
 `~/.gemini/GEMINI.md`、global config、state の plugin / skill / settings / import manifest / status・title script は
 未作成 path も含めて read-only のままとなり、既存 customization を読み取れる一方で新規作成・置換を防ぐ。
 
@@ -506,34 +504,19 @@ durable journal にその由来が記録されており、dispatch store にそ�
 同じ operation id での retry は二重作成しない。create は lifecycle journal から、dispatch は記録済みの結末から
 replay される。
 
-issue / memory の store 系 tool は、`usagi-core` usecase に store root と実時計を束縛する薄い adapter である。
+memory の store 系 tool は、`usagi-core` usecase に store root と実時計を束縛する薄い adapter である。
 daemon が起動した Agent の MCP child は、OS process lineage で claim した
-credential と同時に issue 用の exact trusted root と memory 用の workspace 共有 root を受け取り、接続中は固定する。
-issue root は caller session の worktree（root caller は workspace）、memory root は Git 追跡外の daemon data home
-`agent-memory/<workspace-id>` であり、同じ workspace の root/session caller が共有する。provider が MCP child を
+credential と同時に memory 用の workspace 共有 root を受け取り、接続中は固定する。
+memory root は Git 追跡外の daemon data home `agent-memory/<workspace-id>` であり、同じ workspace の
+root/session caller が共有する。provider が MCP child を
 別の cwd から起動しても保存先は変わらない。手動の未認証、または store root を返さない旧 daemon と接続した
-`usagi mcp` は、互換経路として従来どおり cwd を両方に使う。成功時は usecase の結果 JSON を MCP の text content に入れて
+`usagi mcp` は、互換経路として従来どおり cwd を使う。成功時は usecase の結果 JSON を MCP の text content に入れて
 返し、作成・更新・削除は応答前に store root 配下の source Markdown へ永続化される。派生 index / TOC
 の refresh failure は committed source の成功応答を error に変えず、dirty marker により次の
-read で自己修復する。commit point、retry、issue number 採番 authority の正本は
+read で自己修復する。commit point と retry の正本は
 [2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract)を参照。
-`issue_get` / `memory_get` は対象が無ければ `null`、delete は `deleted: boolean` を返す。
-検索は query 省略で全件を返し、issue には `ready` / `unmet_deps` を付与する。
-
-issue store は git 追跡対象なので、`issue_create` / `issue_update` / `issue_delete` は
-`.usagi/sessions/<name>/` 配下の session worktree からだけ実行できる。workspace root の
-コーディネータからの呼び出しは store を変更せず拒否する。memory store の書き込みはこの
-制約の対象外である。
-
-同じ issue number の source Markdown が複数ある場合、`issue_get` / `issue_to_prompt` /
-`issue_update` / `issue_delete` は衝突した exact path を含む execution error を返し、どの sibling も
-選択・変更・削除しない。同一 content の `issue_create` retry も曖昧な既存番号を返さず、
-`session_delegate_issue` は typed ambiguity の番号と辞書順の exact path を safe execution error まで保持し、
-session registry、worktree、branch、dispatch queue、lifecycle state のいずれも作成・変更しない。
-`issue_search` は修復対象を観測できるよう parse 可能な
-sibling を exact filename と `ambiguous: true` の別 row として返し、`ready` にはしない。parse 不能な
-sibling も衝突判定には含め、重複番号を参照する依存は `unmet_deps` に残す。番号 identity と明示 repair の正本は
-[2. アーキテクチャ](02-architecture.md#markdown-永続化の-commit-contract) を参照する。
+`memory_get` は対象が無ければ `null`、delete は `deleted: boolean` を返す。
+検索は query 省略で全件を返す。
 
 TUI の人間回答面、Agent の所有権、回答の受信確認は [User decision](#user-decision) を参照する。
 

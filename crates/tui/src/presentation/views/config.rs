@@ -132,7 +132,6 @@ pub enum Field {
     DefaultModel,
     DefaultBranch,
     TeamTemplate,
-    Issue,
     Memory,
     Save,
 }
@@ -159,7 +158,7 @@ impl ScopeSettings {
 
 /// Editable Config screen state. Global Config edits application preferences
 /// and workspace defaults; the Overview modal edits only the current
-/// workspace's Agent, Team, Issue, and Memory choices.
+/// workspace's Agent, Team, and Memory choices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     scope: SettingsScope,
@@ -290,8 +289,7 @@ impl Config {
                 Field::DefaultModel | Field::DefaultBranch | Field::SessionSetup => {
                     Field::TeamTemplate
                 }
-                Field::TeamTemplate => Field::Issue,
-                Field::Issue => Field::Memory,
+                Field::TeamTemplate => Field::Memory,
                 Field::Memory => Field::PrAutoOpen,
                 Field::PrAutoOpen => Field::Save,
                 Field::Save => Field::Theme,
@@ -301,8 +299,7 @@ impl Config {
                 Field::Environment => Field::DefaultBranch,
                 Field::DefaultBranch => Field::SessionSetup,
                 Field::SessionSetup => Field::TeamTemplate,
-                Field::TeamTemplate => Field::Issue,
-                Field::Issue => Field::Memory,
+                Field::TeamTemplate => Field::Memory,
                 Field::Memory => Field::Save,
                 Field::Save
                 | Field::Theme
@@ -333,19 +330,17 @@ impl Config {
                 Field::DefaultModel | Field::DefaultBranch | Field::SessionSetup => {
                     Field::Environment
                 }
-                Field::Issue => Field::TeamTemplate,
                 Field::TeamTemplate => Field::DefaultModel,
-                Field::Memory => Field::Issue,
+                Field::Memory => Field::TeamTemplate,
                 Field::PrAutoOpen => Field::Memory,
                 Field::Save => Field::PrAutoOpen,
             },
             SettingsScope::Workspace => match self.field {
                 Field::Environment => Field::DefaultModel,
-                Field::Issue => Field::TeamTemplate,
                 Field::TeamTemplate => Field::SessionSetup,
                 Field::SessionSetup => Field::DefaultBranch,
                 Field::DefaultBranch => Field::Environment,
-                Field::Memory => Field::Issue,
+                Field::Memory => Field::TeamTemplate,
                 Field::Save => Field::Memory,
                 Field::DefaultModel
                 | Field::Theme
@@ -513,13 +508,6 @@ impl Config {
         self.team_picker = None;
     }
 
-    /// Toggle availability of the issue MCP tool family.
-    pub fn cycle_issue_enabled(&mut self) {
-        let enabled = &mut self.current_mut().draft.issue_enabled;
-        *enabled = !*enabled;
-        self.notice = None;
-    }
-
     /// Toggle availability of the memory MCP tool family.
     pub fn cycle_memory_enabled(&mut self) {
         let enabled = &mut self.current_mut().draft.memory_enabled;
@@ -537,7 +525,6 @@ impl Config {
             Field::PrAutoOpen => self.cycle_pr_auto_open(forward),
             Field::DefaultModel => self.cycle_default_model(),
             Field::DefaultBranch => self.cycle_default_branch(forward),
-            Field::Issue => self.cycle_issue_enabled(),
             Field::Memory => self.cycle_memory_enabled(),
             Field::TeamTemplate | Field::Environment | Field::SessionSetup | Field::Save => {
                 return false;
@@ -1388,12 +1375,6 @@ fn workspace_setting_rows(config: &Config) -> Vec<String> {
             config.settings().team_template != config.current().saved.team_template,
         ),
         select::render(
-            "Issue",
-            enabled_name(config.settings().issue_enabled),
-            config.field() == Field::Issue,
-            config.settings().issue_enabled != config.current().saved.issue_enabled,
-        ),
-        select::render(
             "Memory",
             enabled_name(config.settings().memory_enabled),
             config.field() == Field::Memory,
@@ -1603,11 +1584,11 @@ mod tests {
         assert_eq!(workspace.scope(), SettingsScope::Workspace);
         assert_eq!(workspace.field(), Field::DefaultModel);
         workspace.next_field();
-        workspace.cycle_issue_enabled();
+        workspace.cycle_memory_enabled();
         workspace.next_field();
         workspace.next_field();
         assert!(workspace.commit_save(&mut port));
-        assert!(!port.workspace.issue_enabled);
+        assert!(!port.workspace.memory_enabled);
         assert_eq!(port.global.theme, Theme::System);
     }
 
@@ -2009,7 +1990,6 @@ mod tests {
         assert!(frame.contains("Env") && frame.contains("[ 0 variables ]"));
         assert!(frame.contains("Workspace init"));
         assert!(frame.contains("Agent") && frame.contains("OpenAI"));
-        assert!(frame.contains("Issue") && frame.contains("on"));
         assert!(frame.contains("Memory") && frame.contains("on"));
         assert!(!frame.contains("Scope:"));
         assert!(!frame.contains("Tab: scope"));
@@ -2084,11 +2064,11 @@ mod tests {
     fn workspace_entry_starts_on_agent_and_hides_global_only_settings() {
         let mut port = FakeSettingsPort {
             global: Settings {
-                issue_enabled: true,
+                memory_enabled: true,
                 ..Settings::default()
             },
             workspace: Settings {
-                issue_enabled: false,
+                memory_enabled: false,
                 ..Settings::default()
             },
             ..FakeSettingsPort::default()
@@ -2099,10 +2079,10 @@ mod tests {
 
         assert_eq!(config.scope(), SettingsScope::Workspace);
         assert_eq!(config.field(), Field::DefaultModel);
-        assert!(!config.settings().issue_enabled);
+        assert!(!config.settings().memory_enabled);
         let frame = render(24, 80, &config).join("\n");
         assert!(frame.contains("Agent"));
-        assert!(frame.contains("Issue"));
+        assert!(!frame.contains("Issue"));
         assert!(frame.contains("Memory"));
         assert!(frame.contains("Env") && frame.contains("[ 0 variables ]"));
         assert!(frame.contains("Session setup") && frame.contains("[ 0 commands ]"));
@@ -2121,8 +2101,6 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Memory);
         config.previous_field();
-        assert_eq!(config.field(), Field::Issue);
-        config.previous_field();
         assert_eq!(config.field(), Field::TeamTemplate);
         config.previous_field();
         assert_eq!(config.field(), Field::SessionSetup);
@@ -2136,8 +2114,6 @@ mod tests {
         assert_eq!(config.field(), Field::SessionSetup);
         config.next_field();
         assert_eq!(config.field(), Field::TeamTemplate);
-        config.next_field();
-        assert_eq!(config.field(), Field::Issue);
         config.next_field();
         assert_eq!(config.field(), Field::Memory);
         config.next_field();
@@ -2217,11 +2193,11 @@ mod tests {
         let error_frame = render(24, 80, &config).join("\n");
         assert!(error_frame.contains("Load failed: settings unavailable"));
         config.next_field();
-        config.cycle_issue_enabled();
+        config.cycle_memory_enabled();
         let frame = render(24, 80, &config).join("\n");
 
         assert!(!frame.contains("Scope:"));
-        assert!(frame.contains("Issue") && frame.contains("off"));
+        assert!(frame.contains("Memory") && frame.contains("off"));
         assert!(frame.contains('●'));
     }
 
@@ -2313,8 +2289,6 @@ mod tests {
         config.previous_field();
         assert_eq!(config.field(), Field::Memory);
         config.previous_field();
-        assert_eq!(config.field(), Field::Issue);
-        config.previous_field();
         assert_eq!(config.field(), Field::TeamTemplate);
         config.previous_field();
         assert_eq!(config.field(), Field::DefaultModel);
@@ -2328,7 +2302,7 @@ mod tests {
         assert_eq!(config.field(), Field::Icons);
         config.previous_field();
         assert_eq!(config.field(), Field::Theme);
-        for _ in 0..11 {
+        for _ in 0..10 {
             config.next_field();
         }
         assert_eq!(config.field(), Field::Theme);
@@ -2414,7 +2388,7 @@ mod tests {
         move_to_field(&mut config, Field::TeamTemplate);
         assert_eq!(config.field(), Field::TeamTemplate);
         config.next_field();
-        assert_eq!(config.field(), Field::Issue);
+        assert_eq!(config.field(), Field::Memory);
         config.previous_field();
         assert_eq!(config.field(), Field::TeamTemplate);
         config.previous_field();
@@ -2463,7 +2437,7 @@ mod tests {
         assert_eq!(config.settings().default_branch, None);
 
         assert!(config.cycle_selected(false));
-        for _ in 0..5 {
+        for _ in 0..4 {
             config.next_field();
         }
         assert!(config.begin_save());
@@ -2475,28 +2449,22 @@ mod tests {
     }
 
     #[test]
-    fn issue_and_memory_availability_toggle_independently() {
+    fn memory_availability_toggles_and_is_saved() {
         let mut port = FakeSettingsPort::default();
         let mut config = Config::load(&mut port);
-        move_to_field(&mut config, Field::Issue);
-        assert_eq!(config.field(), Field::Issue);
-        assert!(config.cycle_selected(true));
-        assert!(!config.settings().issue_enabled);
-        assert!(config.settings().memory_enabled);
-
-        config.next_field();
+        move_to_field(&mut config, Field::Memory);
         assert_eq!(config.field(), Field::Memory);
+        assert!(config.settings().memory_enabled);
         assert!(config.cycle_selected(false));
         assert!(!config.settings().memory_enabled);
         let frame = render(24, 80, &config).join("\n");
-        assert!(frame.contains("Issue") && frame.contains("off"));
+        assert!(!frame.contains("Issue"));
         assert!(frame.contains("Memory") && frame.contains("off"));
 
         config.next_field();
         config.next_field();
         assert!(config.begin_save());
         assert!(config.commit_save(&mut port));
-        assert!(!port.global.issue_enabled);
         assert!(!port.global.memory_enabled);
     }
 
@@ -2570,7 +2538,6 @@ mod tests {
 
         assert_eq!(team_template_name(TeamTemplate::Flat), "flat");
         assert_eq!(team_template_name(TeamTemplate::Pipeline), "pipeline");
-        config.next_field();
         config.next_field();
         config.next_field();
         assert_eq!(config.field(), Field::Save);

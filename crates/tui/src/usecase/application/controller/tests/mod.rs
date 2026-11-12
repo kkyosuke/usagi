@@ -954,14 +954,14 @@ fn modal_registry_dispatches_once_and_rejects_invalid_or_repeated_requests() {
     let _ = update(&mut state, AppEvent::Key(AppKey::OpenOverview));
     let effects = update(
         &mut state,
-        AppEvent::Key(AppKey::SubmitOverview("issue list".to_owned())),
+        AppEvent::Key(AppKey::SubmitOverview("clean".to_owned())),
     );
     assert_eq!(
         effects,
         vec![Effect::WorkspaceCommand {
             workspace,
-            command: overview::Command::Issue {
-                arguments: "list".to_owned(),
+            command: overview::Command::Clean {
+                arguments: String::new(),
             },
         }]
     );
@@ -969,7 +969,7 @@ fn modal_registry_dispatches_once_and_rejects_invalid_or_repeated_requests() {
     assert_eq!(
         update(
             &mut state,
-            AppEvent::Key(AppKey::SubmitOverview("issue list".to_owned())),
+            AppEvent::Key(AppKey::SubmitOverview("clean".to_owned())),
         ),
         [] as [Effect; 0]
     );
@@ -2317,7 +2317,6 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
         "session overview",
         "session remove -s",
         "session remove named",
-        "issue",
         "unknown",
     ] {
         state.overlay = Some(Overlay::Overview);

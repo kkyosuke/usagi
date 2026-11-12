@@ -8,7 +8,7 @@
 //! itself is durable where the platform supports it (directory fsync is a no-op
 //! or errors on some platforms such as Windows and is intentionally ignored).
 //! JSON stores (`storage`) use [`read`] / [`write_atomic`]; the markdown stores
-//! (`issue_store`, `memory_store`) use [`write_text_atomic`] for their
+//! (`memory_store`) use [`write_text_atomic`] for their
 //! hand-rolled text. All share one per-writer-unique temp-name scheme so two
 //! processes writing the same path never clobber each other.
 
@@ -433,7 +433,7 @@ fn verify_basic_path_identity(
 /// are never relied on for correctness — a stale or missing cache self-heals from
 /// the source-of-truth markdown on the next read — so paying an fsync on every
 /// write to make them power-loss durable is wasted IO in the store lock's hot path.
-/// Source-of-truth files (JSON state, memory/issue markdown) stay durable.
+/// Source-of-truth files (JSON state, memory markdown) stay durable.
 fn write_atomically(path: &Path, bytes: &[u8], durable: bool) -> Result<()> {
     let mut temp = create_owned_temp(path)?;
     // Clean up the temp file on any failure after it is created. The write
@@ -679,8 +679,8 @@ pub fn write_text_atomic(path: &Path, text: &str) -> Result<()> {
 }
 
 /// The on-disk format version stamped onto every versioned store file
-/// (`storage`'s `workspaces.json` and the issue/memory `index.json` derived
-/// caches). Bumped only on an incompatible on-disk format change; the single
+/// (`storage`'s `workspaces.json` and the memory `index.json` derived
+/// cache). Bumped only on an incompatible on-disk format change; the single
 /// source of truth for the envelope's `version` field so no store carries its
 /// own copy.
 pub const FILE_FORMAT_VERSION: u32 = 1;

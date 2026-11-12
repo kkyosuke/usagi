@@ -22,8 +22,9 @@ mod agy;
 pub(super) use agy::RootAgyProvisioner;
 #[cfg(test)]
 pub(super) use agy::{
-    agy_arguments_for_integration, agy_workspace_arguments, agy_workspace_documents,
-    materialize_agy_workspace,
+    agentapi_repair_mode, agy_arguments_for_integration, agy_workspace_alias_name,
+    agy_workspace_arguments, agy_workspace_documents, materialize_agy_workspace,
+    prepare_agy_writable_paths, publish_agy_workspace_alias,
 };
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
@@ -124,7 +125,7 @@ pub(super) fn repair_agent_codex_arg0_permissions(sandbox_home: Option<&Path>) {
 
 /// The registry's bounded in-memory replay buffer already serves reconnect
 /// within retention; a durable on-disk output journal is intentionally deferred
-/// with daemon-crash PTY FD continuation (out of scope for this issue).
+/// with daemon-crash PTY FD continuation (out of scope here).
 pub(super) struct DiscardJournal;
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_dispatch_worker_complete_reaches_the_caller_inbox
 impl OutputJournal for DiscardJournal {

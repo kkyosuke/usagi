@@ -1,21 +1,14 @@
-//! Read-only Issue/Memory discovery boundary for the human TUI.
+//! Read-only Memory discovery boundary for the human TUI.
 use std::sync::{Arc, atomic::AtomicBool};
 
-/// Maximum displayed results per store. A full store scan can return more.
+/// Maximum displayed results. A full store scan can return more.
 pub const RESULT_LIMIT: usize = 100;
 /// Maximum query length in Unicode scalar values.
 pub const QUERY_LIMIT: usize = 256;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Issue,
-    Memory,
-}
-
-/// Exact source identity, independent of an issue number or memory slug.
+/// Exact source identity, independent of the memory slug.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
-    pub kind: Kind,
     pub path: String,
     pub title: String,
     pub detail: String,
@@ -30,7 +23,7 @@ pub struct Results {
 
 /// Moved into a worker; neither method runs on the frame thread.
 pub trait KnowledgeSearchPort: Send {
-    /// Observe cancellation during lock waits and between stores. A cancelled
+    /// Observe cancellation during lock waits. A cancelled
     /// response retains its request token and is discarded by the frame loop.
     fn search(&mut self, query: &str, cancelled: Arc<AtomicBool>) -> Results;
     /// Read the current exact source using the bounded preview policy.
@@ -44,7 +37,7 @@ pub struct UnavailableKnowledgeSearch;
 impl KnowledgeSearchPort for UnavailableKnowledgeSearch {
     fn search(&mut self, _: &str, _: Arc<AtomicBool>) -> Results {
         Results {
-            errors: vec!["Issue / Memory search is unavailable".into()],
+            errors: vec!["Memory search is unavailable".into()],
             ..Results::default()
         }
     }
