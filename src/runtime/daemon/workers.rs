@@ -873,7 +873,7 @@ pub(super) fn start_retention_gc_worker(
                 agent.collect_retention_garbage();
                 retained.extend(agent.retained_resources());
             }
-            visibility.retain(|terminal, _| retained.contains(&terminal.terminal_id.as_str()));
+            visibility.retain_terminal_ids(&retained);
             if let Err(error) = durable.collect(&retained, &limits) {
                 ErrorLog::record(&format!("durable runtime collection deferred: {error}"));
             }

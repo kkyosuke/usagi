@@ -5804,4 +5804,22 @@ fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
         perform_status(&failing_runtime, &FakeSessionGit::ok(), &operation()),
         Err(SessionRuntimeError::Storage)
     );
+    assert_eq!(
+        perform_create(
+            &runtime,
+            &FakeSessionGit::ok(),
+            &operation(),
+            &json!({"name": "bad/name"}),
+        ),
+        Err(SessionRuntimeError::InvalidRequest)
+    );
+    assert_eq!(
+        perform_remove(
+            &runtime,
+            &TeardownSignal::new(),
+            &operation(),
+            &json!({"name": "bad/name"}),
+        ),
+        Err(SessionRuntimeError::InvalidRequest)
+    );
 }

@@ -143,11 +143,8 @@ pub(super) fn spawn_bootstrap_broker(
     // both processes wait on each other. The identity-scoped socket path and a
     // successful connect are sufficient to prove that this broker is present.
     if verify_broker_socket_endpoint(&address.socket).is_ok()
-        && std::os::unix::net::UnixStream::connect(&address.socket)
-            .and_then(|stream| {
-                usagi_daemon::infrastructure::unix_transport::verify_same_user_peer(&stream)
-            })
-            .is_ok()
+        && let Ok(stream) = std::os::unix::net::UnixStream::connect(&address.socket)
+        && usagi_daemon::infrastructure::unix_transport::verify_same_user_peer(&stream).is_ok()
     {
         return Ok(());
     }
@@ -188,7 +185,7 @@ pub(super) fn launch_broker_daemon(
             reap_child(child);
             return Ok(());
         }
-        if child.try_wait().is_ok_and(|status| status.is_some()) {
+        if matches!(child.try_wait(), Ok(Some(_))) {
             break;
         }
         RealSleeper.sleep();
@@ -450,9 +447,7 @@ pub(super) fn bootstrap_client<S: Read + Write>(
         match acquire_bootstrap_lock_io_within(&data_dir, PrivateLockWait::BOOTSTRAP) {
             Ok(lock) => lock,
             Err(lock_error)
-                if lock_error
-                    .raw_os_error()
-                    .is_some_and(|code| matches!(code, libc::EACCES | libc::EPERM)) =>
+                if matches!(lock_error.raw_os_error(), Some(libc::EACCES | libc::EPERM)) =>
             {
                 let broker_workspace = launch_workspace()?;
                 if request_broker_start(&data_dir, &broker_workspace, &exe).is_err() {

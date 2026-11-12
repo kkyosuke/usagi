@@ -667,15 +667,16 @@ fn pre_inspect_create_orphan(
     git: &dyn GitRunner,
     payload: &Value,
 ) -> Result<Option<OrphanDiagnosis>, SessionRuntimeError> {
-    let Ok(name) = session_name(payload) else {
-        return Ok(None);
-    };
+    let name = session_name(payload)?;
     let target = {
         let guard = runtime.lock().map_err(|_| SessionRuntimeError::Storage)?;
-        guard
-            .io
-            .path_occupied(&guard.session_root(&name))
-            .then(|| (guard.repo_root.clone(), Arc::clone(&guard.io)))
+        let untracked_orphan = !guard
+            .state()?
+            .sessions
+            .iter()
+            .any(|session| session.name == name)
+            && guard.io.path_occupied(&guard.session_root(&name));
+        untracked_orphan.then(|| (guard.repo_root.clone(), Arc::clone(&guard.io)))
     };
     Ok(target.map(|(repo_root, io)| inspect_orphan_with(git, io.as_ref(), &repo_root, &name)))
 }
@@ -813,9 +814,7 @@ fn pre_inspect_remove_orphan(
     runtime: &Mutex<SessionRuntime>,
     payload: &Value,
 ) -> Result<Option<OrphanDiagnosis>, SessionRuntimeError> {
-    let Ok(name) = session_name(payload) else {
-        return Ok(None);
-    };
+    let name = session_name(payload)?;
     let target = {
         let guard = runtime.lock().map_err(|_| SessionRuntimeError::Storage)?;
         let is_integrity_orphan = guard.state()?.sessions.iter().any(|session| {

@@ -906,8 +906,8 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `agents.json.migrated` / `terminals.json.migrated` | 退役した legacy JSON | migration が rename で退役させた legacy whole-snapshot store。bytes は調査用に残るが、どの build も再び読まない |
 | `terminal-visibility.json` | durable atomic JSON | 終了済み terminal tombstone の workspace 横断 visibility ledger（`Observed` / `Dismissed` と compare-and-swap revision）。起動時と retention GC tick で保持中 terminal に prune される |
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
-| `notifications.json` / `notifications.lock` | durable atomic JSON / lock file | desktop notification の発火済み記録と cross-process 直列化 lock |
-| `user-decisions.json` / `user-decisions.lock` | durable atomic JSON / lock file | workspace / session の意思決定ログと cross-process 直列化 lock |
+| `desktop-notifications.json` | durable atomic JSON | desktop notification の発火済み記録（active generation lease 下で atomic JSON として更新） |
+| `user-decisions.json` / `.lock` | durable atomic JSON / lock file | workspace / session の意思決定ログと cross-process 直列化 lock |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、legacy prompt queue、dispatch run、caller↔worker binding のレジストリ。planned rollover 中の旧 draining generation も更新するため schema は旧 build と共通に保つ。run ID は既存の durable `OperationId` を使う |
 | `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership、workspace/session ごとの prompt queue、run retention から独立した immutable session lineage、委譲 admission から child publish までの concurrency reservation。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable sequence JSONL | caller agent 単位の完了報告 inbox。fsync append、derived offset index、atomic ACK watermark、cross-process lock で、caller の停止中と daemon restart 後にも未 ACK 報告を保持する |

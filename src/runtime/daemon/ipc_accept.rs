@@ -405,7 +405,7 @@ pub(super) fn spawn_ipc_server(
         if let Ok(agent) = agent.lock() {
             retained.extend(agent.retained_resources());
         }
-        visibility.retain(|terminal, _| retained.contains(&terminal.terminal_id.as_str()));
+        visibility.retain_terminal_ids(&retained);
     }
     background_workers.push(start_retention_gc_worker(
         Arc::clone(&terminal),

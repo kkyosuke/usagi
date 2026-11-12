@@ -9,11 +9,12 @@
 //! `Arc<Mutex<_>>` because `SharedTerminalOwner` is constructed per connection
 //! while this authority must outlive any one connection.
 //!
-//! Aggregate retention and garbage collection of tombstones (and cross-restart
-//! persistence) belongs to the aggregate-retention service; this service publishes
-//! only the observe / dismiss / visibility contract.
+//! [`SharedTerminalVisibility::open`] persists the ledger to
+//! `<data-dir>/daemon/terminal-visibility.json` and [`SharedTerminalVisibility::retain_terminal_ids`]
+//! prunes entries whose owners are no longer retained.
 
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
 };
@@ -114,12 +115,14 @@ impl SharedTerminalVisibility {
         })
     }
 
-    /// Retains only entries matching `predicate`, persisting the ledger when
-    /// any stale tombstone entry is pruned.
-    pub fn retain(&self, predicate: impl FnMut(&TerminalRef, &mut TerminalVisibility) -> bool) {
+    /// Retains only entries whose `terminal_id` is in `retained`, persisting
+    /// the ledger when any stale tombstone entry is pruned.
+    pub fn retain_terminal_ids(&self, retained: &BTreeSet<String>) {
         self.with(|authority| {
             let before = authority.ledger.len();
-            authority.ledger.retain(predicate);
+            authority
+                .ledger
+                .retain(|terminal, _| retained.contains(&terminal.terminal_id.as_str()));
             if authority.ledger.len() != before {
                 authority.persist();
             }
@@ -217,7 +220,9 @@ mod tests {
             TerminalVisibilityState::Dismissed
         );
 
-        reopened.retain(|candidate, _| candidate == &kept);
+        let retained = BTreeSet::from([kept.terminal_id.as_str()]);
+        reopened.retain_terminal_ids(&retained);
+        reopened.retain_terminal_ids(&retained);
         let after_prune = SharedTerminalVisibility::open(temp.path());
         assert_eq!(
             after_prune.visibility(&kept).state,

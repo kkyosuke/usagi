@@ -2199,11 +2199,7 @@ impl IpcRolloverRequester<'_> {
     }
 
     fn stop_standby(&self, mut standby: LaunchedStandby) {
-        if !standby
-            .child
-            .try_wait()
-            .is_ok_and(|status| status.is_some())
-        {
+        if !matches!(standby.child.try_wait(), Ok(Some(_))) {
             // Signal only the identity captured while the spawned Child still held
             // custody of its PID. Re-reading identity here could authenticate an
             // unrelated process if a failed standby had exited and the PID was
@@ -2211,11 +2207,7 @@ impl IpcRolloverRequester<'_> {
             let _ = Terminator::terminate(&SigtermTerminator, &standby.record);
             let grace_deadline = Instant::now() + Duration::from_secs(2);
             loop {
-                if standby
-                    .child
-                    .try_wait()
-                    .is_ok_and(|status| status.is_some())
-                {
+                if matches!(standby.child.try_wait(), Ok(Some(_))) {
                     break;
                 }
                 if Instant::now() >= grace_deadline {

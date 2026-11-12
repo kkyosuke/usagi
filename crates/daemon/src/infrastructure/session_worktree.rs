@@ -322,16 +322,19 @@ fn mirror_directory(
             std::fs::copy(source, target)?;
         } else if file_type.is_symlink() {
             let link_target = std::fs::read_link(&source)?;
-            if !link_target.is_absolute()
-                && !link_target
-                    .components()
-                    .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
+            if is_confined_relative_symlink(&link_target) {
                 std::os::unix::fs::symlink(link_target, target)?;
             }
         }
     }
     Ok(())
+}
+
+fn is_confined_relative_symlink(target: &Path) -> bool {
+    !target.is_absolute()
+        && !target
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
 /// Remove `root` and everything under it.
@@ -986,5 +989,8 @@ mod bounded_git_tests {
                 .unwrap(),
             vec![PathBuf::from("group/repo-a"), PathBuf::from("repo-b")]
         );
+        assert!(is_confined_relative_symlink(Path::new("nested/file.txt")));
+        assert!(!is_confined_relative_symlink(Path::new("/etc/passwd")));
+        assert!(!is_confined_relative_symlink(Path::new("../outside")));
     }
 }
