@@ -24,10 +24,10 @@ use super::{
     GenerationRegistryFile, GenerationRole, Geometry, LeaseClass, LockResult, Mutex, MutexGuard,
     OpenedTenant, OperationId, PENDING_DAEMON_AGENT_RESTART_MAX_BYTES,
     PENDING_DAEMON_AGENT_RESTART_SCHEMA, PENDING_DAEMON_AGENT_RESTART_TICK, Path, PathBuf,
-    RootAgentRuntime, RootClaudeProvisioner, RootCodexProvisioner, RuntimeHydration, Serialize,
-    SessionScopeResolver, ShardedAgentStore, SharedAgentRuntime, SharedSessionRuntime,
-    SharedUserEnvironment, ShutdownRequest, SpawnProvision, SpawnedChildren, SyncSender,
-    SystemAgentReadiness, TenantRegistry, TenantRuntimeOpener, TerminalOutcome,
+    ReadinessPolicy, RootAgentRuntime, RootClaudeProvisioner, RootCodexProvisioner,
+    RuntimeHydration, Serialize, SessionScopeResolver, ShardedAgentStore, SharedAgentRuntime,
+    SharedSessionRuntime, SharedUserEnvironment, ShutdownRequest, SpawnProvision, SpawnedChildren,
+    SyncSender, SystemAgentReadiness, TenantRegistry, TenantRuntimeOpener, TerminalOutcome,
     TerminalPipelineMetrics, TrySendError, UserDecisionStore, WorkspaceId, Workspaces, Write,
     existing_policy_client, hydrate_runtime_state, implicit_bound_workspace, known_sessions,
     observe_generation_process, open_runtime_state, open_session_runtime,
@@ -971,7 +971,9 @@ pub(super) fn restore_pending_daemon_agents(
             )
             .map_err(|error| std::io::Error::other(error.message))?;
         drop(owner);
-        run_agent_readiness(agent, preflight.as_ref())
+        // Nobody watches a restored pane during daemon restart recovery.
+        run_agent_readiness(agent, preflight.as_ref(), ReadinessPolicy::Required)
+            .map(drop)
             .map_err(|error| std::io::Error::other(error.message))?;
         let _environment = agent
             .prepare_environment(item.agent.target.workspace_id, preflight.is_some())
