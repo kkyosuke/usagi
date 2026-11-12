@@ -2268,6 +2268,15 @@ mod tests {
             KeyEventKind::Press,
         );
         assert_eq!(encode_key(&alt_backtab), b"\x1b\x1b[Z".to_vec());
+        let alt_a = KeyEvent::new(
+            KeyCode::Char('a'),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_a), b"\x1ba".to_vec());
         let ctrl_alt_a = KeyEvent::new(
             KeyCode::Char('a'),
             Modifiers {
