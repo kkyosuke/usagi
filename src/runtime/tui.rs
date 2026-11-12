@@ -4478,7 +4478,9 @@ fn available_agent_models() -> AvailableAgentModels {
     )
 }
 
-struct RuntimeDoctorPort;
+struct RuntimeDoctorPort {
+    data_dir: Option<PathBuf>,
+}
 
 const VERSION_PROBE_POLICY: ChildPolicy = ChildPolicy {
     timeout: Duration::from_secs(1),
@@ -4547,6 +4549,12 @@ impl DoctorPort for RuntimeDoctorPort {
         crate::runtime::daemon::diagnostic_client(ClientPolicy::cli(), true)
             .map(|_| "daemon is reachable".to_owned())
             .map_err(|error| error.to_string())
+    }
+
+    fn repair(&mut self) {
+        if let Some(data_dir) = self.data_dir.as_deref() {
+            crate::runtime::daemon::repair_non_lifecycle_doctor_state(data_dir);
+        }
     }
 }
 
@@ -4745,7 +4753,10 @@ fn launch_ready(out: &mut dyn Write, info: &AppInfo, entry: &EntryScreen) -> std
         EntryScreen::Config => launch_screen_graph(out, Start::Config, None),
         EntryScreen::Workspace { path } => launch_workspace(out, path),
         EntryScreen::Doctor => {
-            let report = doctor::diagnose(&mut RuntimeDoctorPort);
+            let mut port = RuntimeDoctorPort {
+                data_dir: usagi_core::infrastructure::paths::data_dir().ok(),
+            };
+            let report = doctor::diagnose(&mut port);
             let mut runner = BannerScreenRunner::with_doctor_report(out, info, &report);
             application::run(entry, &mut runner)
         }
@@ -4778,9 +4789,18 @@ pub(crate) fn launch(
 pub(crate) fn launch_doctor(
     out: &mut dyn Write,
     info: &AppInfo,
-    _fix: bool,
-) -> std::io::Result<()> {
-    launch(out, info, &EntryScreen::Doctor)
+    fix: bool,
+) -> std::io::Result<bool> {
+    let mut port = RuntimeDoctorPort {
+        data_dir: usagi_core::infrastructure::paths::data_dir().ok(),
+    };
+    let report = doctor::diagnose_with_fix(&mut port, fix);
+    let mut runner = BannerScreenRunner::with_doctor_report(out, info, &report);
+    if let Err(error) = application::run(&EntryScreen::Doctor, &mut runner) {
+        ErrorLog::record(&tui_error_entry("application", &error.to_string()));
+        return Err(error);
+    }
+    Ok(report.is_healthy())
 }
 
 #[cfg(test)]
@@ -5113,6 +5133,66 @@ mod tests {
         assert_eq!(
             version_detail(VersionProbeResult::EmptyOutput),
             Err("version output is empty".to_owned())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_repair_tightens_private_directory_and_settings_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use usagi_tui::usecase::doctor::DoctorPort as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing");
+        super::RuntimeDoctorPort { data_dir: None }.repair();
+        super::RuntimeDoctorPort {
+            data_dir: Some(missing),
+        }
+        .repair();
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod data_dir");
+        super::RuntimeDoctorPort {
+            data_dir: Some(dir.path().to_path_buf()),
+        }
+        .repair();
+        assert_eq!(
+            std::fs::metadata(dir.path())
+                .expect("data_dir metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        let daemon_dir = dir.path().join("daemon");
+        std::fs::create_dir_all(&daemon_dir).expect("create daemon_dir");
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod daemon_dir");
+        let settings_path = dir.path().join("settings.json");
+        std::fs::write(&settings_path, "{}\n").expect("write settings.json");
+        std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod settings.json");
+
+        super::RuntimeDoctorPort {
+            data_dir: Some(dir.path().to_path_buf()),
+        }
+        .repair();
+        assert_eq!(
+            std::fs::metadata(&daemon_dir)
+                .expect("daemon_dir metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&settings_path)
+                .expect("settings.json metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 

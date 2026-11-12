@@ -3647,6 +3647,51 @@ pub(crate) fn diagnostic_client(
     .map_err(|error| ClientError::Unavailable(error.to_string()))
 }
 
+/// Repairs non-lifecycle state (`0700` data/daemon directories, `0600` settings
+/// file, and stale crashed-daemon endpoint locator) without starting, stopping,
+/// or restarting any daemon or Agent process.
+pub(crate) fn repair_non_lifecycle_doctor_state(data_dir: &Path) {
+    repair_doctor_data_dir(data_dir);
+    if data_dir.join("daemon").is_dir()
+        && !current_daemon_is_reachable(data_dir)
+        && let Ok(_bootstrap) = acquire_bootstrap_lock(data_dir)
+    {
+        let _ = recover_stale_client_endpoint(data_dir);
+    }
+}
+
+pub(crate) fn repair_doctor_data_dir(data_dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        for dir in [data_dir, &data_dir.join("daemon")] {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
+                .open(dir)
+            {
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let settings_path = data_dir.join("settings.json");
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&settings_path)
+            && file.metadata().is_ok_and(|meta| meta.is_file())
+        {
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    if data_dir.is_dir() {
+        let _ = ensure_private_dir(data_dir);
+    }
+    let daemon_dir = data_dir.join("daemon");
+    if daemon_dir.is_dir() {
+        let _ = ensure_private_dir(&daemon_dir);
+    }
+}
+
 /// Cross-process lifecycle custody for one managed update synchronization.
 ///
 /// The updater holds both client bootstrap and explicit lifecycle custody from

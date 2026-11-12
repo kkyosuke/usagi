@@ -80,9 +80,14 @@ mod action_io {
             RunOutcome::LaunchTui(TuiRequest::Config) => {
                 tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
             }
-            RunOutcome::LaunchTui(TuiRequest::Doctor { fix }) => {
-                tui::launch_doctor(out, info, fix).map(|()| ExitCode::SUCCESS)
-            }
+            RunOutcome::LaunchTui(TuiRequest::Doctor { fix }) => tui::launch_doctor(out, info, fix)
+                .map(|healthy| {
+                    if healthy {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
+                    }
+                }),
             RunOutcome::LaunchDaemon(command) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
             }
@@ -131,21 +136,21 @@ mod action_io {
                 let stdin = std::io::stdin();
                 let workspace_root =
                     std::env::var_os(usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV);
-                let client: Result<Box<dyn DaemonClient>, _> =
-                    match mcp_daemon_route(workspace_root.as_deref()) {
-                        // This child was provisioned by the daemon whose live
-                        // Agent runtime it must claim. It runs in a sandbox that
-                        // deliberately cannot write the data home's
-                        // `bootstrap.lock`; cold-starting here would both fail
-                        // that sandbox boundary and target a daemon that cannot
-                        // know the parent runtime being claimed.
-                        McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp())
-                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
-                        // A manually started MCP server remains a user entry
-                        // surface and therefore keeps daemon autostart.
-                        McpDaemonRoute::Bootstrap => daemon::policy_client(ClientPolicy::mcp())
-                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
-                    };
+                let route = mcp_daemon_route(workspace_root.as_deref());
+                let client: Result<Box<dyn DaemonClient>, _> = match route {
+                    // This child was provisioned by the daemon whose live
+                    // Agent runtime it must claim. It runs in a sandbox that
+                    // deliberately cannot write the data home's
+                    // `bootstrap.lock`; cold-starting here would both fail
+                    // that sandbox boundary and target a daemon that cannot
+                    // know the parent runtime being claimed.
+                    McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp())
+                        .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                    // A manually started MCP server remains a user entry
+                    // surface and therefore keeps daemon autostart.
+                    McpDaemonRoute::Bootstrap => daemon::policy_client(ClientPolicy::mcp())
+                        .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                };
                 match client {
                     Ok(mut client) => {
                         let (credential, store_root, memory_root) = match client
@@ -201,6 +206,12 @@ mod action_io {
                                     &credential,
                                 )
                             }
+                        } else if route == McpDaemonRoute::Attached {
+                            writeln!(
+                                err,
+                                "mcp claim failed: daemon did not issue a caller credential"
+                            )?;
+                            return Ok(ExitCode::FAILURE);
                         } else {
                             // Manual MCP remains useful for unprivileged store and
                             // observation tools; caller-scoped mutation stays absent.
@@ -394,6 +405,9 @@ fn update_installer_command(select_version: bool, restart_agents: bool) -> std::
         .arg("--")
         .current_dir("/")
         .env("USAGI_MANAGED_UPDATE", "1")
+        .env_remove("BASH_ENV")
+        .env_remove("ENV")
+        .env_remove("USAGI_VERSION")
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -640,6 +654,24 @@ fn validate_launcher_path(
     Ok(())
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 // daemon bootstrap の trusted environment で sandbox backend を一度だけ探索する。macOS は既定パスの
 // `sandbox-exec`、Linux は PATH 上の `bwrap` を canonical absolute path にする。Agent child は再探索しない。
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=a_missing_backend_is_rejected_on_each_supported_platform
@@ -647,12 +679,12 @@ pub(crate) fn resolve_sandbox_backend(platform: Platform) -> Option<PathBuf> {
     match platform {
         Platform::MacOs => {
             let path = PathBuf::from("/usr/bin/sandbox-exec");
-            path.canonicalize().ok()
+            is_executable_file(&path).then(|| path.canonicalize().ok())?
         }
         Platform::Linux => std::env::var_os("PATH").and_then(|paths| {
             std::env::split_paths(&paths)
                 .map(|directory| directory.join("bwrap"))
-                .find(|candidate| candidate.is_file())
+                .find(|candidate| is_executable_file(candidate))
                 .and_then(|candidate| candidate.canonicalize().ok())
         }),
         Platform::Unsupported => None,
@@ -1209,6 +1241,13 @@ mod tests {
             environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
             Some(&Some(std::ffi::OsStr::new("1")))
         );
+        for removed in ["BASH_ENV", "ENV", "USAGI_VERSION"] {
+            assert_eq!(
+                environment.get(std::ffi::OsStr::new(removed)),
+                Some(&None),
+                "{removed} must be cleared"
+            );
+        }
         let no_daemon = update_installer_command(false, false);
         assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
         assert!(no_daemon.get_current_dir().is_some());
@@ -1217,6 +1256,26 @@ mod tests {
             restart.get_args().collect::<Vec<_>>(),
             ["-s", "--", "--select-version", "--restart-agents"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_file_check_requires_regular_file_with_execute_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!super::is_executable_file(&dir.path().join("missing")));
+        assert!(!super::is_executable_file(dir.path()));
+
+        let candidate = dir.path().join("bwrap");
+        std::fs::write(&candidate, "#!/bin/sh\n").expect("write candidate");
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod 0644");
+        assert!(!super::is_executable_file(&candidate));
+
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 0755");
+        assert!(super::is_executable_file(&candidate));
     }
 
     fn verified_installer_request() -> InstallerRequest {
