@@ -553,26 +553,36 @@ fn is_renderable_escape(sequence: &str) -> bool {
     };
     params
         .bytes()
-        .all(|byte| byte.is_ascii_digit() || byte == b';' || byte == b':')
+        .all(|byte| byte.is_ascii_digit() || byte == b';')
         && !sgr_params_contain_conceal(params)
 }
 
 fn sgr_params_contain_conceal(params: &str) -> bool {
-    let mut iter = params.split(';');
-    while let Some(param) = iter.next() {
-        match param.parse::<u16>().ok() {
+    let mut parts = params.split(';');
+    while let Some(part) = parts.next() {
+        match part.parse::<u16>().ok() {
             Some(8) => return true,
-            Some(38 | 48 | 58) => match iter.next().and_then(|mode| mode.parse::<u16>().ok()) {
-                Some(5) => {
-                    let _ = iter.next();
+            Some(38 | 48 | 58) => {
+                let mut lookahead = parts.clone();
+                match (
+                    lookahead.next(),
+                    lookahead.next(),
+                    lookahead.next(),
+                    lookahead.next(),
+                ) {
+                    (Some("5"), Some(palette), _, _) if palette.parse::<u8>().is_ok() => {
+                        let _ = parts.nth(1);
+                    }
+                    (Some("2"), Some(r), Some(g), Some(b))
+                        if r.parse::<u8>().is_ok()
+                            && g.parse::<u8>().is_ok()
+                            && b.parse::<u8>().is_ok() =>
+                    {
+                        let _ = parts.nth(3);
+                    }
+                    _ => {}
                 }
-                Some(2) => {
-                    let _ = iter.next();
-                    let _ = iter.next();
-                    let _ = iter.next();
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
     }
@@ -957,6 +967,19 @@ mod tests {
         assert_eq!(style, "");
         assert!(update_active_style(&mut style, "\u{1b}[m"));
         assert_eq!(style, "");
+
+        for rejected in [
+            "\u{1b}[8m",
+            "\u{1b}[1;8m",
+            "\u{1b}[8:0m",
+            "\u{1b}[38;2;8m",
+            "\u{1b}[38;5;;8m",
+            "\u{1b}[38;2;999;8;1m",
+        ] {
+            assert!(!update_active_style(&mut style, rejected), "{rejected:?}");
+        }
+        assert!(update_active_style(&mut style, "\u{1b}[38;5;8m"));
+        assert!(update_active_style(&mut style, "\u{1b}[38;2;8;8;8m"));
     }
 
     #[test]

@@ -188,7 +188,11 @@ fn grapheme_display_width(grapheme: &str) -> usize {
     if grapheme == "\t" {
         1
     } else {
-        crate::presentation::widgets::display_width(grapheme)
+        grapheme
+            .chars()
+            .filter(|character| presentation_character_is_safe(*character))
+            .filter_map(unicode_width::UnicodeWidthChar::width)
+            .sum()
     }
 }
 

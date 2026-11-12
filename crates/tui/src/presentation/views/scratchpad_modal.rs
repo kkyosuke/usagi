@@ -45,7 +45,10 @@ fn note_list_body(editor: &NoteEditor) -> Vec<String> {
                 .take(MAX_ROWS)
                 .map(|todo| {
                     let mark = if todo.done { "x" } else { " " };
-                    modal::content_line(&format!("[{mark}] {}", todo.text), INNER_WIDTH)
+                    let text = usagi_core::domain::presentation_text::sanitize_presentation_line(
+                        &todo.text,
+                    );
+                    modal::content_line(&format!("[{mark}] {text}"), INNER_WIDTH)
                 }),
         );
     } else {
@@ -60,12 +63,11 @@ fn note_list_body(editor: &NoteEditor) -> Vec<String> {
                 .rev()
                 .take(MAX_ROWS)
                 .map(|decision| {
+                    let text = usagi_core::domain::presentation_text::sanitize_presentation_line(
+                        &decision.text,
+                    );
                     modal::content_line(
-                        &format!(
-                            "{}  {}",
-                            decision.at.format("%Y-%m-%d %H:%M"),
-                            decision.text
-                        ),
+                        &format!("{}  {text}", decision.at.format("%Y-%m-%d %H:%M")),
                         INNER_WIDTH,
                     )
                 }),
@@ -341,7 +343,11 @@ pub fn render_roles_over(
                 .lines()
                 .skip(editor.scroll_top())
                 .take(ROLE_EDITOR_VIEWPORT_LINES)
-                .map(|line| modal::content_line(line, INNER_WIDTH)),
+                .map(|line| {
+                    let clean =
+                        usagi_core::domain::presentation_text::sanitize_presentation_line(line);
+                    modal::content_line(&clean, INNER_WIDTH)
+                }),
         );
     }
     if let Some(line) = error_line(editor.error().map(|error| error.message.as_str())) {
