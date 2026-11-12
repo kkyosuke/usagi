@@ -224,7 +224,10 @@ impl UserDecision {
                 || !safe_line(&option.label, USER_DECISION_OPTION_LABEL_MAX_BYTES)
                 || option.description.as_ref().is_some_and(|description| {
                     description.len() > USER_DECISION_OPTION_DESCRIPTION_MAX_BYTES
-                        || description.contains('\0')
+                        || !description.chars().all(|ch| {
+                            ch == '\n'
+                                || super::presentation_text::presentation_character_is_safe(ch)
+                        })
                 })
                 || !ids.insert(option.id.as_str())
             {
@@ -462,11 +465,18 @@ mod tests {
             item.validate_request(),
             Err(UserDecisionError::InvalidRequest)
         );
-        item.options[0].description = Some("unsafe\0description".into());
-        assert_eq!(
-            item.validate_request(),
-            Err(UserDecisionError::InvalidRequest)
-        );
+        for bad_description in [
+            "unsafe\0description",
+            "unsafe\x1b[31mdescription",
+            "unsafe\rdescription",
+            "unsafe\u{202e}description",
+        ] {
+            item.options[0].description = Some(bad_description.into());
+            assert_eq!(
+                item.validate_request(),
+                Err(UserDecisionError::InvalidRequest)
+            );
+        }
         item.options[0].description = Some("First line\nSecond line".into());
         assert!(item.validate_request().is_ok());
         for bad in ["bad\nline", "bad\x1b", "bad\u{202e}"] {
