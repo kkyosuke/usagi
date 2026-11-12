@@ -12297,3 +12297,23 @@ fn session_lineage_requires_a_valid_available_session_and_parent_id() {
         Some((session, None))
     );
 }
+
+#[test]
+fn attached_client_workspace_selects_canonical_root_or_keeps_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = paths::canonical_workspace_root(dir.path()).unwrap();
+    let fallback = ClientWorkspace::Bound {
+        root: "/fallback".to_owned(),
+    };
+    assert_eq!(
+        attached_client_workspace(None, fallback.clone()).unwrap(),
+        fallback
+    );
+    assert_eq!(
+        attached_client_workspace(Some(dir.path()), fallback.clone()).unwrap(),
+        ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(canonical),
+        }
+    );
+    assert!(attached_client_workspace(Some(&dir.path().join("missing")), fallback).is_err());
+}

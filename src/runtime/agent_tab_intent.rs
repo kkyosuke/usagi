@@ -71,6 +71,7 @@ impl FileAgentTabIntentStore {
         let lock_path = workspace_dir.join("agent-tabs.lock");
         let lock = open_private_lock(&lock_path)?;
         FileExt::lock_exclusive(&lock)?;
+        verify_locked_file_identity(&lock, &lock_path)?;
         operation(&self.state_path(workspace))
     }
 
@@ -277,6 +278,8 @@ fn validate_private_directory_mode(metadata: &fs::Metadata) -> io::Result<()> {
     ))
 }
 
+const MAX_AGENT_TAB_INTENT_BYTES: u64 = 256 * 1024;
+
 fn open_private_lock(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -286,10 +289,24 @@ fn open_private_lock(path: &Path) -> io::Result<File> {
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     verify_private_file(&file)?;
     Ok(file)
+}
+
+fn verify_locked_file_identity(lock: &File, path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let locked = lock.metadata()?;
+    let current = fs::symlink_metadata(path)?;
+    if locked.dev() != current.dev() || locked.ino() != current.ino() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Agent tab intent lock was replaced during acquisition",
+        ));
+    }
+    Ok(())
 }
 
 fn create_private_new(path: &Path) -> io::Result<File> {
@@ -299,7 +316,7 @@ fn create_private_new(path: &Path) -> io::Result<File> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
     verify_private_file(&file)?;
     Ok(file)
@@ -341,9 +358,9 @@ fn validate_private_file_mode(metadata: &fs::Metadata) -> io::Result<()> {
 fn read_private_file(path: &Path) -> io::Result<Option<String>> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let mut file = match OpenOptions::new()
+    let file = match OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
     {
         Ok(file) => file,
@@ -352,7 +369,14 @@ fn read_private_file(path: &Path) -> io::Result<Option<String>> {
     };
     verify_private_file(&file)?;
     let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
+    file.take(MAX_AGENT_TAB_INTENT_BYTES + 1)
+        .read_to_string(&mut contents)?;
+    if u64::try_from(contents.len()).unwrap_or(u64::MAX) > MAX_AGENT_TAB_INTENT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent tab intent file exceeds maximum size",
+        ));
+    }
     Ok(Some(contents))
 }
 
@@ -1603,5 +1627,25 @@ mod tests {
                 .fences(&replacement)
         );
         assert_eq!(fs::read(path).unwrap(), bytes_before);
+    }
+
+    #[test]
+    fn oversized_file_and_replaced_lock_inode_are_rejected() {
+        let (root, _store, _workspace) = fixture();
+        let oversized = root.path().join("oversized.json");
+        let mut file = create_private_new(&oversized).unwrap();
+        let payload = "x".repeat(usize::try_from(MAX_AGENT_TAB_INTENT_BYTES).unwrap() + 1);
+        file.write_all(payload.as_bytes()).unwrap();
+        drop(file);
+        let err = read_private_file(&oversized).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let lock_a = root.path().join("lock-a");
+        let lock_b = root.path().join("lock-b");
+        let opened_a = open_private_lock(&lock_a).unwrap();
+        let _opened_b = open_private_lock(&lock_b).unwrap();
+        assert!(verify_locked_file_identity(&opened_a, &lock_a).is_ok());
+        let mismatch = verify_locked_file_identity(&opened_a, &lock_b).unwrap_err();
+        assert_eq!(mismatch.kind(), io::ErrorKind::PermissionDenied);
     }
 }

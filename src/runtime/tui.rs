@@ -955,17 +955,28 @@ fn daemon_control_result(
     Err(daemon_control_error(action, detail))
 }
 
+const DAEMON_CONTROL_POLICY: ChildPolicy = ChildPolicy {
+    timeout: Duration::from_secs(30),
+    terminate_grace: Duration::from_millis(250),
+    output_limit: 4 * 1024 * 1024,
+};
+
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_daemon_control_forwards_root_action_token_and_safe_result
 fn run_daemon_control_command(
     root: &Path,
     action: DaemonAction,
 ) -> std::io::Result<DaemonCommandOutput> {
-    let output = std::process::Command::new(std::env::current_exe()?)
-        .current_dir(root)
-        .args(["daemon", action.argument()])
-        .output()?;
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command.current_dir(root).args(["daemon", action.argument()]);
+    let output = match usagi_core::infrastructure::bounded_process::execute_command_output(
+        command,
+        DAEMON_CONTROL_POLICY,
+    ) {
+        Ok(output) => output,
+        Err(error) => return Err(std::io::Error::other(error.to_string())),
+    };
     Ok(DaemonCommandOutput {
-        success: output.status.success(),
+        success: output.success,
         stdout: output.stdout,
         stderr: output.stderr,
     })
@@ -1129,34 +1140,44 @@ impl SessionCatalogPort for ProductionSessionCatalogPort {
     }
 }
 
+const BRANCH_DISCOVERY_POLICY: ChildPolicy = ChildPolicy {
+    timeout: Duration::from_secs(5),
+    terminate_grace: Duration::from_millis(100),
+    output_limit: 4 * 1024 * 1024,
+};
+
 fn discover_branch_catalog(
     workspace: &Path,
     configured_default: Option<&str>,
 ) -> SessionBranchCatalog {
-    let refs = usagi_core::infrastructure::git::confined_git_command(workspace)
-        .args([
-            "for-each-ref",
-            "--format=%(refname) %(symref)",
-            "refs/heads",
-            "refs/remotes",
-        ])
-        .output();
+    let mut refs_command = usagi_core::infrastructure::git::confined_git_command(workspace);
+    refs_command.args([
+        "for-each-ref",
+        "--format=%(refname) %(symref)",
+        "refs/heads",
+        "refs/remotes",
+    ]);
+    let refs = usagi_core::infrastructure::bounded_process::execute_command_output(
+        refs_command,
+        BRANCH_DISCOVERY_POLICY,
+    );
     let refs = match refs {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        }
+        Ok(output) if output.success => String::from_utf8_lossy(&output.stdout).into_owned(),
         Ok(_) | Err(_) => return SessionBranchCatalog::default(),
     };
     let mut catalog = project_branch_catalog(&refs, None, configured_default);
     if catalog.default.is_some() {
         return catalog;
     }
-    let symbolic_head = usagi_core::infrastructure::git::confined_git_command(workspace)
-        .args(["symbolic-ref", "--quiet", "HEAD"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    let mut head_command = usagi_core::infrastructure::git::confined_git_command(workspace);
+    head_command.args(["symbolic-ref", "--quiet", "HEAD"]);
+    let symbolic_head = usagi_core::infrastructure::bounded_process::execute_command_output(
+        head_command,
+        BRANCH_DISCOVERY_POLICY,
+    )
+    .ok()
+    .filter(|output| output.success)
+    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
     catalog.default = project_branch_default(&catalog.branches, symbolic_head.as_deref());
     catalog
 }
@@ -1247,7 +1268,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             environment_data_dir,
         );
         let pr_sessions = Arc::new(Mutex::new(snapshot.session_ids.clone()));
-        let pr_pump = spawn_pr_pump(Arc::clone(&pr_sessions));
+        let pr_pump = spawn_pr_pump(snapshot.workspace.path.clone(), Arc::clone(&pr_sessions));
         let mut backend = DaemonBackend::new(
             Box::new(host.clone()),
             Box::new(host),
@@ -1265,7 +1286,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         .with_decisions(Box::new(ProductionDecisionPort {
             daemon: DaemonDecisionCommandPort,
             workspace: snapshot.workspace_id,
-            pump: spawn_decision_pump(),
+            pump: spawn_decision_pump(snapshot.workspace.path.clone()),
             reported_failure: false,
         }))
         .with_overlay(Box::new(ProductionOverlayPort {
@@ -2404,7 +2425,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
                 return Ok(existing.terminal);
             }
         }
-        let lifecycle = match request_lifecycle_snapshot() {
+        let lifecycle = match request_lifecycle_snapshot(None) {
             Ok(lifecycle) => lifecycle,
             Err(error) => {
                 ErrorLog::record(&tui_error_entry("terminal lifecycle", &error.reason()));
@@ -2498,7 +2519,7 @@ impl AgentCommandPort for DaemonAgentCommandPort {
         use usagi_core::domain::terminal_launch::TerminalLaunchScope;
         use usagi_tui::usecase::application::terminal_session::TerminalError;
 
-        let lifecycle = request_lifecycle_snapshot().map_err(|_| TerminalError::Unavailable)?;
+        let lifecycle = request_lifecycle_snapshot(None).map_err(|_| TerminalError::Unavailable)?;
         // The client never invents a worktree identity: scopes come from the
         // daemon snapshot — the published root worktree and each available
         // session's worktree — and the daemon re-validates them. Sessions the
@@ -2820,6 +2841,7 @@ const LANE_COLD_START_BUDGET: u32 = 3;
 struct LaneConnection {
     client: Option<Box<dyn DaemonClient + Send>>,
     cold_start_budget: u32,
+    workspace_root: Option<PathBuf>,
 }
 
 impl LaneConnection {
@@ -2829,15 +2851,38 @@ impl LaneConnection {
         Self {
             client: None,
             cold_start_budget: 0,
+            workspace_root: None,
+        }
+    }
+
+    /// A workspace-bound observation lane that pins its target workspace across
+    /// reconnects independently of the process-wide `OPENED_WORKSPACE`.
+    const fn observing_for(root: PathBuf) -> Self {
+        Self {
+            client: None,
+            cold_start_budget: 0,
+            workspace_root: Some(root),
         }
     }
 
     /// The session-lifecycle lane: the one lane whose data the user acts on, so
     /// it is the one allowed to bring a missing daemon back.
+    #[cfg(test)]
     const fn lifecycle() -> Self {
         Self {
             client: None,
             cold_start_budget: LANE_COLD_START_BUDGET,
+            workspace_root: None,
+        }
+    }
+
+    /// A workspace-bound session-lifecycle lane that pins its target workspace
+    /// across reconnects independently of the process-wide `OPENED_WORKSPACE`.
+    const fn lifecycle_for(root: PathBuf) -> Self {
+        Self {
+            client: None,
+            cold_start_budget: LANE_COLD_START_BUDGET,
+            workspace_root: Some(root),
         }
     }
 
@@ -2866,16 +2911,29 @@ impl LaneConnection {
     /// to the bootstrapping client, and each fallback spends one unit of it.
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
     fn connect(&mut self) -> Result<Box<dyn DaemonClient + Send>, String> {
-        match crate::runtime::daemon::attached_client(ClientPolicy::tui()) {
+        match crate::runtime::daemon::attached_client(
+            ClientPolicy::tui(),
+            self.workspace_root.as_deref(),
+        ) {
             Ok(client) => Ok(Box::new(client)),
             Err(error) if self.cold_start_budget == 0 => {
                 Err(format!("daemon unavailable: {error}"))
             }
             Err(_) => {
                 self.cold_start_budget -= 1;
-                crate::runtime::daemon::policy_client(ClientPolicy::tui())
-                    .map(|client| Box::new(client) as Box<dyn DaemonClient + Send>)
-                    .map_err(|error| format!("daemon unavailable: {error}"))
+                match self.workspace_root.as_deref() {
+                    Some(root) => match crate::runtime::daemon::policy_client_for_selected_workspace(
+                        ClientPolicy::tui(),
+                        root,
+                    ) {
+                        Ok(client) => Ok(Box::new(client)),
+                        Err(error) => Err(format!("daemon unavailable: {error}")),
+                    },
+                    None => match crate::runtime::daemon::policy_client(ClientPolicy::tui()) {
+                        Ok(client) => Ok(Box::new(client)),
+                        Err(error) => Err(format!("daemon unavailable: {error}")),
+                    },
+                }
             }
         }
     }
@@ -2884,8 +2942,10 @@ impl LaneConnection {
 /// Spawns Home's resident durable-decision lane. Observation only: a missing
 /// daemon is reported, never started (#551).
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
-fn spawn_decision_pump() -> RefreshPump<Vec<usagi_core::domain::user_decision::UserDecision>> {
-    let mut lane = LaneConnection::observing();
+fn spawn_decision_pump(
+    workspace_root: PathBuf,
+) -> RefreshPump<Vec<usagi_core::domain::user_decision::UserDecision>> {
+    let mut lane = LaneConnection::observing_for(workspace_root);
     RefreshPump::spawn(decision_cadence(), move || {
         decisions::inbox_snapshot(&mut |request| lane.request(request))
     })
@@ -2896,7 +2956,7 @@ fn spawn_decision_pump() -> RefreshPump<Vec<usagi_core::domain::user_decision::U
 /// each other (#551).
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
 fn spawn_session_refresh_pump(workspace: Workspace) -> RefreshPump<SessionCommandResult> {
-    let mut lane = LaneConnection::lifecycle();
+    let mut lane = LaneConnection::lifecycle_for(workspace.path.clone());
     RefreshPump::spawn(session_cadence(), move || {
         let reply = lane.request(DaemonRequest::Session {
             action: SessionAction::List,
@@ -2938,8 +2998,11 @@ fn remember_pr_target(sessions: &Mutex<Vec<SessionId>>, session: SessionId) -> b
 /// every current stable session identity off the render thread; the shared set
 /// is replaced when lifecycle reconciliation adds or removes a session.
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=refresh_pump_lane_contract
-fn spawn_pr_pump(sessions: Arc<Mutex<Vec<SessionId>>>) -> RefreshPump<PrObservations> {
-    let mut lane = LaneConnection::observing();
+fn spawn_pr_pump(
+    workspace_root: PathBuf,
+    sessions: Arc<Mutex<Vec<SessionId>>>,
+) -> RefreshPump<PrObservations> {
+    let mut lane = LaneConnection::observing_for(workspace_root);
     RefreshPump::spawn(pr_cadence(), move || {
         let sessions = lock_pr_sessions(&sessions).clone();
         if sessions.is_empty() {
@@ -3373,7 +3436,7 @@ impl SessionCommandPort for DaemonSessionCommandPort {
         session: SessionId,
         name: &str,
     ) -> Result<SessionCommandResult, String> {
-        let snapshot = request_lifecycle_snapshot().map_err(LifecycleRequestError::reason)?;
+        let snapshot = request_lifecycle_snapshot(None).map_err(LifecycleRequestError::reason)?;
         rename_session_display_name(workspace, &snapshot, session, name)?;
         session_snapshot_result("Session renamed.", &snapshot, workspace)
     }
@@ -3558,11 +3621,24 @@ impl LifecycleRequestError {
 /// screen graph（Welcome→Open / Recent）は 1 ループで複数の workspace を順に開くため、
 /// daemon の revision state を持ち越さないよう port を都度生成する。
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_session_completion_contract
-fn request_lifecycle_snapshot() -> Result<LifecycleSnapshot, LifecycleRequestError> {
-    let mut client = crate::runtime::daemon::policy_client(
-        usagi_core::infrastructure::client::ClientPolicy::tui(),
-    )
-    .map_err(LifecycleRequestError::Connect)?;
+fn request_lifecycle_snapshot(
+    selected_workspace: Option<&Path>,
+) -> Result<LifecycleSnapshot, LifecycleRequestError> {
+    let mut client: Box<dyn DaemonClient> = match selected_workspace {
+        Some(root) => Box::new(
+            crate::runtime::daemon::policy_client_for_selected_workspace(
+                usagi_core::infrastructure::client::ClientPolicy::tui(),
+                root,
+            )
+            .map_err(LifecycleRequestError::Connect)?,
+        ),
+        None => Box::new(
+            crate::runtime::daemon::policy_client(
+                usagi_core::infrastructure::client::ClientPolicy::tui(),
+            )
+            .map_err(LifecycleRequestError::Connect)?,
+        ),
+    };
     match client
         .request(DaemonRequest::Session {
             action: SessionAction::List,
@@ -4041,7 +4117,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         // workspace that cannot be shown is not recorded as opened either.
         let opened = crate::runtime::daemon::declare_opened_workspace(&path)?;
         let result = (|| {
-            let lifecycle = request_lifecycle_snapshot()
+            let lifecycle = request_lifecycle_snapshot(None)
                 .map_err(|error| workspace_open_error(error, &opened))?;
             let workspace =
                 workspace_usecase::open(&self.storage, &path, Utc::now()).map_err(io_error)?;
@@ -4061,32 +4137,25 @@ impl WorkspaceLoader for FsWorkspaceLoader {
     }
 
     fn refresh(&mut self, path: &Path) -> std::io::Result<WorkspaceSnapshot> {
-        validate_workspace_directory(path)?;
-        let previous = crate::runtime::daemon::opened_workspace();
-        let opened = crate::runtime::daemon::declare_opened_workspace(path)?;
-        let result = (|| {
-            let lifecycle = request_lifecycle_snapshot()
-                .map_err(|error| workspace_open_error(error, &opened))?;
-            let workspace = self
-                .storage
-                .load_workspaces()
-                .map_err(io_error)?
-                .into_iter()
-                .find(|workspace| workspace.path == path)
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("workspace is no longer registered: {}", path.display()),
-                    )
-                })?;
-            Self::runtime_snapshot(workspace, lifecycle)
-        })();
-        // Refresh is observational: selecting an inactive Garden cache must not
-        // change which workspace subsequent production ports belong to.
-        if let Some(previous) = previous {
-            let _ = crate::runtime::daemon::declare_opened_workspace(&previous);
-        }
-        result
+        let opened = resolve_workspace_path(path)?;
+        // Refresh is observational: selecting an inactive Garden cache queries
+        // that workspace directly without mutating the process-wide
+        // `OPENED_WORKSPACE` that background lanes and production ports observe.
+        let lifecycle = request_lifecycle_snapshot(Some(&opened))
+            .map_err(|error| workspace_open_error(error, &opened))?;
+        let workspace = self
+            .storage
+            .load_workspaces()
+            .map_err(io_error)?
+            .into_iter()
+            .find(|workspace| workspace.path == path || workspace.path == opened)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("workspace is no longer registered: {}", path.display()),
+                )
+            })?;
+        Self::runtime_snapshot(workspace, lifecycle)
     }
 
     fn last_projects(
@@ -4552,13 +4621,16 @@ impl DoctorPort for RuntimeDoctorPort {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=native_viewer_observes_helpers_and_preserves_unconfirmed_launches
 pub(super) fn platform_open_command(url: &str) -> Result<Command, String> {
+    if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
+        return Err("refusing to open an empty, option-like, or control-character target".to_owned());
+    }
     let mut command = if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
-        command.arg(url);
+        command.args(["--", url]);
         command
     } else if cfg!(target_os = "linux") {
         let mut command = Command::new("xdg-open");
-        command.arg(url);
+        command.args(["--", url]);
         command
     } else if cfg!(target_os = "windows") {
         // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
@@ -5176,9 +5248,24 @@ mod tests {
         let observing = LaneConnection::observing();
         assert_eq!(observing.cold_start_budget, 0);
         assert!(observing.client.is_none());
+        assert!(observing.workspace_root.is_none());
+        let observing_for =
+            LaneConnection::observing_for(std::path::PathBuf::from("/workspace/target"));
+        assert_eq!(observing_for.cold_start_budget, 0);
+        assert_eq!(
+            observing_for.workspace_root.as_deref(),
+            Some(std::path::Path::new("/workspace/target"))
+        );
         assert_eq!(
             LaneConnection::lifecycle().cold_start_budget,
             LANE_COLD_START_BUDGET
+        );
+        let lifecycle_for =
+            LaneConnection::lifecycle_for(std::path::PathBuf::from("/workspace/target"));
+        assert_eq!(lifecycle_for.cold_start_budget, LANE_COLD_START_BUDGET);
+        assert_eq!(
+            lifecycle_for.workspace_root.as_deref(),
+            Some(std::path::Path::new("/workspace/target"))
         );
     }
     use serde_json::json;
