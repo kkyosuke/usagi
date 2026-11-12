@@ -821,16 +821,26 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
             bytes
         }
         KeyCode::Tab => {
-            if key.modifiers.shift && !key.modifiers.control && !key.modifiers.alt {
-                return b"\x1b[Z".to_vec();
+            if let Some(param) = modifier_param.filter(|_| key.modifiers.control) {
+                return format!("\x1b[9;{param}u").into_bytes();
             }
-            let mut bytes = vec![b'\t'];
+            let mut bytes = if key.modifiers.shift {
+                b"\x1b[Z".to_vec()
+            } else {
+                vec![b'\t']
+            };
             if key.modifiers.alt {
                 bytes.insert(0, 0x1b);
             }
             bytes
         }
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::BackTab => {
+            let mut bytes = b"\x1b[Z".to_vec();
+            if key.modifiers.alt {
+                bytes.insert(0, 0x1b);
+            }
+            bytes
+        }
         KeyCode::Escape => {
             let mut bytes = vec![0x1b];
             if key.modifiers.alt {
@@ -2211,7 +2221,10 @@ mod tests {
     fn encoder_covers_modified_control_and_fallback_keys() {
         for (ch, expected) in [
             (' ', vec![0x00]),
+            ('[', vec![0x1b]),
             ('\\', vec![0x1c]),
+            (']', vec![0x1d]),
+            ('_', vec![0x1f]),
             ('8', vec![0x7f]),
             ('-', b"\x1b[45;5u".to_vec()),
             (';', b"\x1b[59;5u".to_vec()),
@@ -2226,6 +2239,34 @@ mod tests {
             );
             assert_eq!(encode_key(&key), expected);
         }
+        let ctrl_tab = KeyEvent::new(
+            KeyCode::Tab,
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&ctrl_tab), b"\x1b[9;5u".to_vec());
+        let shift_alt_tab = KeyEvent::new(
+            KeyCode::Tab,
+            Modifiers {
+                shift: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&shift_alt_tab), b"\x1b\x1b[Z".to_vec());
+        let alt_backtab = KeyEvent::new(
+            KeyCode::BackTab,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_backtab), b"\x1b\x1b[Z".to_vec());
         let ctrl_alt_a = KeyEvent::new(
             KeyCode::Char('a'),
             Modifiers {

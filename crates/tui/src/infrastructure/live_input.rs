@@ -127,10 +127,15 @@ pub fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         && !key.modifiers.super_
         && !key.modifiers.hyper
         && !key.modifiers.meta;
-    if (ctrl_only && key.code == KeyCode::Char('a')) || key.code == KeyCode::Char('\u{1}') {
+    let plain_or_ctrl = key.modifiers == Modifiers::default() || ctrl_only;
+    if (ctrl_only && key.code == KeyCode::Char('a'))
+        || (plain_or_ctrl && key.code == KeyCode::Char('\u{1}'))
+    {
         return Key::LineStart;
     }
-    if (ctrl_only && key.code == KeyCode::Char('e')) || key.code == KeyCode::Char('\u{5}') {
+    if (ctrl_only && key.code == KeyCode::Char('e'))
+        || (plain_or_ctrl && key.code == KeyCode::Char('\u{5}'))
+    {
         return Key::LineEnd;
     }
     // Shift+motion extends a selection in the focused input; a live shell still

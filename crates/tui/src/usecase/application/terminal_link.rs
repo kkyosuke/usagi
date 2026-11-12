@@ -224,11 +224,11 @@ fn url_in_chars(chars: &[char], idx: usize) -> Option<String> {
 }
 
 /// Every `http(s)` URL in the flattened line `chars`, as half-open char-index
-/// ranges. Each maximal whitespace-free run holds at most one link: the earliest
-/// scheme in the run starts it (dropping a leading `(` or stray prefix) and it
-/// runs to the first non-URL character (a CJK glyph or full-width punctuation
-/// butted against it with no space) with trailing prose punctuation then trimmed.
-/// A run whose only scheme has no host is skipped.
+/// ranges. Within each maximal whitespace-free run, every scheme occurrence
+/// starts a candidate link (dropping any leading `(` or stray prefix) and runs
+/// to the first non-URL character (a CJK glyph or full-width punctuation butted
+/// against it with no space) with trailing prose punctuation then trimmed. A
+/// bare scheme with no host is skipped.
 fn url_spans(chars: &[char]) -> Vec<Range<usize>> {
     let mut spans = Vec::new();
     let mut i = 0;
