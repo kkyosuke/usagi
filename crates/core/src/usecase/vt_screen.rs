@@ -702,7 +702,7 @@ impl VtScreen {
             Phase::Csi => self.csi(byte, replies),
             Phase::CsiOverflow => self.csi_overflow(byte),
             Phase::Osc => self.osc(byte),
-            Phase::Charset => self.phase = Phase::Ground,
+            Phase::Charset => self.charset(byte),
         }
     }
 
@@ -769,8 +769,12 @@ impl VtScreen {
                 self.params.clear();
                 self.phase = Phase::Csi;
             }
-            b']' => self.phase = Phase::Osc,
-            b'(' | b')' => self.phase = Phase::Charset,
+            // OSC (`]`) plus ECMA-48 control strings DCS (`P`), SOS (`X`),
+            // PM (`^`), and APC (`_`) are swallowed until ST (`ESC \`) or BEL.
+            b']' | b'P' | b'X' | b'^' | b'_' => self.phase = Phase::Osc,
+            // ESC intermediate sequences (`ESC ( B`, `ESC # 8`, `ESC % G`, ...)
+            // consume any `0x20..=0x2f` intermediates plus their final byte.
+            0x20..=0x2f => self.phase = Phase::Charset,
             b'7' => {
                 self.save_cursor();
                 self.phase = Phase::Ground;
@@ -783,7 +787,15 @@ impl VtScreen {
                 self.reverse_index();
                 self.phase = Phase::Ground;
             }
-            // Single-byte escapes (e.g. `ESC =`, `ESC c`) are ignored.
+            // Single-byte escapes (e.g. `ESC =`, `ESC c`, `ESC \`) return to ground.
+            _ => self.phase = Phase::Ground,
+        }
+    }
+
+    fn charset(&mut self, byte: u8) {
+        match byte {
+            0x1b => self.phase = Phase::Escape,
+            0x20..=0x2f => {}
             _ => self.phase = Phase::Ground,
         }
     }
@@ -816,10 +828,10 @@ impl VtScreen {
     }
 
     fn osc(&mut self, byte: u8) {
-        // Terminated by BEL, or by `ESC` (a lone ESC or the start of the `ESC \`
-        // string terminator).  Routing ESC back through the escape parser lets
-        // the trailing `\` be swallowed instead of printed.
-        if byte == 0x07 {
+        // Terminated by BEL, CAN/SUB abort, or `ESC` (a lone ESC or the start of
+        // the `ESC \` string terminator). Routing ESC back through the escape
+        // parser lets the trailing `\` be swallowed instead of printed.
+        if matches!(byte, 0x07 | 0x18 | 0x1a) {
             self.phase = Phase::Ground;
         } else if byte == 0x1b {
             self.phase = Phase::Escape;
@@ -839,15 +851,41 @@ impl VtScreen {
                 .params
                 .bytes()
                 .any(|byte| matches!(byte, 0x20..=0x2f | b'<'..=b'?')) => {}
-            'A' => self.cursor_row = self.cursor_row.saturating_sub(self.param(0, 1)),
-            'B' => self.cursor_row = (self.cursor_row + self.param(0, 1)).min(self.rows - 1),
-            'C' => self.cursor_col = (self.cursor_col + self.param(0, 1)).min(self.cols - 1),
-            'D' => self.cursor_col = self.cursor_col.saturating_sub(self.param(0, 1)),
-            'G' => self.cursor_col = self.param(0, 1).saturating_sub(1).min(self.cols - 1),
-            'd' => self.cursor_row = self.param(0, 1).saturating_sub(1).min(self.rows - 1),
+            'A' => self.cursor_row = self.cursor_row.saturating_sub(self.nonzero_param(0, 1)),
+            'B' => {
+                self.cursor_row = self
+                    .cursor_row
+                    .saturating_add(self.nonzero_param(0, 1))
+                    .min(self.rows - 1);
+            }
+            'C' => {
+                self.cursor_col = self
+                    .cursor_col
+                    .saturating_add(self.nonzero_param(0, 1))
+                    .min(self.cols - 1);
+            }
+            'D' => self.cursor_col = self.cursor_col.saturating_sub(self.nonzero_param(0, 1)),
+            'G' => {
+                self.cursor_col = self
+                    .nonzero_param(0, 1)
+                    .saturating_sub(1)
+                    .min(self.cols - 1);
+            }
+            'd' => {
+                self.cursor_row = self
+                    .nonzero_param(0, 1)
+                    .saturating_sub(1)
+                    .min(self.rows - 1);
+            }
             'H' | 'f' => {
-                self.cursor_row = self.param(0, 1).saturating_sub(1).min(self.rows - 1);
-                self.cursor_col = self.param(1, 1).saturating_sub(1).min(self.cols - 1);
+                self.cursor_row = self
+                    .nonzero_param(0, 1)
+                    .saturating_sub(1)
+                    .min(self.rows - 1);
+                self.cursor_col = self
+                    .nonzero_param(1, 1)
+                    .saturating_sub(1)
+                    .min(self.cols - 1);
             }
             'K' => self.erase_line(),
             'J' => self.erase_display(),
@@ -858,8 +896,8 @@ impl VtScreen {
             'P' => self.delete_characters(),
             'X' => self.erase_characters(),
             'r' => self.set_scroll_region(),
-            'S' => self.scroll_up(self.param(0, 1)),
-            'T' => self.scroll_down(self.param(0, 1)),
+            'S' => self.scroll_up(self.nonzero_param(0, 1)),
+            'T' => self.scroll_down(self.nonzero_param(0, 1)),
             'm' => self.sgr(),
             // ANSI SCP (`CSI s`) and RCP (`CSI u`) take no parameters; with
             // parameters they are DECSLRM / private extensions.
@@ -882,37 +920,50 @@ impl VtScreen {
 
     fn erase_line(&mut self) {
         let row = self.cursor_row;
+        let col = self.cursor_col.min(self.cols - 1);
         let (start, end) = match self.param(0, 0) {
-            1 => (0, self.cursor_col + 1),
+            0 => (col, self.cols),
+            1 => (0, col + 1),
             2 => (0, self.cols),
-            _ => (self.cursor_col, self.cols),
+            _ => return,
         };
         clear_glyph_range(&mut self.grid[row], start, end.min(self.cols));
     }
 
     fn erase_display(&mut self) {
+        let col = self.cursor_col.min(self.cols - 1);
         match self.param(0, 0) {
+            0 => {
+                clear_glyph_range(&mut self.grid[self.cursor_row], col, self.cols);
+                for row in (self.cursor_row + 1)..self.rows {
+                    self.blank_row(row);
+                }
+            }
             1 => {
                 for row in 0..self.cursor_row {
                     self.blank_row(row);
                 }
-                clear_glyph_range(
-                    &mut self.grid[self.cursor_row],
-                    0,
-                    self.cursor_col.min(self.cols - 1) + 1,
-                );
+                clear_glyph_range(&mut self.grid[self.cursor_row], 0, col + 1);
             }
             2 => {
                 for row in 0..self.rows {
                     self.blank_row(row);
                 }
             }
-            _ => {
-                clear_glyph_range(&mut self.grid[self.cursor_row], self.cursor_col, self.cols);
-                for row in (self.cursor_row + 1)..self.rows {
-                    self.blank_row(row);
-                }
+            3 if self.primary_screen.is_none() && !self.scrollback.is_empty() => {
+                let cleared = self.scrollback.len();
+                self.scrollback.clear();
+                self.scrollback_origin = self
+                    .scrollback_origin
+                    .saturating_add(u64::try_from(cleared).unwrap_or(u64::MAX));
+                self.retained_row_motions.push(RetainedRowMotion::Up {
+                    buffer: ActiveBuffer::Primary,
+                    top: 0,
+                    bottom: cleared.saturating_add(self.rows).saturating_sub(1),
+                    count: cleared,
+                });
             }
+            _ => {}
         }
     }
 
@@ -920,7 +971,7 @@ impl VtScreen {
     /// left, and fill the vacated right edge with blank cells.
     fn delete_characters(&mut self) {
         let start = self.cursor_col.min(self.cols - 1);
-        let count = self.param(0, 1).max(1).min(self.cols - start);
+        let count = self.nonzero_param(0, 1).min(self.cols - start);
         let end = start + count;
         let row = &mut self.grid[self.cursor_row];
 
@@ -941,7 +992,7 @@ impl VtScreen {
     /// cursor or the remainder of the row.
     fn erase_characters(&mut self) {
         let start = self.cursor_col.min(self.cols - 1);
-        let count = self.param(0, 1).max(1).min(self.cols - start);
+        let count = self.nonzero_param(0, 1).min(self.cols - start);
         clear_glyph_range(&mut self.grid[self.cursor_row], start, start + count);
     }
 
@@ -950,7 +1001,10 @@ impl VtScreen {
     }
 
     fn print(&mut self, ch: char) {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if !crate::domain::presentation_text::presentation_character_is_safe(ch) || width == 0 {
+            return;
+        }
         // A pane can legitimately shrink to one column. A glyph wider than
         // the complete grid cannot be represented by a leading cell plus its
         // continuation cells, so keep the grid/cursor invariant with a
@@ -990,17 +1044,20 @@ impl VtScreen {
     }
 
     fn line_feed(&mut self) {
-        if self.cursor_row >= self.scroll_bottom {
+        if self.cursor_row == self.scroll_bottom {
             self.scroll_region_up(1);
-        } else {
+        } else if self.cursor_row + 1 < self.rows {
             self.cursor_row += 1;
         }
     }
 
     fn set_scroll_region(&mut self) {
-        let top = self.param(0, 1).saturating_sub(1).min(self.rows - 1);
+        let top = self
+            .nonzero_param(0, 1)
+            .saturating_sub(1)
+            .min(self.rows - 1);
         let bottom = self
-            .param(1, self.rows)
+            .nonzero_param(1, self.rows)
             .saturating_sub(1)
             .min(self.rows - 1);
         if top < bottom {
@@ -1225,6 +1282,15 @@ impl VtScreen {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(default)
     }
+
+    /// Reads a 1-based/count CSI parameter where ECMA-48 treats an explicit `0`
+    /// as the default value.
+    fn nonzero_param(&self, idx: usize, default: usize) -> usize {
+        match self.param(idx, default) {
+            0 => default,
+            value => value,
+        }
+    }
 }
 
 impl Phase {
@@ -1303,7 +1369,8 @@ fn encode_row(row: &[Cell], styles: &mut StyleInterner) -> RowCheckpoint {
 }
 
 /// Decodes a run-length row into exactly `cols` cells, validating the run
-/// repeats (arithmetic → budget) before allocating.
+/// repeats (arithmetic → budget) before allocating and sanitizing hostile
+/// character/continuation combinations so grid invariants always hold.
 // `cols` is already validated `<= COLS_MAX`, so it fits `u32` in the error.
 #[allow(clippy::cast_possible_truncation)] // 値域は画面・バッファの上限で先に押さえてあり、この変換で失われる桁は無い。
 fn decode_row(
@@ -1331,8 +1398,17 @@ fn decode_row(
     }
     let mut cells = Vec::with_capacity(cols);
     for run in &row.runs {
+        let ch = if run.continuation {
+            '\0'
+        } else if crate::domain::presentation_text::presentation_character_is_safe(run.ch)
+            && UnicodeWidthChar::width(run.ch).is_some_and(|width| width > 0)
+        {
+            run.ch
+        } else {
+            ' '
+        };
         let cell = Cell {
-            ch: run.ch,
+            ch,
             style: styles[run.style_id as usize].clone(),
             continuation: run.continuation,
             wrapped: run.wrapped,
@@ -1341,7 +1417,38 @@ fn decode_row(
             cells.push(cell.clone());
         }
     }
+    sanitize_decoded_row(&mut cells);
     Ok(cells)
+}
+
+fn sanitize_decoded_row(cells: &mut [Cell]) {
+    let cols = cells.len();
+    let mut col = 0;
+    while col < cols {
+        if col + 1 < cols {
+            cells[col].wrapped = false;
+        }
+        if cells[col].continuation {
+            cells[col].ch = ' ';
+            cells[col].continuation = false;
+            col += 1;
+            continue;
+        }
+        let width = UnicodeWidthChar::width(cells[col].ch).unwrap_or(1);
+        if width == 2 {
+            if col + 1 < cols && cells[col + 1].continuation {
+                if col + 2 < cols {
+                    cells[col + 1].wrapped = false;
+                }
+                col += 2;
+            } else {
+                cells[col].ch = '\u{fffd}';
+                col += 1;
+            }
+        } else {
+            col += 1;
+        }
+    }
 }
 
 impl VtScreen {
@@ -3249,5 +3356,143 @@ mod tests {
         overflow.extend_from_slice(b"\x1b[32mB");
         screen.advance(&overflow);
         assert_eq!(rows(&screen), vec!["AB"]);
+    }
+
+    #[test]
+    fn csi_cursor_saturates_usize_max_and_normalizes_zero_parameters() {
+        let mut screen = VtScreen::new(4, 6);
+        screen.advance(b"abcdef\r\n123456\x1b[2;3H");
+        screen.advance(b"\x1b[18446744073709551615B\x1b[18446744073709551615C");
+        assert_eq!(screen.cursor(), (3, 5));
+
+        screen.advance(b"\x1b[0A\x1b[0D");
+        assert_eq!(screen.cursor(), (2, 4));
+        screen.advance(b"\x1b[0B\x1b[0C");
+        assert_eq!(screen.cursor(), (3, 5));
+        screen.advance(b"\x1b[0;0H");
+        assert_eq!(screen.cursor(), (0, 0));
+        screen.advance(b"\x1b[2;4H\x1b[0G\x1b[0d");
+        assert_eq!(screen.cursor(), (0, 0));
+
+        let mut scroll = VtScreen::new(3, 4);
+        scroll.advance(b"one\r\ntwo\r\nthr\x1b[0S");
+        assert_eq!(rows(&scroll), vec!["two", "thr", ""]);
+        scroll.advance(b"\x1b[0T");
+        assert_eq!(rows(&scroll), vec!["", "two", "thr"]);
+    }
+
+    #[test]
+    fn pending_wrap_erase_and_ed3_scrollback_clear_preserve_grid_invariants() {
+        // Pending wrap (`cursor_col == cols`): EL 0 and ED 0 clear the final cell.
+        assert_eq!(screen_after(1, 4, b"abcd\x1b[K"), vec!["abc"]);
+        assert_eq!(screen_after(2, 4, b"abcd\x1b[J"), vec!["abc", ""]);
+        // Unsupported EL/ED modes leave the visible grid untouched.
+        assert_eq!(screen_after(1, 4, b"abcd\x1b[9K\x1b[9J"), vec!["abcd"]);
+
+        // ED 3 clears saved scrollback without wiping the visible screen.
+        let mut screen = VtScreen::new(2, 4);
+        screen.advance(b"h1\r\nh2\r\nvis1\r\nvis2");
+        assert_eq!(screen.scrollback_len(), 2);
+        let (_, motions) = screen.advance_with_replies_and_row_motions(b"\x1b[3J");
+        assert_eq!(screen.scrollback_len(), 0);
+        assert_eq!(screen.scrollback_origin(), 2);
+        assert_eq!(rows(&screen), vec!["vis1", "vis2"]);
+        assert_eq!(
+            motions,
+            vec![RetainedRowMotion::Up {
+                buffer: ActiveBuffer::Primary,
+                top: 0,
+                bottom: 3,
+                count: 2,
+            }]
+        );
+        // Repeating ED 3 when scrollback is empty or on alternate screen is a no-op.
+        let (_, motions) =
+            screen.advance_with_replies_and_row_motions(b"\x1b[3J\x1b[?1049h\x1b[3J");
+        assert_eq!(motions, Vec::new());
+    }
+
+    #[test]
+    fn decstbm_line_feed_outside_bottom_margin_does_not_scroll_upper_region() {
+        let mut screen = VtScreen::new(4, 4);
+        screen.advance(b"r1\r\nr2\r\nr3\r\nr4");
+        // Scroll region rows 1..=2 (`0..=1` zero-based), then move cursor to row 3 (`2` zero-based).
+        screen.advance(b"\x1b[1;2r\x1b[3;1H\nZ");
+        assert_eq!(rows(&screen), vec!["r1", "r2", "r3", "Z4"]);
+        // At the very bottom row (`rows - 1`), LF clamps without scrolling rows 1..=2.
+        screen.advance(b"\n\rY");
+        assert_eq!(rows(&screen), vec!["r1", "r2", "r3", "Y4"]);
+    }
+
+    #[test]
+    fn control_strings_esc_intermediates_and_unsafe_or_zero_width_chars_are_filtered() {
+        let mut screen = VtScreen::new(1, 8);
+        screen.advance(
+            b"\x1bP1$r0m\x1b\\\x1b_Gi=1;payload\x1b\\\x1b^pm\x07\x1bXsos\x18\x1bXsub\x1a\x1b#8\x1b$B\x1b$(B\x1b(\x1b[32mA\xc2\x9b\xe2\x80\xaee\xcc\x81B",
+        );
+        assert_eq!(rows(&screen), vec!["AeB"]);
+        assert_eq!(screen.cursor(), (0, 3));
+    }
+
+    #[test]
+    fn checkpoint_sanitizes_unsafe_chars_and_malformed_wide_continuations() {
+        let mut cp = built(1, 6, &[b"abcdef"]).checkpoint();
+        cp.primary.grid = vec![RowCheckpoint {
+            runs: vec![
+                // Orphan continuation at col 0.
+                CellRun {
+                    style_id: 0,
+                    ch: 'X',
+                    continuation: true,
+                    wrapped: true,
+                    repeat: 1,
+                },
+                // Valid wide glyph pair at cols 1..=2 with bogus non-last `wrapped`.
+                CellRun {
+                    style_id: 0,
+                    ch: 'あ',
+                    continuation: false,
+                    wrapped: true,
+                    repeat: 1,
+                },
+                CellRun {
+                    style_id: 0,
+                    ch: 'Y',
+                    continuation: true,
+                    wrapped: true,
+                    repeat: 1,
+                },
+                // Unsafe C1 control at col 3.
+                CellRun {
+                    style_id: 0,
+                    ch: '\u{9b}',
+                    continuation: false,
+                    wrapped: false,
+                    repeat: 1,
+                },
+                // Zero-width char at col 4.
+                CellRun {
+                    style_id: 0,
+                    ch: '\u{301}',
+                    continuation: false,
+                    wrapped: false,
+                    repeat: 1,
+                },
+                // Unpaired wide glyph at final col 5.
+                CellRun {
+                    style_id: 0,
+                    ch: '漢',
+                    continuation: false,
+                    wrapped: true,
+                    repeat: 1,
+                },
+            ],
+        }];
+        let restored = VtScreen::from_checkpoint(&cp).expect("sanitized row");
+        assert_eq!(rows(&restored), vec![" あ  \u{fffd}"]);
+        assert!(!restored.grid()[0][0].wrapped());
+        assert!(!restored.grid()[0][2].wrapped());
+        assert_eq!(restored.grid()[0][2].ch(), '\0');
+        assert!(restored.grid()[0][5].wrapped());
     }
 }

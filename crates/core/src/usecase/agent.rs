@@ -69,5 +69,6 @@ pub fn validate_snapshot(
     if snapshot.plan.profile_id != snapshot.request.profile_id {
         return Err(LaunchValidationError::PlanProvenanceMismatch);
     }
+    snapshot.plan.validate()?;
     Ok(profile)
 }

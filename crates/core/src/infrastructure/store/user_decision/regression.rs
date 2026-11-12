@@ -260,7 +260,7 @@ fn admission_bounds_escaped_record_and_legacy_pages_preserve_all_data() {
     let store = UserDecisionStore::new(dir.path());
     let mut large = rich(Policy::PROMPT_MAX_BYTES + 32 * Policy::OPTION_DESCRIPTION_MAX_BYTES);
     for option in &mut large.options {
-        option.description = Some("\u{1}".repeat(2048));
+        option.description = Some("\\".repeat(2048));
         option.pros = vec!["\\".repeat(512); 4];
         option.cons = option.pros.clone();
     }
@@ -273,7 +273,7 @@ fn admission_bounds_escaped_record_and_legacy_pages_preserve_all_data() {
         4
     ];
     large.validate_request().unwrap();
-    assert!(wire::record_bytes(&large) > DEFAULT_MAX_FRAME_BYTES);
+    assert!(wire::record_bytes(&large) > wire::MAX_RECORD_BYTES);
     assert_eq!(
         store.create(large.clone()).unwrap(),
         Err(UserDecisionError::InvalidRequest)
