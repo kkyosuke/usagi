@@ -820,9 +820,10 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
             }
             bytes
         }
-        KeyCode::Tab => match modifier_param.filter(|_| key.modifiers.control) {
-            Some(param) => format!("\x1b[9;{param}u").into_bytes(),
-            None => {
+        KeyCode::Tab => {
+            if let Some(param) = modifier_param.filter(|_| key.modifiers.control) {
+                format!("\x1b[9;{param}u").into_bytes()
+            } else {
                 let mut bytes = if key.modifiers.shift {
                     b"\x1b[Z".to_vec()
                 } else {
@@ -833,7 +834,7 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
                 }
                 bytes
             }
-        },
+        }
         KeyCode::BackTab => {
             let mut bytes = b"\x1b[Z".to_vec();
             if key.modifiers.alt {
@@ -2090,6 +2091,7 @@ mod tests {
     #[test]
     fn encoder_covers_remaining_portable_key_variants() {
         let cases = [
+            (KeyCode::Enter, vec![b'\r']),
             (KeyCode::Backspace, vec![0x7f]),
             (KeyCode::Tab, vec![b'\t']),
             (KeyCode::BackTab, b"\x1b[Z".to_vec()),
