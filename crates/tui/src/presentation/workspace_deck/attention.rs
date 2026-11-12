@@ -148,20 +148,8 @@ impl AttentionList {
             .is_none_or(|selected| rows.iter().any(|row| &row.identity == selected));
         let index = self.index(&rows);
         let next = match key {
-            Key::Up => {
-                if has_selected {
-                    index.saturating_sub(1)
-                } else {
-                    0
-                }
-            }
-            Key::Down => {
-                if has_selected {
-                    (index + 1).min(rows.len().saturating_sub(1))
-                } else {
-                    0
-                }
-            }
+            Key::Up => index.saturating_sub(1),
+            Key::Down => (index + usize::from(has_selected)).min(rows.len().saturating_sub(1)),
             Key::PageUp => index.saturating_sub(8),
             Key::PageDown => (index + 8).min(rows.len().saturating_sub(1)),
             Key::Enter => {
