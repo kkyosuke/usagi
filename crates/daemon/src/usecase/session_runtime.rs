@@ -493,7 +493,7 @@ impl SessionStatusPlan {
         let base_branches = repositories
             .iter()
             .map(|relative| {
-                let repo = self.repo_root.join(relative);
+                let repo = join_relative(&self.repo_root, relative);
                 let base = git
                     .run(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
                     .map_err(|_| SessionRuntimeError::Storage)?;
@@ -518,7 +518,9 @@ impl SessionStatusPlan {
                     .join(&session.name);
                 let worktrees = base_branches
                     .iter()
-                    .map(|(relative, base)| observe_worktree_status(git, root.join(relative), base))
+                    .map(|(relative, base)| {
+                        observe_worktree_status(git, join_relative(&root, relative), base)
+                    })
                     .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
                 Ok(SessionStatusItem {
                     name: session.name.clone(),
@@ -906,6 +908,14 @@ impl<G: GitRunner, I: SessionWorktreeIo> TeardownEffect for WorktreeTeardown<G, 
     }
 }
 
+fn join_relative(base: &Path, relative: &Path) -> PathBuf {
+    if relative.as_os_str().is_empty() {
+        base.to_path_buf()
+    } else {
+        base.join(relative)
+    }
+}
+
 /// A missing checkout or `.git` file does not prove that Git released its
 /// registration. After physical teardown, remove that exact target through the
 /// stable owning repository before any branch deletion. This also makes retry
@@ -922,8 +932,8 @@ fn remove_teardown_tree(
         .workspace_repositories(&teardown.repository_root)
         .map_err(|error| error.to_string())?;
     for relative in repositories {
-        let repo = teardown.repository_root.join(&relative);
-        let worktree = teardown.session_root.join(&relative);
+        let repo = join_relative(&teardown.repository_root, &relative);
+        let worktree = join_relative(&teardown.session_root, &relative);
         remove_worktree(git, &repo, &worktree, teardown.force)
             .map_err(|error| error.to_string())?;
     }
@@ -951,7 +961,7 @@ fn delete_teardown_branch(
         .workspace_repositories(&teardown.repository_root)
         .map_err(|error| error.to_string())?;
     for relative in repositories {
-        let repo = teardown.repository_root.join(&relative);
+        let repo = join_relative(&teardown.repository_root, &relative);
         for branch in &branches {
             let branch_ref = format!("refs/heads/{branch}");
             let squash_merged = teardown.merged_head_oid.as_deref().is_some_and(|expected| {
