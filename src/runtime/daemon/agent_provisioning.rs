@@ -668,8 +668,8 @@ pub(super) fn read_git_indirection(
     prefix: Option<&str>,
     relative_to: &Path,
 ) -> Result<PathBuf, ()> {
-    let metadata = std::fs::metadata(path).map_err(|_| ())?;
-    if metadata.len() > 16 * 1024 {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| ())?;
+    if !metadata.file_type().is_file() || metadata.len() > 16 * 1024 {
         return Err(());
     }
     let value = std::fs::read_to_string(path).map_err(|_| ())?;

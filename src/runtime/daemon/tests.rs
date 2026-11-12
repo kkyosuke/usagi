@@ -11655,7 +11655,7 @@ fn census_fence_tracks_every_admitted_connection_until_disconnect() {
         inner: &usagi_daemon::presentation::ipc::UnfencedConnection,
         cleanup: cleanup.clone(),
         peer_pid: 41,
-        peer_lineage: None,
+        peer_ancestors: &[],
         agent: Some(&agent),
     };
 
@@ -11671,7 +11671,7 @@ fn census_fence_tracks_every_admitted_connection_until_disconnect() {
         inner: &usagi_daemon::presentation::ipc::UnfencedConnection,
         cleanup: cleanup.clone(),
         peer_pid: 41,
-        peer_lineage: None,
+        peer_ancestors: &[],
         agent: None,
     };
     assert!(

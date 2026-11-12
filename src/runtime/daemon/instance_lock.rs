@@ -31,7 +31,7 @@ pub(super) struct CensusConnectionFence<'a> {
     pub(super) inner: &'a dyn usagi_daemon::presentation::ipc::ConnectionFence,
     pub(super) cleanup: ConnectionCleanup,
     pub(super) peer_pid: u32,
-    pub(super) peer_lineage: Option<(u32, u32)>,
+    pub(super) peer_ancestors: &'a [(u32, u32)],
     pub(super) agent: Option<&'a SharedAgentRuntime>,
 }
 
@@ -54,7 +54,7 @@ impl usagi_daemon::presentation::ipc::ConnectionFence for CensusConnectionFence<
             agent
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .authorize_peer_request(self.peer_pid, self.peer_lineage, body)?;
+                .authorize_peer_request(self.peer_pid, self.peer_ancestors, body)?;
         }
         self.inner.admit(body)
     }
