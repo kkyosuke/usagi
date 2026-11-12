@@ -62,6 +62,7 @@ impl KnowledgeSearchPort for KnowledgeSearch {
         path.strip_prefix(".usagi/memory/")
             .filter(|file| {
                 !file.is_empty()
+                    && *file != "MEMORY.md"
                     && !file.contains('/')
                     && Path::new(file)
                         .extension()
