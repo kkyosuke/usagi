@@ -1274,7 +1274,7 @@ fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have
     let rejected = mcp.tool(
         "user_decision_request",
         &json!({"title":"Too large", "prompt":"Choose",
-        "options":options, "context":[table]}),
+        "options":options, "context":vec![table.clone(); 4]}),
     );
     assert!(rejected.get("error").is_some(), "{rejected}");
     assert_eq!(fs::read(store.path()).unwrap(), before);
