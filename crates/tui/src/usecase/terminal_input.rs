@@ -786,20 +786,20 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
     let modifier_param = xterm_modifier_parameter(key.modifiers);
     match key.code {
         KeyCode::Char(character) if key.modifiers.control && character.is_ascii() => {
-            let mut bytes = if let Some(control_byte) = ascii_control_byte(character) {
-                vec![control_byte]
+            if let Some(control_byte) = ascii_control_byte(character) {
+                let mut bytes = vec![control_byte];
+                if key.modifiers.alt {
+                    bytes.insert(0, 0x1b);
+                }
+                bytes
             } else {
-                return format!(
+                format!(
                     "\x1b[{};{}u",
                     u32::from(character.to_ascii_lowercase()),
                     modifier_param.unwrap_or(5)
                 )
-                .into_bytes();
-            };
-            if key.modifiers.alt {
-                bytes.insert(0, 0x1b);
+                .into_bytes()
             }
-            bytes
         }
         KeyCode::Char(character) => {
             let mut bytes = character.to_string().into_bytes();
@@ -820,20 +820,20 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
             }
             bytes
         }
-        KeyCode::Tab => {
-            if let Some(param) = modifier_param.filter(|_| key.modifiers.control) {
-                return format!("\x1b[9;{param}u").into_bytes();
+        KeyCode::Tab => match modifier_param.filter(|_| key.modifiers.control) {
+            Some(param) => format!("\x1b[9;{param}u").into_bytes(),
+            None => {
+                let mut bytes = if key.modifiers.shift {
+                    b"\x1b[Z".to_vec()
+                } else {
+                    vec![b'\t']
+                };
+                if key.modifiers.alt {
+                    bytes.insert(0, 0x1b);
+                }
+                bytes
             }
-            let mut bytes = if key.modifiers.shift {
-                b"\x1b[Z".to_vec()
-            } else {
-                vec![b'\t']
-            };
-            if key.modifiers.alt {
-                bytes.insert(0, 0x1b);
-            }
-            bytes
-        }
+        },
         KeyCode::BackTab => {
             let mut bytes = b"\x1b[Z".to_vec();
             if key.modifiers.alt {
@@ -899,31 +899,24 @@ fn encode_csi_tilde_key(code: u8, modifier_param: Option<u8>) -> Vec<u8> {
 }
 
 fn function_key_bytes(number: u8, modifier_param: Option<u8>) -> Vec<u8> {
-    let ss3 = match number {
-        1 => Some('P'),
-        2 => Some('Q'),
-        3 => Some('R'),
-        4 => Some('S'),
-        _ => None,
-    };
-    if let Some(final_char) = ss3 {
-        return match modifier_param {
-            Some(param) => format!("\x1b[1;{param}{final_char}").into_bytes(),
-            None => format!("\x1bO{final_char}").into_bytes(),
-        };
+    match number {
+        1..=4 => {
+            let final_char = char::from(b'P' + (number - 1));
+            match modifier_param {
+                Some(param) => format!("\x1b[1;{param}{final_char}").into_bytes(),
+                None => format!("\x1bO{final_char}").into_bytes(),
+            }
+        }
+        5 => encode_csi_tilde_key(15, modifier_param),
+        6 => encode_csi_tilde_key(17, modifier_param),
+        7 => encode_csi_tilde_key(18, modifier_param),
+        8 => encode_csi_tilde_key(19, modifier_param),
+        9 => encode_csi_tilde_key(20, modifier_param),
+        10 => encode_csi_tilde_key(21, modifier_param),
+        11 => encode_csi_tilde_key(23, modifier_param),
+        12 => encode_csi_tilde_key(24, modifier_param),
+        _ => Vec::new(),
     }
-    let tilde_code = match number {
-        5 => Some(15),
-        6 => Some(17),
-        7 => Some(18),
-        8 => Some(19),
-        9 => Some(20),
-        10 => Some(21),
-        11 => Some(23),
-        12 => Some(24),
-        _ => None,
-    };
-    tilde_code.map_or_else(Vec::new, |code| encode_csi_tilde_key(code, modifier_param))
 }
 
 /// Encodes one wheel notch for a program that enabled DEC mouse reporting.
