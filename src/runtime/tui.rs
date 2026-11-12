@@ -4529,6 +4529,53 @@ fn version_detail(result: VersionProbeResult) -> Result<String, String> {
     }
 }
 
+fn check_doctor_settings_health(data_dir: Option<&Path>) -> Result<String, String> {
+    let data_dir = data_dir.ok_or_else(|| "data directory is unavailable".to_owned())?;
+    let daemon_dir = data_dir.join("daemon");
+    for dir in [data_dir, daemon_dir.as_path()] {
+        if let Ok(meta) = std::fs::symlink_metadata(dir) {
+            #[cfg(unix)]
+            let valid_dir = {
+                use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+                meta.file_type().is_dir()
+                    && meta.uid() == unsafe { libc::geteuid() }
+                    && meta.permissions().mode() & 0o777 == 0o700
+            };
+            #[cfg(not(unix))]
+            let valid_dir = meta.file_type().is_dir();
+            if !valid_dir {
+                return Err(format!(
+                    "{} must be a private directory owned by the current user (mode 0700)",
+                    dir.display()
+                ));
+            }
+        }
+    }
+    let settings_path = data_dir.join("settings.json");
+    if let Ok(meta) = std::fs::symlink_metadata(&settings_path) {
+        #[cfg(unix)]
+        let valid_file = {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+            meta.file_type().is_file()
+                && meta.uid() == unsafe { libc::geteuid() }
+                && meta.nlink() == 1
+                && meta.permissions().mode() & 0o777 == 0o600
+        };
+        #[cfg(not(unix))]
+        let valid_file = meta.file_type().is_file();
+        if !valid_file {
+            return Err(
+                "settings.json must be a private single-link file owned by the current user (mode 0600)"
+                    .to_owned(),
+            );
+        }
+    }
+    Storage::new(data_dir.to_path_buf())
+        .load_settings()
+        .map(|_| "settings storage is readable".to_owned())
+        .map_err(|error| error.to_string())
+}
+
 impl DoctorPort for RuntimeDoctorPort {
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
     fn tool_version(&mut self, executable: &str) -> Result<String, String> {
@@ -4537,11 +4584,7 @@ impl DoctorPort for RuntimeDoctorPort {
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
     fn settings_health(&mut self) -> Result<String, String> {
-        let mut settings = PersistentSettingsPort::open().map_err(|error| error.to_string())?;
-        settings
-            .read(SettingsScope::Global)
-            .map(|_| "settings storage is readable".to_owned())
-            .map_err(|error| error.to_string())
+        check_doctor_settings_health(self.data_dir.as_deref())
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=doctor_reports_real_diagnostics
@@ -4731,7 +4774,8 @@ fn with_daemon_ready(
     out: &mut dyn Write,
     info: &AppInfo,
     entry: &EntryScreen,
-) -> std::io::Result<()> {
+    fix: bool,
+) -> std::io::Result<bool> {
     if let EntryScreen::Workspace { path } = entry {
         // A path that cannot be declared is reported by `launch_workspace` as the
         // workspace error it is, not as an unavailable daemon.
@@ -4744,21 +4788,36 @@ fn with_daemon_ready(
             let _ = crate::runtime::daemon::ensure_ready();
         }
     }
-    launch_ready(out, info, entry)
+    launch_ready(out, info, entry, fix)
 }
 
-fn launch_ready(out: &mut dyn Write, info: &AppInfo, entry: &EntryScreen) -> std::io::Result<()> {
+fn launch_ready(
+    out: &mut dyn Write,
+    info: &AppInfo,
+    entry: &EntryScreen,
+    fix: bool,
+) -> std::io::Result<bool> {
     match entry {
-        EntryScreen::Welcome => launch_screen_graph(out, Start::Welcome, None),
-        EntryScreen::Config => launch_screen_graph(out, Start::Config, None),
-        EntryScreen::Workspace { path } => launch_workspace(out, path),
+        EntryScreen::Welcome => {
+            launch_screen_graph(out, Start::Welcome, None)?;
+            Ok(true)
+        }
+        EntryScreen::Config => {
+            launch_screen_graph(out, Start::Config, None)?;
+            Ok(true)
+        }
+        EntryScreen::Workspace { path } => {
+            launch_workspace(out, path)?;
+            Ok(true)
+        }
         EntryScreen::Doctor => {
             let mut port = RuntimeDoctorPort {
                 data_dir: usagi_core::infrastructure::paths::data_dir().ok(),
             };
-            let report = doctor::diagnose(&mut port);
+            let report = doctor::diagnose_with_fix(&mut port, fix);
             let mut runner = BannerScreenRunner::with_doctor_report(out, info, &report);
-            application::run(entry, &mut runner)
+            application::run(entry, &mut runner)?;
+            Ok(report.is_healthy())
         }
     }
 }
@@ -4768,19 +4827,21 @@ pub(crate) fn launch(
     out: &mut dyn Write,
     info: &AppInfo,
     entry: &EntryScreen,
-) -> std::io::Result<()> {
-    match with_daemon_ready(out, info, entry) {
+    fix: bool,
+) -> std::io::Result<bool> {
+    match with_daemon_ready(out, info, entry, fix) {
         // Opening a workspace this daemon does not serve is a refusal to present,
         // not a crash: the message already names the workspace that is served and
         // the step that switches to the one that was asked for.
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            writeln!(std::io::stderr(), "{error}")
+            writeln!(std::io::stderr(), "{error}")?;
+            Ok(false)
         }
         Err(error) => {
             ErrorLog::record(&tui_error_entry("application", &error.to_string()));
             Err(error)
         }
-        Ok(()) => Ok(()),
+        Ok(healthy) => Ok(healthy),
     }
 }
 
@@ -4791,16 +4852,7 @@ pub(crate) fn launch_doctor(
     info: &AppInfo,
     fix: bool,
 ) -> std::io::Result<bool> {
-    let mut port = RuntimeDoctorPort {
-        data_dir: usagi_core::infrastructure::paths::data_dir().ok(),
-    };
-    let report = doctor::diagnose_with_fix(&mut port, fix);
-    let mut runner = BannerScreenRunner::with_doctor_report(out, info, &report);
-    if let Err(error) = application::run(&EntryScreen::Doctor, &mut runner) {
-        ErrorLog::record(&tui_error_entry("application", &error.to_string()));
-        return Err(error);
-    }
-    Ok(report.is_healthy())
+    launch(out, info, &EntryScreen::Doctor, fix)
 }
 
 #[cfg(test)]
@@ -5139,61 +5191,72 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn doctor_repair_tightens_private_directory_and_settings_permissions() {
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
         use usagi_tui::usecase::doctor::DoctorPort as _;
 
+        let mode_of =
+            |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let repair_at =
+            |p: Option<std::path::PathBuf>| super::RuntimeDoctorPort { data_dir: p }.repair();
         let dir = tempfile::tempdir().expect("tempdir");
         let missing = dir.path().join("missing");
-        super::RuntimeDoctorPort { data_dir: None }.repair();
-        super::RuntimeDoctorPort {
-            data_dir: Some(missing),
-        }
-        .repair();
-
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
-            .expect("chmod data_dir");
-        super::RuntimeDoctorPort {
-            data_dir: Some(dir.path().to_path_buf()),
-        }
-        .repair();
+        assert!(super::check_doctor_settings_health(None).is_err());
         assert_eq!(
-            std::fs::metadata(dir.path())
-                .expect("data_dir metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
+            super::check_doctor_settings_health(Some(&missing)),
+            Ok("settings storage is readable".to_owned())
         );
+        assert!(!missing.exists());
+        repair_at(None);
+        repair_at(Some(missing));
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::check_doctor_settings_health(Some(dir.path())).is_err());
+        repair_at(Some(dir.path().to_path_buf()));
+        assert_eq!(mode_of(dir.path()), 0o700);
 
         let daemon_dir = dir.path().join("daemon");
-        std::fs::create_dir_all(&daemon_dir).expect("create daemon_dir");
-        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o755))
-            .expect("chmod daemon_dir");
+        std::fs::create_dir_all(&daemon_dir).unwrap();
+        std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::check_doctor_settings_health(Some(dir.path())).is_err());
+        let current_locator = daemon_dir.join("current.json");
+        std::fs::write(&current_locator, "{}\n").unwrap();
         let settings_path = dir.path().join("settings.json");
-        std::fs::write(&settings_path, "{}\n").expect("write settings.json");
-        std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o644))
-            .expect("chmod settings.json");
+        std::fs::write(&settings_path, "{}\n").unwrap();
+        std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        super::RuntimeDoctorPort {
-            data_dir: Some(dir.path().to_path_buf()),
-        }
-        .repair();
+        let bootstrap_lock = daemon_dir.join("bootstrap.lock");
+        std::fs::create_dir(&bootstrap_lock).unwrap();
+        repair_at(Some(dir.path().to_path_buf()));
+        assert!(current_locator.exists());
+        std::fs::remove_dir(&bootstrap_lock).unwrap();
+
+        let daemon_lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(daemon_dir.join("daemon.lock"))
+            .unwrap();
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&daemon_lock_file);
+        assert_eq!(unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        repair_at(Some(dir.path().to_path_buf()));
+        assert!(current_locator.exists());
+        drop(daemon_lock_file);
+
+        repair_at(Some(dir.path().to_path_buf()));
+        assert!(!current_locator.exists());
+        assert_eq!(mode_of(&daemon_dir), 0o700);
+        assert_eq!(mode_of(&settings_path), 0o600);
         assert_eq!(
-            std::fs::metadata(&daemon_dir)
-                .expect("daemon_dir metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
+            super::check_doctor_settings_health(Some(dir.path())),
+            Ok("settings storage is readable".to_owned())
         );
-        assert_eq!(
-            std::fs::metadata(&settings_path)
-                .expect("settings.json metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+
+        std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(super::check_doctor_settings_health(Some(dir.path())).is_err());
+        std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(&settings_path, "{invalid").unwrap();
+        assert!(super::check_doctor_settings_health(Some(dir.path())).is_err());
     }
 
     #[test]
