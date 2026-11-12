@@ -29,7 +29,6 @@ pub fn tools() -> Vec<ToolDescriptor> {
         ToolDescriptor::session(SessionTodoRemove, SessionAction::TodoRemove),
         ToolDescriptor::session(SessionDecisionList, SessionAction::DecisionList),
         ToolDescriptor::session(SessionDecisionLog, SessionAction::DecisionLog),
-        ToolDescriptor::session(SessionDelegateIssue, SessionAction::DelegateIssue),
         ToolDescriptor::session(SessionDelegateBrief, SessionAction::DelegateBrief),
         ToolDescriptor::dispatch(SessionDispatch, DispatchToolAction::Dispatch),
         ToolDescriptor::dispatch(AgentHandoff, DispatchToolAction::AgentHandoff),
@@ -703,22 +702,7 @@ impl Tool for SessionDecisionLog {
     }
 }
 
-/// `session_delegate_issue` — issue を新セッションに委譲して着手させる（合成 tool）。
-pub struct SessionDelegateIssue;
-
-impl Tool for SessionDelegateIssue {
-    fn name(&self) -> &'static str {
-        "session_delegate_issue"
-    }
-    fn description(&self) -> &'static str {
-        "既存の committed issue を caller 所有の新しいセッションに委譲して着手させるときに使う。issue のプロンプト化→session 作成→起動時キュー投入を 1 tool で行う。number 必須。同番号 source が複数ある場合は委譲を拒否し、session を作成しない。"
-    }
-    fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"number":{"type":"integer"},"name":{"type":"string"},"role":{"type":"string"},"runtime":{"type":"string"},"agent_cli":{"type":"string","deprecated":true},"model":{"type":"string"}},"required":["number"],"additionalProperties":false}"#
-    }
-}
-
-/// `session_delegate_brief` — 事前 issue を要さない起源フローの入口（合成 tool）。
+/// `session_delegate_brief` — ブリーフから新しい作業を始める入口（合成 tool）。
 pub struct SessionDelegateBrief;
 
 impl Tool for SessionDelegateBrief {
@@ -726,7 +710,7 @@ impl Tool for SessionDelegateBrief {
         "session_delegate_brief"
     }
     fn description(&self) -> &'static str {
-        "事前 issue の無い作業を始めるときに使う。ブリーフから caller 所有のトリアージ/設計セッションを作成し、選択した agent へ直ちに実行を dispatch する。brief と agent（runtime と model）必須。既存 agent の id は指定できない（session はこの呼び出しが作るため）。委譲先が worktree 内で issue 化する。"
+        "新しい作業をセッションへ委譲して始めるときに使う。ブリーフから caller 所有のトリアージ/設計セッションを作成し、選択した agent へ直ちに実行を dispatch する。brief と agent（runtime と model）必須。既存 agent の id は指定できない（session はこの呼び出しが作るため）。"
     }
     // `agent` は runtime/model だけの新規 agent selector である。作成前の session に
     // 既存 Agent が所属することはないため、`id` branch は公開しない（#611）。

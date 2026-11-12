@@ -652,7 +652,6 @@ pub enum SessionAction {
     TodoRemove,
     DecisionList,
     DecisionLog,
-    DelegateIssue,
     DelegateBrief,
 }
 

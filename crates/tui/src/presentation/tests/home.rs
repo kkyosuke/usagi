@@ -518,8 +518,8 @@ fn backend_host_and_explicit_error_adapters_cover_the_full_route_matrix() {
         },
         Effect::WorkspaceCommand {
             workspace,
-            command: crate::usecase::overview::Command::Issue {
-                arguments: "list".to_owned(),
+            command: crate::usecase::overview::Command::Clean {
+                arguments: String::new(),
             },
         },
         Effect::RefreshDecisions { workspace },

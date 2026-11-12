@@ -6116,13 +6116,7 @@ fn removed_local_llm_setting_is_ignored_before_daemon_provisioning() {
     let data_home = paths::DataHome::new(base.path(), paths::RuntimeMode::Production);
     let storage = Storage::new(data_home.selected());
     let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
-    assert_eq!(
-        tools.families,
-        McpToolFamilies {
-            issue: true,
-            memory: true,
-        }
-    );
+    assert_eq!(tools.families, McpToolFamilies { memory: true });
 
     std::fs::create_dir_all(storage.dir()).unwrap();
     std::fs::write(
@@ -6131,13 +6125,7 @@ fn removed_local_llm_setting_is_ignored_before_daemon_provisioning() {
     )
     .unwrap();
     let tools = configured_mcp_tools(&data_home, workspace.path()).unwrap();
-    assert_eq!(
-        tools.families,
-        McpToolFamilies {
-            issue: true,
-            memory: true,
-        }
-    );
+    assert_eq!(tools.families, McpToolFamilies { memory: true });
 }
 
 #[test]
@@ -6152,7 +6140,7 @@ fn tool_families_follow_the_registered_workspace_and_fail_closed_when_unreadable
     // The workspace layer decides, exactly as it does for `usagi mcp`.
     store
         .save(&LocalSettings {
-            issue_enabled: Some(false),
+            memory_enabled: Some(false),
             ..LocalSettings::default()
         })
         .unwrap();
@@ -6160,10 +6148,7 @@ fn tool_families_follow_the_registered_workspace_and_fail_closed_when_unreadable
         configured_mcp_tools(&data_home, workspace.path())
             .unwrap()
             .families,
-        McpToolFamilies {
-            issue: false,
-            memory: true,
-        }
+        McpToolFamilies { memory: false }
     );
 
     // A prompt that advertised tools the MCP server cannot register would be
@@ -6214,10 +6199,7 @@ fn system_prompt_arguments_follow_scope_once_and_stay_parseable() {
 
     // The families the injected server registers reach both products through
     // the one composition, so neither adapter can describe a different set.
-    let families = McpToolFamilies {
-        issue: false,
-        memory: true,
-    };
+    let families = McpToolFamilies { memory: true };
     let expected = launch_system_prompt(PromptScope::Session, Some(families), None);
     assert_eq!(
         claude_system_prompt_arguments(SandboxMode::Session, Some(families), None),
@@ -6953,7 +6935,7 @@ fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
         std::fs::create_dir_all(&selected).unwrap();
         Storage::new(&selected)
             .save_settings(&Settings {
-                issue_enabled: false,
+                memory_enabled: false,
                 ..Settings::default()
             })
             .unwrap();
@@ -6961,7 +6943,7 @@ fn the_agent_child_data_home_follows_the_runtime_mode_in_every_channel() {
             !configured_mcp_tools(&data_home, home.path())
                 .unwrap()
                 .families
-                .issue
+                .memory
         );
 
         // 3. Root sandbox scope: daemon bootstrap is brokered out of process,

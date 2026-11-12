@@ -1,8 +1,7 @@
 use super::*;
 use crate::presentation::workspace_deck::{render_overlay, tests::snapshot_with_sessions};
 use crate::usecase::application::{
-    knowledge_search::{Kind, Results as Knowledge},
-    unified_search::Results,
+    knowledge_search::Results as Knowledge, unified_search::Results,
 };
 use usagi_core::domain::id::{DaemonGeneration, TerminalId, TerminalRef, WorktreeId};
 use usagi_core::usecase::{
@@ -63,7 +62,6 @@ fn results(deck: &WorkspaceDeck) -> Results {
         }],
         knowledge: Knowledge {
             documents: vec![Document {
-                kind: Kind::Memory,
                 path: ".usagi/memory/exact.md".into(),
                 title: "zzzxmatch title".into(),
                 detail: "detail".into(),

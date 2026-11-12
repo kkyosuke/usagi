@@ -103,15 +103,6 @@ impl UniteOverview {
         self.members.iter().map(|member| member.session_count).sum()
     }
 
-    /// Total not-yet-`done` issues across the members.
-    #[must_use]
-    pub fn open_issue_count(&self) -> usize {
-        self.members
-            .iter()
-            .map(|member| member.open_issue_count)
-            .sum()
-    }
-
     /// Total unique pull requests across the members.
     #[must_use]
     pub fn pr_count(&self) -> usize {

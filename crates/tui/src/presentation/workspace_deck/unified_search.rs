@@ -39,7 +39,7 @@ impl Entry {
             Self::Artifact(file) => {
                 format!("Artifact · {} · {}", file.project_root.display(), file.path)
             }
-            Self::Document(doc) => format!("{:?} · {} · {}", doc.kind, doc.title, doc.detail),
+            Self::Document(doc) => format!("Memory · {} · {}", doc.title, doc.detail),
         }
     }
 

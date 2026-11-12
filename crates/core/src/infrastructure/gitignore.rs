@@ -9,9 +9,10 @@ use super::paths::STATE_DIR;
 
 /// Rules owned by `<repository>/.usagi/.gitignore`.
 ///
-/// Issues and memories are shared source files; derived indexes, locks,
+/// Memories are shared source files; derived indexes, locks,
 /// session worktrees, and other daemon-local metadata are not.
-pub const USAGI_GITIGNORE: &str = "/*\n!/.gitignore\n!/issues/\n/issues/index.json\n/issues/.derived-dirty\n/issues/.lock\n!/memory/\n/memory/index.json\n/memory/.derived-dirty\n/memory/.lock\n";
+pub const USAGI_GITIGNORE: &str =
+    "/*\n!/.gitignore\n!/memory/\n/memory/index.json\n/memory/.derived-dirty\n/memory/.lock\n";
 
 /// Install the self-contained usagi ignore file and migrate obsolete root rules.
 ///
@@ -58,6 +59,9 @@ fn strip_legacy_root_entries(repo: &Path) -> Result<()> {
     fs::write(&gitignore, output).context(format!("failed to write {}", gitignore.display()))
 }
 
+/// Root rules written by older releases. The `.usagi/issues` entries belong to
+/// the retired issue store and are still stripped so an upgraded checkout does
+/// not keep re-including that directory.
 fn is_legacy_root_ignore_line(line: &str) -> bool {
     matches!(
         line.trim(),

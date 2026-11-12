@@ -198,7 +198,6 @@ use usagi_core::infrastructure::paths;
 #[cfg(test)]
 use usagi_core::infrastructure::persistence::json_file;
 use usagi_core::infrastructure::store::dispatch::{DispatchStore, INBOX_PAGE_MAX, InboxCursor};
-use usagi_core::infrastructure::store::issue::AmbiguousIssueNumber;
 use usagi_core::infrastructure::store::pr_inventory::PrInventoryStore;
 use usagi_core::infrastructure::store::settings::WorkspaceSettingsStore;
 use usagi_core::infrastructure::store::user_decision::UserDecisionStore;

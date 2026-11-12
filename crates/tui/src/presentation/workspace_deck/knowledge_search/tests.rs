@@ -8,13 +8,11 @@ fn results() -> Results {
     Results {
         documents: vec![
             Document {
-                kind: Kind::Issue,
-                path: ".usagi/issues/001-exact.md".into(),
-                title: "#1 issue".into(),
-                detail: "todo · ready".into(),
+                path: ".usagi/memory/first.md".into(),
+                title: "first · First memory".into(),
+                detail: "project".into(),
             },
             Document {
-                kind: Kind::Memory,
                 path: ".usagi/memory/noncanonical.md".into(),
                 title: "A memory".into(),
                 detail: "feedback".into(),
@@ -50,18 +48,17 @@ fn knowledge_search_preserves_exact_sources_and_fences_query_close_and_document_
     assert!(deck.apply_knowledge_response(token, Response::Search(results())));
     let frame = render_overlay(&deck, 35, 140, &[]).join("\n");
     for text in [
-        "Search Issue / Memory",
+        "Search Memory",
         "2 results",
         "3 omitted",
         "partial failure",
         "Workspace: /project",
-        "#1 issue",
+        "first · First memory",
     ] {
         assert!(frame.contains(text), "{frame}");
     }
-    deck.handle_overlay_key(&Key::Tab);
-    assert_eq!(search(&deck).rows().len(), 1);
-    deck.handle_overlay_key(&Key::Tab);
+    deck.handle_overlay_key(&Key::Down);
+    assert_eq!(search(&deck).cursor, 1);
     deck.handle_overlay_key(&Key::Enter);
     let (read_token, request) = deck.take_knowledge_request().unwrap();
     assert_eq!(
@@ -99,7 +96,6 @@ fn knowledge_search_preserves_exact_sources_and_fences_query_close_and_document_
     deck.handle_overlay_key(&Key::Escape);
     assert!(deck.take_knowledge_request().is_none());
     assert!(!deck.apply_knowledge_response(read_token, Response::Read(Ok(vec![]))));
-    deck.handle_overlay_key(&Key::Tab);
     assert_eq!(search(&deck).rows().len(), 2);
     deck.handle_overlay_key(&Key::Enter);
     let (token, _) = deck.take_knowledge_request().unwrap();
@@ -155,7 +151,7 @@ fn knowledge_search_input_caps_refresh_navigation_empty_results_and_small_frames
     assert!(
         render_overlay(&deck, 28, 120, &[])
             .join("\n")
-            .contains("No matching documents")
+            .contains("No matching memories")
     );
     assert!(deck.apply_knowledge_response(next, Response::Search(results())));
     deck.handle_overlay_key(&Key::PageDown);

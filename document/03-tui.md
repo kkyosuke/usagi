@@ -12,7 +12,7 @@ v2 TUI の現在の画面遷移、live pane、および TUI-local resume state �
 - [画面と入力](#画面と入力)
 - [project tab と workspace deck](#project-tab-と-workspace-deck)
 - [統合検索](#統合検索)
-- [Issue と Memory の検索](#issue-と-memory-の検索)
+- [Memory の検索](#memory-の検索)
 - [横断コマンドパレット](#横断コマンドパレット)
 - [ターミナル出力の横断検索](#ターミナル出力の横断検索)
 - [workspace の離脱と終了](#workspace-の離脱と終了)
@@ -109,8 +109,8 @@ worker 内の `git clone` 自体は強制終了しないため、処理が完了
 既存 directory は削除せず、clone が途中まで作った destination も自動削除しない。`Ctrl+C` / `Ctrl+Q` は TUI を終了する。
 
 Welcome の Config は、`Global` 見出しに全体へ適用する Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment、`Workspace init` 見出しに
-新規 workspace の初期値となる Agent・Team・Issue・Memory を表示する。開いている workspace の Overview で `config` を
-実行した場合は、Home 上の overlay modal に Agent・Environment・Base branch・Session setup・Team・Issue・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
+新規 workspace の初期値となる Agent・Team・Memory を表示する。開いている workspace の Overview で `config` を
+実行した場合は、Home 上の overlay modal に Agent・Environment・Base branch・Session setup・Team・Memory を表示し、scope 表示は行わない。overlay の背景は project tab bar を含む通常の workspace frame と同じ行配置を保つ。どちらも
 `↑↓` で行を、`←→` で値を切り替える。
 Team 行だけは `Enter` で3枚のテンプレートカードを持つ選択modalを開き、
 `←→` で階層型・フラット・パイプライン型のカードを切り替え、`↑↓` でカード行と独立した `Use no template` actionの間を移動する。`Enter` は選択をdraftへ適用し、
@@ -279,49 +279,46 @@ project tab の黄色い `!N` は確認できた対応待ちの件数、控え�
 
 | 対象 | 検索する内容 |
 |---|---|
-| All | 開いている project の session・観測済みタブ・コマンド、保持中の terminal 出力、Artifact、および現在の workspace の Issue / Memory |
+| All | 開いている project の session・観測済みタブ・コマンド、保持中の terminal 出力、Artifact、および現在の workspace の Memory |
 | Terminal | 開いている project の Agent / Terminal の保持出力 |
 | Artifact | 開いている project の session と保管済み Artifact のファイル名・パス |
 | Current session | 検索を開いた時に選択されていた session の操作・タブ・保持出力・Artifact |
 
 Current session は Switch の cursor / Closeup の active session に固定する。session が選択されていない場合はその旨を表示する。
-Terminal は大文字小文字を区別する文字列検索、Artifact はパスの fuzzy 検索、Issue / Memory は既存の本文検索を使う。
-Artifact のファイル本文は検索しない。空の検索語では操作・Artifact・Issue / Memory の一覧を表示し、terminal 出力の検索は入力後に始める。
+Terminal は大文字小文字を区別する文字列検索、Artifact はパスの fuzzy 検索、Memory は既存の本文検索を使う。
+Artifact のファイル本文は検索しない。空の検索語では操作・Artifact・Memory の一覧を表示し、terminal 出力の検索は入力後に始める。
 
-`↑↓` / `PgUp` / `PgDn` で選び、`Enter` で該当タブ・操作・Artifact の外部表示・Issue / Memory 本文を開く。
+`↑↓` / `PgUp` / `PgDn` で選び、`Enter` で該当タブ・操作・Artifact の外部表示・Memory 本文を開く。
 本文では `Esc` で結果に戻り、結果では `Esc` で閉じる。`Ctrl-O f` で検索語と対象を保って再取得する。
 本文から戻っても省略・取得不能の集計を保持する。高さが足りない場合は補足情報を省き、選択中の結果・本文を優先して表示する。
 検索中の文字入力や貼り付けは背面の terminal に送らない。古い query・対象・閉じ直し前の応答は破棄する。
 
-外部の検索は背景 worker で行い、最大 16 project、操作候補と Artifact は各 100 件、Issue / Memory は各 100 件に制限する。
+外部の検索は背景 worker で行い、最大 16 project、操作候補と Artifact は各 100 件、Memory は 100 件に制限する。
 Current session は対象 project / session を絞ってから上限を適用する。terminal の上限は[ターミナル出力の横断検索](#ターミナル出力の横断検索)と同じ。
 省略・取得不能を表示し、移動時には既存の ID・利用可否・Artifact の安全な読み取りを再確認する。
 
-## Issue と Memory の検索
+## Memory の検索
 
-`Ctrl-O m` で現在の workspace の `.usagi/issues/` と `.usagi/memory/` を検索する。
-既存の Issue / Memory 検索と同じ大文字小文字を区別しない部分一致で、Issue はタイトル・本文、
-Memory は名前・タイトル・本文を対象にする。空の検索語では一覧を表示し、検索語は最大 256 文字。
+`Ctrl-O m` で現在の workspace の `.usagi/memory/` を検索する。
+既存の Memory 検索と同じ大文字小文字を区別しない部分一致で、名前・タイトル・本文を対象にする。空の検索語では一覧を表示し、検索語は最大 256 文字。
 選択中 session の worktree や他の project のストアは含めない。検索画面で再度 `Ctrl-O m` を押すと検索語を保って再取得する。
 検索語の変更・画面を閉じる操作・project 切り替えでは、古い検索のストアロック待ちを取り消し、遅れて届いた結果を表示しない。
 
 | 操作 | 動作 |
 |---|---|
 | 文字入力・貼り付け | 全文検索を更新する |
-| `Tab` | All / Issues / Memory を切り替える |
 | `↑` / `↓` / `PgUp` / `PgDn` | 結果の選択、本文ではスクロール |
 | `Enter` | 選択した正確な source file の現在の本文を開く |
 | 本文の `←` / `→`、`Home` / `End` | 横に移動、先頭 / 末尾行に移動 |
 | `Esc` | 本文から結果に戻る、結果から閉じる |
 
-結果は Issue、Memory の順に各ストア更新日時の降順で最大 100 件ずつ表示し、省略件数と取得失敗を明示する。
-Issue の状態・優先度・依存充足と番号衝突、Memory の種別を確認できる。番号衝突がある Issue も
-source filename ごとに表示する。本文は最大 512 KiB の UTF-8 通常ファイルだけを読み、symlink・範囲外の
+結果は更新日時の降順で最大 100 件表示し、省略件数と取得失敗を明示する。
+各結果で Memory の種別を確認できる。本文は最大 512 KiB の UTF-8 通常ファイルだけを読み、symlink・範囲外の
 パス・バイナリは拒否する。本文を開いた時点で検索語が残っていれば最初の一致行から表示する。
 検索時点からファイルが変更・削除された場合、現在の内容または取得失敗を表示する。
 
 検索・本文読み取りは単一の背景 worker で処理し、入力変更や画面を閉じた後の古い応答は破棄する。
-入力・貼り付け・未割り当てキーを背面の terminal へ送らない。Issue / Memory の編集や実行は行わない。
+入力・貼り付け・未割り当てキーを背面の terminal へ送らない。Memory の編集は行わない。
 
 ## 横断コマンドパレット
 
@@ -420,19 +417,19 @@ TUI settings の保存先と解決順序は次のとおりである。この節�
 
 | 設定 | 保存先 | 読み取り・反映 |
 |---|---|---|
-| Global | build channel ごとの user data directory にある `settings.json` | Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Team・Issue・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
-| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Team・Issue・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する |
+| Global | build channel ごとの user data directory にある `settings.json` | Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Environment はすべての workspace に適用する。Agent・Team・Memory は新規 workspace の初期値として使う。ファイルが無ければ core `Settings` の既定値、欠損 field と未知 enum token も field ごとの既定値へ縮退する |
+| Workspace | 対象 repository の `.usagi/settings.json`（development mode は `.usagi/dev/settings.json`、local mode は `.usagi/local/settings.json`） | Agent・Base branch・Team・Memory を保持する。workspace 登録時に Global の初期値を一度コピーし、以後の Global 変更は反映しない。欠損 field は Global を継承する |
 | Workspace session setup | 対象 repository の `.usagi/config.toml` | session worktree 作成直後に順番に実行する command 列を保持する。Global scope はなく、新規 session の admission 時に読み取る |
 
 Config の保存は対象 scope の cross-process lock 内で最新 settings を読み直し、画面が所有する field だけを draft から
-merge して atomic write する。Global Config は Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Agent・Team・Issue・Memory を所有し、Environment 行の
+merge して atomic write する。Global Config は Theme・Icons・Modal mode・Terminal PTYs・PR auto-open・Agent・Team・Memory を所有し、Environment 行の
 editor は global `env` だけを同じ scope lock 下で保存する。通常の Config 保存は `env` を保持する。
-Workspace Config は Agent・Base branch・Team・Issue・Memory、workspace `env`、session setup command を所有する。workspace の Environment editor は
+Workspace Config は Agent・Base branch・Team・Memory、workspace `env`、session setup command を所有する。workspace の Environment editor は
 workspace scope だけを読み書きし、global `env` を表示・変更しない。
 Session setup editor は `.usagi/config.toml` の `[session].setup_commands` だけを atomic に置換し、コメントと `[agents]` を含む他の TOML 設定を保持する。
 同じ owned field を複数の Config が並行して変更した場合は、lock を取得して最後に保存を完了した draft を採用する。
 
-Icons は global-only の `icon_mode`、Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Team は `team_template`、Issue と Memory はそれぞれ `issue_enabled` / `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
+Icons は global-only の `icon_mode`、Terminal PTYs は global-only の `terminal_max_concurrent`、Agent は `default_model`、Base branch は fully-qualified Git ref の `default_branch`、Team は `team_template`、Memory は `memory_enabled` として保存する。Terminal PTYs は次の daemon generation の起動時に反映され、値域と resource policy は [daemon の capacity pool](05-daemon.md#capacity-pool) を正本とする。
 `icon_mode` は `nerd_font`（既定）または `text` である。端末から利用者が設定した font の glyph coverage を
 確実には判定できないため自動検出は行わず、patched font がない場合は Global Config の Icons 行で `text` を選ぶ。
 Home の対応は次のとおりで、Nerd Font glyph は Private Use Area の codepoint を使う。
@@ -450,10 +447,10 @@ Home の対応は次のとおりで、Nerd Font glyph は Private Use Area の c
 Base branch の `current checkout` は `default_branch` を空にし、session 作成時点の checkout branch を使う。保存した ref が現在の branch inventory にあれば session 作成 picker の初期値にし、削除済みなどで見つからなければ current checkout へ戻す。
 `default_model` は選択可能な Agent CLI の closed vocabulary（`claude` / `codex` / `agy`）であり、Config 画面の
 Agent 行と Closeup の [`agent -m`](#closeup-の-agent-cli-選択) が同じ語彙を共有する。`agy` は Antigravity CLI を表す。
-Issue と Memory の Global 初期値はどちらも `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
-全体設定を上書きしない。Global ファイルに残る旧 `local_llm` field も読み飛ばし、次の保存時に除去する。
-Workspace の Agent・Team・Issue・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog) を正本とする。
-MCP server は起動時に解決した Issue / Memory の実効値を tool 公開・実行へ適用する。
+Memory の Global 初期値は `true` である。Workspace ファイルに残る旧 Theme / Modal mode field は読み飛ばし、
+全体設定を上書きしない。Global ファイルに残る旧 `local_llm` field と、どちらのファイルにも残りうる旧 `issue_enabled` field も読み飛ばし、次の保存時に除去する。
+Workspace の Agent・Team・Memory は個別値を持つ。Team の選択肢と catalog 合成は [session role](10-session-roles.md#catalog) を正本とする。
+MCP server は起動時に解決した Memory の実効値を tool 公開・実行へ適用する。
 無効時の tool 範囲と server lifetime の契約は [MCP サーバ](07-mcp.md#tool-面) を正本とする。
 
 Workspace 設定の保存は project store の cross-process lock を取得し、version envelope を付けた local
@@ -1288,14 +1285,14 @@ Overview palette の Tab は選択中のトップレベル command を補完す�
 Config の `Modal mode` は Overview と Closeup の command surface に共通して適用される。`Action` は
 入力欄を command filter として使い、`↑`/`↓` で候補を選択して Enter で実行する。`→` は選択した
 command の subcommand picker を開き、`←` は閉じる。Closeup の候補は選択位置に追従してスクロールし、footer を残す。`Prompt` は入力した command line を Enter で解釈・実行する。
-`config` は引数を取らず、現在開いている workspace の Config を Agent / Environment / Base branch / Session setup / Team / Issue / Memory の overlay modal で開く。
+`config` は引数を取らず、現在開いている workspace の Config を Agent / Environment / Base branch / Session setup / Team / Memory の overlay modal で開く。
 `artifact` は [workspace と全 session の生成物一覧](#artifacts)を開く。
 `garden` は引数を取らず、[session garden](#session-garden) を手動で開く。Garden を描けない
 64 桁未満または 14 行未満の端末では Home を覆わず、必要な最小サイズを notice で示す。
 `roles [workspace|global]` は versioned `roles.toml` の source editor を開く。Ctrl-S は effective catalog として検証して atomic 保存し、validation error は source draft を失わず inline 表示する。Tab は layer を切り替えて保存済み source を読み直す。14 行の表示窓は ↑ / ↓ で 1 行、PageUp / PageDown で 1 ページ移動し、読み込み時と末尾への追記時は source の末尾へ自動追従する。
 `clean` は daemon lifecycle に紐付かない managed worktree / `usagi/*` branch と、dispatch run が既に failed なのに pre-spawn の `reserved` runtime だけが残った Agent reservation を dry-run で数える。daemon restart がその予約を `reconcile_required(identity_unknown)` へ変換した場合も同じ候補として数える。`clean --apply` は merged branch と clean worktree だけを削除し、dirty worktree、unmerged branch、失敗済み Agent reservation は `clean --apply --force` の二重の明示がある場合だけ回収する。Agent reservation は matching `OperationId` の dispatch run が failed、runtime が `reserved` または `reconcile_required(identity_unknown)`、process identity が未設定、という全条件を daemon が再確認し、running runtime や process identity を持つ曖昧な runtime を候補にしない。処理は workspace fence を保持する daemon 内で inventory と lifecycle を再照合して実行し、途中で session が active になった Git resource には作用しない。active daemon は保持中の全 workspace へ同じ non-force cleanup を 5 分ごとに適用するため、merged branch と clean worktree は手動実行なしでも回収される。dirty / unmerged resource と失敗済み Agent reservation は自動回収せず、引き続き明示的な `clean --apply --force` を必要とする。
 `session cleanup` は session として登録中の worktree を対象にする別の操作である。resident PR lane の snapshot に dismissed でない PR が1件以上あり、そのすべてが Merged、Agent phase が absent または done、daemon lifecycle が remove 可能な session だけを queue に並べる。Space で個別選択、`a` で全件選択、Enter で開始し、Esc は queue を閉じる。各 remove は force を付けず、daemon の削除結果から対象 `SessionId` が消えた snapshot を受け取った場合だけ、選択済みの次の identity を再検証して送る。PR が open / closed へ変わった row、Agent が再開した row、削除不能になった row は dispatch 前に候補から外す。dirty worktree、未マージ branch、稼働中 terminal など daemon が拒否した場合は安全な notice を queue に残して自動継続を止める。
-Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Terminal PTYs は次の daemon 起動から反映される。Issue / Memory の
+Global Config で保存した Modal mode は、次に開く Overview / Closeup から新しい選択方式が反映される。Terminal PTYs は次の daemon 起動から反映される。Memory の
 MCP公開設定は [MCP server の設定反映](07-mcp.md#tool-面) に従い、MCP再接続後に反映される。
 
 `session create <name>`、`session list`、`session overview`、`session resume <name>`、`session sleep <name>`、`session remove <name> [--force]` は

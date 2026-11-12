@@ -1,15 +1,14 @@
 {
   "version": 1,
-  "total": 549,
+  "total": 548,
   "owners": {
     "core": 16,
     "daemon": 369,
-    "root-cli": 40,
+    "root-cli": 39,
     "tui": 124
   },
   "paths": {
     "crates/cli/src/mcp/serve.rs": 5,
-    "crates/cli/src/mcp/tools/issue.rs": 1,
     "crates/core/src/infrastructure/bounded_process.rs": 10,
     "crates/core/src/infrastructure/env_resolver.rs": 4,
     "crates/core/src/infrastructure/session_snapshot.rs": 1,

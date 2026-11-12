@@ -134,7 +134,7 @@ open workspace
 | authoritative に削除された session | `session_id` が成功した lifecycle snapshot に無い | target / slots と所有 dismissal を同一 commit で除去する |
 | allowed session 内の inventory 欠落 | session は lifecycle snapshot に残る | dormant slot / dismissal を保持する |
 | scope mismatch | 別 workspace / 別 worktree / 別 session | skip・attach しない |
-| saved / current generation 不一致 | #506 の current endpoint では owner を証明できない | attach しない。planned lifecycle は [#507](../../.usagi/issues/507-fix-daemon-planned-replacement-operation-live-runtime-cold.md)、owner routing は [#508](../../.usagi/issues/508-fix-tui-ipc-draining-generation-inventory-terminalref-owner-routing.md) |
+| saved / current generation 不一致 | #506 の current endpoint では owner を証明できない | attach しない。planned lifecycle は #507、owner routing は #508 |
 | exact-equal terminal row の重複 | `TerminalRef` / kind / live がすべて同じ | normalize して 1 row にする |
 | conflicting terminal row / duplicate live continuation / Agent↔terminal 非全単射 | 同じ fenced ref の kind / live が競合する、または live 対応が一意でない | observation 全体を拒否して retry |
 | dismissed continuation の replacement / interrupted record | durable lineage が一致 | 明示 reopen まで tab を抑止し、runtime は停止しない |
@@ -155,7 +155,7 @@ open workspace
 | session が open 前に削除・再作成 | 旧 `session_id` の item は現 snapshot に無く skip。新 session は自身の scope で復元 |
 | daemon restart（Agent 生存）| #506 の current locator だけでは旧 owner endpoint を解決できないため再 attach しない。planned lifecycle / routing は #507 / #508 |
 | daemon crash / macOS 再起動 | runtime は identity_unknown。live tab を作らず、各 lineage は [interrupted tab](../03-tui.md#interrupted-agent-の-tab-投影と選択時-resume) として root / session を問わず別 tab で残り、明示 Resume だけが新 runtime を作る |
-| inventory request が slow / hung | off-thread worker 内に隔離するため初回 frame・入力・quit を同期的に待たせない。全 pane restore を部分適用せず safe feedback / backoff。実 request deadline は [#521](../../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) |
+| inventory request が slow / hung | off-thread worker 内に隔離するため初回 frame・入力・quit を同期的に待たせない。全 pane restore を部分適用せず safe feedback / backoff。実 request deadline は #521 |
 | 2 つ目の client が同じ workspace を open | lock + CAS merge で intent を更新し、両 client とも選択 foreground だけ subscription を張る（detach は当該 connection のみ） |
 
 ## 実装分割
@@ -167,10 +167,10 @@ open workspace
 | #388 | tui | workspace open 時に scope inventory を pane tab へ投影する（#386 に依存） |
 | #506 | tui + composition root | Agent display intent、CAS/atomic store、coherent async restore、foreground-only attach、normal quit / SIGKILL reopen |
 | #507 / #508 | daemon + tui/ipc | planned active/draining lifecycle と generation-owner endpoint routing。#506 の current-endpoint restore には含めない |
-| [#510](../../.usagi/issues/510-feat-tui-interrupted-claude-codex-tab-resume.md) | tui | crash / cold restart 後の interrupted lineage を root / session 共通で別 tab へ投影し、選択 tab だけを明示 resume する。live-only restore（#506）とは別 projection で、pane registry では両者が同じ tab strip を共有する（正本は [3. TUI#interrupted-agent-の-tab-投影と選択時-resume](../03-tui.md#interrupted-agent-の-tab-投影と選択時-resume)） |
-| [#521](../../.usagi/issues/521-fix-ipc-clientpolicy-request-deadline-reconnect-budget.md) | core/ipc + tui | `ClientPolicy` request deadline / reconnect budget。#506 は restore job の off-thread 隔離だけを所有する |
-| [#526](../../.usagi/issues/526-fix-daemon-terminal-agent-tombstone-retention-aggregate-bound-gc.md) | daemon | terminal / Agent history の aggregate allocator・retention・GC。inventory absence を削除根拠にしない |
-| [#527](../../.usagi/issues/527-perf-tui-terminal-polling-ui-loop-foreground-cadence.md) | tui | steady foreground poll を UI loop から分離する scheduler。#506 は background detach と foreground-only attach を所有する |
+| #510 | tui | crash / cold restart 後の interrupted lineage を root / session 共通で別 tab へ投影し、選択 tab だけを明示 resume する。live-only restore（#506）とは別 projection で、pane registry では両者が同じ tab strip を共有する（正本は [3. TUI#interrupted-agent-の-tab-投影と選択時-resume](../03-tui.md#interrupted-agent-の-tab-投影と選択時-resume)） |
+| #521 | core/ipc + tui | `ClientPolicy` request deadline / reconnect budget。#506 は restore job の off-thread 隔離だけを所有する |
+| #526 | daemon | terminal / Agent history の aggregate allocator・retention・GC。inventory absence を削除根拠にしない |
+| #527 | tui | steady foreground poll を UI loop から分離する scheduler。#506 は background detach と foreground-only attach を所有する |
 
 ## test strategy
 

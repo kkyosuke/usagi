@@ -19,7 +19,7 @@
 
 ## 前提と非目標
 
-MVP の daemon は PTY master fd と raw 出力 journal を所有する。一方、VT100 / terminal screen state は TUI process 内の `TerminalScreen` parser が raw snapshot / stream から構築し、daemon は所有しない。daemon が crash すると child process が生存していても master fd と authoritative stream を復元できないため、`orphan_running` または `identity_unknown` として attach、input、暗黙の replacement を拒否する。TUI-local parser の ownership / resync 契約は [#524](../../.usagi/issues/) が扱い、この explicit orphan 契約を変更するのは、本書で採用する機構を実装した場合だけである。
+MVP の daemon は PTY master fd と raw 出力 journal を所有する。一方、VT100 / terminal screen state は TUI process 内の `TerminalScreen` parser が raw snapshot / stream から構築し、daemon は所有しない。daemon が crash すると child process が生存していても master fd と authoritative stream を復元できないため、`orphan_running` または `identity_unknown` として attach、input、暗黙の replacement を拒否する。TUI-local parser の ownership / resync 契約は #524 が扱い、この explicit orphan 契約を変更するのは、本書で採用する機構を実装した場合だけである。
 
 PID、process group、`kill(0)`、端末 slave path、再生成した socket だけから master fd や画面を adopt する方式は採らない。FD を持たない新 daemon が「継続した」と表示することも禁止する。Windows は Unix FD handoff の対象外であり、同等性を仮定しない。
 

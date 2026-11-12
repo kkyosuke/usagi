@@ -35,27 +35,14 @@ The documentation index is [document/README.md](../document/README.md).
 
 ## 新規作業（新しいタスクを始めるとき）
 
-### 0. 着手する issue を選ぶ
+### 0. 作業を委譲する
 
-実装すべきタスク（issue）は usagi の issue ストア（`.usagi/issues/`）に `NNN-feature.md` 形式で管理されている。MCP ツールの `issue_search` / `issue_get` で一覧・参照する。
-
-- 各 issue のメタデータ（`status` / `priority` / `dependson`）を確認し、`dependson` が満たされている `todo` を選ぶ。
-- **root/コーディネータは issue の定義（起票・本文編集）も行わない**。issue ファイルは git 追跡下なので、root が
-  `issue_create` / `issue_update` / `issue_delete` を実行すると `main` のチェックアウトを汚してしまうため、MCP は root
-  での書き込み系 issue tool を拒否する。新しい作業を issue 化したい場合、root は `session_delegate_brief` で
-  トリアージ/設計 session を起こし、その session が worktree 内で `issue_create` して PR に載せる。既存の committed
-  issue を遂行する場合だけ、root は `session_delegate_issue` で `issue-<番号>` session に委譲する。
-- **`status` の書き手はその issue を担当する session だけ**（「単一書き手」）。root/コーディネータは `status` を一切書かない。`main`（リポジトリルート）で root が `status` を触ると、その差分が並行する session の PR と分岐・衝突するためである。`status` を書くのは常にその session の枝だけ、という書き手の一本化で衝突を防ぐ。
-- **status ライフサイクルは自枝でこう回す**（MCP `issue_update` を、その issue を担当する session の worktree 内で実行する。issue の書き込みは worktree に routing され、ブランチに乗って PR で `main` へ反映される）:
-
-  | 遷移 | いつ | どこで |
-  |---|---|---|
-  | `todo` → `in-progress` | 着手時 | 自枝（この session の worktree） |
-  | `in-progress` → `done` | **PR を開く前** | 自枝。status 差分を実装差分と**同じブランチ・同じ PR**に載せる（別コミットでよい） |
-
-  `done` を反映できるのは当該 session の枝だけで、PR がマージされて初めて `main` の issue が `done` になる。**マージ後に `session_remove` されると誰も `done` を立て直せない**（root は原則 `status` を書かない）ため、必ず PR を開く前に `done` のコミットを PR に含めること。#104 が `main` にマージ済みなのに `todo` に取り残されたのは、この「PR 前 done」を欠いたためである。
-- **root は `status` を書かずに進捗を判定する**。issue ファイルの `in-progress` は当該 session 内のローカルな進捗表現で `main` には遅れて届く（マージ後＝実際は完了後）ため当てにしない。代わりに root は「その issue の session が生存しているか」（`session_list` / `session_status`。命名規約 `issue-<番号>`）を **in-progress の実効シグナル**とし、`session_status.merged` / `session_pr` で **`done`（基点へのマージ）** を検知する。root は「`main` で `todo` かつ生存 session が無い issue」だけを ready 候補として委譲する（二重委譲を避ける）。
-- worktree 名・ブランチ名は対象 issue の内容に合わせると対応がわかりやすい。
+- **root/コーディネータは git 追跡ファイルを直接書かない**。実装・設計・ドキュメントの変更は対象 session の worktree で行う。
+  新しい作業は root が `session_delegate_brief`（または `session_dispatch`）で session を起こして委譲し、その session が
+  worktree 内で変更して PR に載せる。
+- root は委譲先 session が生存しているか（`session_list` / `session_status`）を進捗の実効シグナルとし、
+  `session_status.merged` / `session_pr` で基点へのマージを検知する。生存 session がある作業は二重に委譲しない。
+- worktree 名・ブランチ名は作業内容に合わせると対応がわかりやすい。
 
 ### 1. 隔離された作業環境を用意する
 

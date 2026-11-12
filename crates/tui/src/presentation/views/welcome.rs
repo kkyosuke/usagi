@@ -367,7 +367,6 @@ mod tests {
             Workspace::new(name, format!("/tmp/{name}")),
             0,
             0,
-            0,
         ))
     }
 
@@ -395,9 +394,7 @@ mod tests {
     fn unregister_prunes_unite_history_and_removes_empty_groups() {
         let members = ["alpha", "beta"]
             .into_iter()
-            .map(|name| {
-                WorkspaceOverview::new(Workspace::new(name, format!("/tmp/{name}")), 0, 0, 0)
-            })
+            .map(|name| WorkspaceOverview::new(Workspace::new(name, format!("/tmp/{name}")), 0, 0))
             .collect();
         let mut welcome = Welcome::new(vec![
             Recent::Unite(UniteOverview::new(members)),

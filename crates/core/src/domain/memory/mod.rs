@@ -2,16 +2,15 @@
 //! sessions, persisted as a frontmatter markdown file under
 //! `<repo>/.usagi/memory/`.
 //!
-//! Where an [`crate::domain::issue::Issue`] tracks a task (something to *do*), a
-//! memory captures knowledge that cannot be derived from the code or git history
+//! A memory captures knowledge that cannot be derived from the code or git history
 //! — the user's preferences, working agreements, project constraints, or
 //! pointers to external resources. Each memory is one `<name>.md` file: a small
 //! line-based frontmatter (the metadata) followed by a free-form markdown body.
 //!
 //! The `name` is the memory's stable identity and also its filename, so a memory
 //! is addressed by a human-readable slug rather than an assigned number. Parsing
-//! and serialization are hand-rolled over a fixed set of fields, mirroring the
-//! issue store, to keep the dependency surface small while staying fully
+//! and serialization are hand-rolled over a fixed set of fields to keep the
+//! dependency surface small while staying fully
 //! testable.
 
 use chrono::{DateTime, Utc};
@@ -76,9 +75,9 @@ pub struct MemorySummary {
     pub updated_at: DateTime<Utc>,
 }
 
-/// An error parsing a memory's markdown frontmatter. Unified with the issue
-/// parse error as a single [`crate::domain::frontmatter::ParseError`]; kept under
-/// this name for the memory module's public API.
+/// An error parsing a memory's markdown frontmatter: the shared
+/// [`crate::domain::frontmatter::ParseError`], kept under this name for the
+/// memory module's public API.
 pub use crate::domain::frontmatter::ParseError as ParseMemoryError;
 
 /// Turn an arbitrary string into a filename-safe slug: lowercase, with every run

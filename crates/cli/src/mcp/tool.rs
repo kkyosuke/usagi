@@ -20,7 +20,6 @@ pub enum ToolRoute {
 /// Repository authority used by a store-backed tool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreRoot {
-    Workspace,
     Memory,
 }
 
@@ -59,12 +58,6 @@ impl ToolDescriptor {
             tool: Box::new(tool),
             route,
         }
-    }
-
-    /// Registers a workspace-backed public tool.
-    #[must_use]
-    pub fn workspace_store(tool: impl Tool + 'static) -> Self {
-        Self::with_route(tool, ToolRoute::Store(StoreRoot::Workspace))
     }
 
     /// Registers a daemon-owned Agent memory tool.
@@ -383,11 +376,11 @@ pub fn validate_schema_definition(schema: &Value) -> Result<(), String> {
 /// MCP tool の実行インターフェース。
 ///
 /// 各 tool は wire 上の名前・説明・入力スキーマ（`tools/list` に載る IF）を知る。実行先と
-/// caller policy は、この tool を包む [`ToolDescriptor`] が所有する。Store route の issue /
+/// caller policy は、この tool を包む [`ToolDescriptor`] が所有する。Store route の
 /// memory tool だけが [`Tool::call`] を core usecase の adapter として実装し、daemon route の
 /// session / agent / terminal tool は serve loop が core IPC client へ送る。
 pub trait Tool {
-    /// wire 上の tool 名（例: `"issue_create"`）。
+    /// wire 上の tool 名（例: `"memory_save"`）。
     fn name(&self) -> &'static str;
 
     /// tool の説明（`tools/list` に載る）。
@@ -398,7 +391,7 @@ pub trait Tool {
 
     /// Store route の tool を実行する。`params` は JSON-RPC の引数（JSON 文字列）、結果も JSON 文字列。
     ///
-    /// 既定は未実装スタブ。core store usecase と結果整形を実装する issue / memory tool が
+    /// 既定は未実装スタブ。core store usecase と結果整形を実装する memory tool が
     /// このメソッドをオーバーライドする。daemon route はこのメソッドを呼ばない。
     ///
     /// # Errors
@@ -441,8 +434,8 @@ mod tests {
     #[test]
     fn display_covers_all_variants() {
         assert_eq!(
-            ToolError::Unimplemented("issue_create").to_string(),
-            "tool `issue_create` is not yet implemented"
+            ToolError::Unimplemented("memory_save").to_string(),
+            "tool `memory_save` is not yet implemented"
         );
         assert_eq!(
             ToolError::InvalidParams("bad arguments".into()).to_string(),

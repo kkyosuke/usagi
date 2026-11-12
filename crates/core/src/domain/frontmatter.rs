@@ -1,14 +1,11 @@
 //! Shared serialisation and parsing for the line-based `key: value` frontmatter
-//! block that both the [`crate::domain::issue::Issue`] and
-//! [`crate::domain::memory::Memory`] entities persist.
+//! block that markdown-backed entities such as
+//! [`crate::domain::memory::Memory`] persist.
 //!
-//! The two entities store different field sets but share one frontmatter
-//! *format*: a `---`-delimited header of `key: value` lines, with list values
-//! rendered as `[a, b, c]` using a small backslash escape scheme, timestamps in
-//! RFC 3339, and line breaks neutralised so a value can never forge a second
-//! field. Keeping that format in a single place is what stops the issue and
-//! memory files from silently drifting apart (e.g. one gaining an escape the
-//! other lacks). Each entity parses its own fields and converts the
+//! The *format* lives here: a `---`-delimited header of `key: value` lines, with
+//! list values rendered as `[a, b, c]` using a small backslash escape scheme,
+//! timestamps in RFC 3339, and line breaks neutralised so a value can never
+//! forge a second field. Each entity parses its own fields and converts the
 //! [`ParseFrontmatterError`] raised here into its own `Parse*Error` via `From`.
 
 use std::fmt;
@@ -16,7 +13,7 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 
 /// An error parsing a frontmatter block. Each entity converts this into its own
-/// `Parse*Error` (see the `From` impls in `domain::issue` / `domain::memory`).
+/// `Parse*Error` (see the `From` impl in `domain::memory`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseFrontmatterError(pub String);
 
@@ -28,13 +25,10 @@ impl fmt::Display for ParseFrontmatterError {
 
 impl std::error::Error for ParseFrontmatterError {}
 
-/// An error parsing an entity's markdown frontmatter (an issue or a memory).
+/// An error parsing an entity's markdown frontmatter.
 ///
-/// Both entities share one parse-error type: the message is the sole payload, so
-/// distinct newtypes bought nothing but duplicated `Display` / `Error` / `From`
-/// boilerplate. Each entity re-exports this under its own historical name
-/// ([`crate::domain::issue::ParseIssueError`] /
-/// [`crate::domain::memory::ParseMemoryError`]).
+/// The message is the sole payload. An entity re-exports this under its own
+/// name ([`crate::domain::memory::ParseMemoryError`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(pub String);
 
@@ -52,16 +46,15 @@ impl From<ParseFrontmatterError> for ParseError {
     }
 }
 
-/// An entity persisted as a frontmatter markdown document (an [`Issue`] or a
+/// An entity persisted as a frontmatter markdown document (such as a
 /// [`Memory`]).
 ///
 /// Implementors serialise their field set into the shared `---` envelope via
 /// [`FrontmatterDoc::to_markdown`] and reconstruct it via
-/// [`FrontmatterDoc::from_markdown`]. Both share the single [`ParseError`] type,
-/// so markdown-backed stores can load and save any implementor without
+/// [`FrontmatterDoc::from_markdown`]. Implementors share the single
+/// [`ParseError`] type, so markdown-backed stores can load and save any implementor without
 /// duplicating the entity's parsing and rendering interface.
 ///
-/// [`Issue`]: crate::domain::issue::Issue
 /// [`Memory`]: crate::domain::memory::Memory
 pub trait FrontmatterDoc: Sized {
     /// Render this entity to its on-disk markdown representation.
@@ -84,9 +77,8 @@ pub trait FrontmatterDoc: Sized {
 /// The caller supplies the enum type, its [`FromStr::Err`](std::str::FromStr)
 /// type, the noun used in the `invalid <noun>: ...` parse error, and the
 /// variant → token table. The enum itself (with its `serde` derives and
-/// `#[default]`) stays hand-written; only the three string impls — which were
-/// near-identical copies across `IssueStatus` / `IssuePriority` / `MemoryType` —
-/// are generated.
+/// `#[default]`) stays hand-written; only the three string impls are
+/// generated.
 macro_rules! str_enum {
     ($name:ident, $err:path, $noun:literal, { $($variant:ident => $token:literal),+ $(,)? }) => {
         impl $name {
@@ -308,7 +300,7 @@ pub fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, ParseFrontmatterErr
 /// trailing newline. `write_fields` appends the entity's `key: value` lines into
 /// the buffer — typically via `writeln!`, whose result is safe to discard
 /// because writing into a `String` is infallible. Keeping the envelope here is
-/// what stops the issue and memory serialisers from drifting apart.
+/// what stops entity serialisers from drifting apart.
 #[must_use]
 pub fn to_markdown(body: &str, write_fields: impl FnOnce(&mut String)) -> String {
     let mut out = String::from("---\n");
@@ -381,12 +373,12 @@ mod tests {
     #[test]
     fn slugify_lowercases_collapses_and_falls_back() {
         assert_eq!(
-            slugify("Fix the AWS SSO login!", "issue"),
+            slugify("Fix the AWS SSO login!", "memory"),
             "fix-the-aws-sso-login"
         );
         assert_eq!(slugify("already-kebab", "memory"), "already-kebab");
         // No usable characters falls back to the caller's default.
-        assert_eq!(slugify("!!!", "issue"), "issue");
+        assert_eq!(slugify("!!!", "note"), "note");
         assert_eq!(slugify("", "memory"), "memory");
     }
 
