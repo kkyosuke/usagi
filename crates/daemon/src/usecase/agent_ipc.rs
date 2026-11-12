@@ -1082,6 +1082,67 @@ impl AgentRuntime {
             .retain_live_connections(live, &mut *self.pty);
     }
 
+    /// Whether `peer_pid` (or its OS parent / process group) belongs to a
+    /// currently running managed Agent runtime.
+    #[must_use]
+    pub fn is_managed_agent_descendant(
+        &self,
+        peer_pid: u32,
+        parent_pid: Option<u32>,
+        process_group: Option<u32>,
+    ) -> bool {
+        self.coordinator.records().any(|record| {
+            record.state == super::runtime::RuntimeState::Running
+                && record.process.as_ref().is_some_and(|process| {
+                    process.pid == peer_pid
+                        || Some(process.pid) == parent_pid
+                        || Some(process.process_group) == process_group
+                })
+        })
+    }
+
+    /// Refuses unauthenticated privileged IPC requests originating from a
+    /// currently running managed Agent runtime or its descendant process group.
+    pub fn authorize_peer_request(
+        &self,
+        peer_pid: u32,
+        peer_lineage: Option<(u32, u32)>,
+        body: &serde_json::Value,
+    ) -> Result<(), ProtocolError> {
+        let kind = body.get("kind").and_then(serde_json::Value::as_str);
+        if matches!(
+            kind,
+            Some("mcp_child_claim" | "codex_session_capture" | "agent_phase_report")
+        ) {
+            return Ok(());
+        }
+        let has_credential = kind != Some("terminal")
+            && body
+                .get("caller_context")
+                .and_then(|context| context.get("credential"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    body.get("payload")
+                        .and_then(|payload| payload.get("_caller_credential"))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .is_some_and(|credential| !credential.is_empty());
+        if has_credential {
+            return Ok(());
+        }
+        if self.is_managed_agent_descendant(
+            peer_pid,
+            peer_lineage.map(|(parent_pid, _)| parent_pid),
+            peer_lineage.map(|(_, process_group)| process_group),
+        ) {
+            return Err(ProtocolError::new(
+                ErrorCode::PermissionDenied,
+                "sandboxed agent processes must authenticate with a daemon-issued MCP credential",
+            ));
+        }
+        Ok(())
+    }
+
     /// Resolves a short-lived provider hook from authenticated OS process identity.
     ///
     /// Claude uses exec-form hooks, so the hook is a direct child of the live

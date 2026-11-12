@@ -2597,6 +2597,62 @@ fn hook_identity_accepts_exec_form_direct_children_and_legacy_inherited_groups()
     // Merely being self-led is insufficient without the direct-parent fence.
     assert_eq!(runtime.hook_credential(9002, 8999, 9002), None);
     assert_eq!(runtime.hook_credential(9003, 4321, 9999), None);
+
+    assert!(runtime.is_managed_agent_descendant(4321, None, None));
+    assert!(runtime.is_managed_agent_descendant(9001, Some(4321), Some(9001)));
+    assert!(runtime.is_managed_agent_descendant(9000, Some(8999), Some(4321)));
+    assert!(!runtime.is_managed_agent_descendant(9002, Some(8999), Some(9002)));
+
+    assert!(
+        runtime
+            .authorize_peer_request(4321, None, &serde_json::json!({"kind": "mcp_child_claim"}))
+            .is_ok()
+    );
+    assert!(
+        runtime
+            .authorize_peer_request(
+                4321,
+                None,
+                &serde_json::json!({"kind": "session", "caller_context": {"credential": credential}})
+            )
+            .is_ok()
+    );
+    assert!(
+        runtime
+            .authorize_peer_request(
+                4321,
+                None,
+                &serde_json::json!({"kind": "session", "payload": {"_caller_credential": credential}})
+            )
+            .is_ok()
+    );
+    assert_eq!(
+        runtime
+            .authorize_peer_request(4321, None, &serde_json::json!({"kind": "session"}))
+            .unwrap_err()
+            .code,
+        ErrorCode::PermissionDenied
+    );
+    assert_eq!(
+        runtime
+            .authorize_peer_request(
+                9000,
+                Some((8999, 4321)),
+                &serde_json::json!({"kind": "terminal", "caller_context": {"credential": credential}})
+            )
+            .unwrap_err()
+            .code,
+        ErrorCode::PermissionDenied
+    );
+    assert!(
+        runtime
+            .authorize_peer_request(
+                9002,
+                Some((8999, 9002)),
+                &serde_json::json!({"kind": "session"})
+            )
+            .is_ok()
+    );
 }
 
 #[test]

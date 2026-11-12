@@ -206,6 +206,9 @@ impl CodexProvisioner for RootCodexProvisioner {
             context.scope.workspace_id,
         )
         .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
+        let read_only_roots = session_git
+            .as_ref()
+            .map_or(&[][..], |policy| policy.read_only_roots.as_slice());
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
             agent: self.agent,
@@ -216,7 +219,7 @@ impl CodexProvisioner for RootCodexProvisioner {
             cache_dir: self.sandbox_cache_dir.as_deref(),
             backend: self.sandbox_backend.as_deref(),
             passthrough: self.sandbox_passthrough,
-            read_only_roots: &[],
+            read_only_roots,
         })
         .map_err(|_| CodexProvisionFailure::MaterializationFailed)?;
         let protected_root = workspace_root
@@ -234,7 +237,7 @@ impl CodexProvisioner for RootCodexProvisioner {
                 cache_dir: self.sandbox_cache_dir.as_deref(),
             },
             &sandbox_roots,
-            &[],
+            read_only_roots,
         )
         .map_err(|()| CodexProvisionFailure::MaterializationFailed)?;
         spawn.set_sandbox_launcher(launcher);
@@ -341,9 +344,6 @@ pub(super) fn root_memory_store_root(
         &requested.join(".usagi/memory"),
     )
     .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
-    // The launcher re-validates exact canonical paths. In particular, macOS
-    // exposes `/tmp` through `/private/tmp`; returning the lexical spelling
-    // would make an otherwise valid Agent exit before its provider starts.
     let root = requested
         .canonicalize()
         .map_err(|_| ClaudeSandboxPolicyError::InvalidWritableRoot)?;
@@ -444,13 +444,6 @@ pub(super) struct RootClaudeProvisioner {
 }
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=a_root_claude_keeps_the_repository_read_only_and_gets_the_guard_hook
 impl RootClaudeProvisioner {
-    /// The policy paths this launch may carry. Both scopes carry the same
-    /// universal areas: the agent CLI keeps its scratchpad, state and credential
-    /// caches outside the repository, and withholding them does not confine the
-    /// agent — it stops it from running at all
-    /// ([`claude_sandbox`](usagi_core::usecase::claude_sandbox)). What separates a
-    /// session launch from a root coordinator is the repository write boundary
-    /// (`launch_roots` plus `protected_root`), not these paths.
     fn launcher_paths(&self) -> SandboxLauncherPaths<'_> {
         SandboxLauncherPaths {
             backend: self.sandbox_backend.as_deref(),
@@ -488,6 +481,9 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
                 .into_iter()
                 .flat_map(|policy| policy.writable_roots.iter().cloned()),
         );
+        let read_only_roots = session_git
+            .as_ref()
+            .map_or(&[][..], |policy| policy.read_only_roots.as_slice());
         let paths = self.launcher_paths();
         validate_claude_sandbox_policy(&SandboxPolicyInputs {
             mode,
@@ -499,7 +495,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             cache_dir: paths.cache_dir,
             backend: paths.backend,
             passthrough: self.sandbox_passthrough,
-            read_only_roots: &[],
+            read_only_roots,
         })
         .map_err(|_| ClaudeProvisionFailure::InvalidSandboxPolicy)?;
         let sandbox_roots = launch_roots
@@ -517,7 +513,7 @@ impl ClaudeProvisioner for RootClaudeProvisioner {
             &protected_root,
             &paths,
             &sandbox_roots,
-            &[],
+            read_only_roots,
         )
         .map_err(|()| ClaudeProvisionFailure::MaterializationFailed)?;
         let role =
@@ -584,10 +580,6 @@ pub(super) fn sandbox_mode(context: &ProvisionContext) -> SandboxMode {
 }
 
 /// The launch-specific writable roots handed to `usagi claude-sandbox`.
-///
-/// A managed session receives its own checkout. The caller adds the narrow Git
-/// metadata roots resolved by [`session_git_policy`]; a root coordinator
-/// receives no repository-local writable root.
 pub(super) fn claude_writable_roots(mode: SandboxMode, working_directory: &Path) -> Vec<PathBuf> {
     if mode == SandboxMode::Session {
         vec![working_directory.to_path_buf()]
@@ -597,8 +589,6 @@ pub(super) fn claude_writable_roots(mode: SandboxMode, working_directory: &Path)
 }
 
 /// Resolve the optional Git administrative authority for a managed workspace.
-/// Absence means a non-Git workspace; a present but malformed marker is an
-/// admission failure rather than a silently weakened Git launch.
 pub(super) fn session_git_common_dir(workspace_root: &Path) -> Result<Option<PathBuf>, ()> {
     match std::fs::symlink_metadata(workspace_root.join(".git")) {
         Ok(_) => git_common_dir(workspace_root).map(Some),
@@ -610,18 +600,12 @@ pub(super) fn session_git_common_dir(workspace_root: &Path) -> Result<Option<Pat
 /// Git authority granted to one linked session worktree.
 pub(super) struct SessionGitPolicy {
     pub(super) writable_roots: Vec<PathBuf>,
+    pub(super) read_only_roots: Vec<PathBuf>,
 }
 
 /// Resolve the narrow Git metadata set a linked session worktree needs for a
-/// normal `git add` / `git commit` transaction.
-///
-/// Linked worktrees keep their index, `HEAD`, commit message and `HEAD` reflog
-/// in a worktree-private administrative directory, but new objects and branch
-/// refs live in the repository's common directory. The session receives only
-/// its private admin directory, the shared content-addressed object store, and
-/// the `usagi/*` branch ref / reflog namespaces. Both its common directory and
-/// its private-admin backlink must match the daemon-selected workspace/worktree
-/// pair before any external path is granted.
+/// normal `git add` / `git commit` transaction, keeping its `.git` file and
+/// worktree-admin indirection pointers read-only.
 pub(super) fn session_git_policy(
     workspace_root: &Path,
     worktree: &Path,
@@ -662,6 +646,7 @@ pub(super) fn session_git_policy(
     }
     let subdirs = ["refs/heads/usagi", "logs/refs/heads/usagi"];
     ensure_owned_subdirectories(&common, &subdirs).map_err(|_| ())?;
+    let read_only_roots = vec![backlink, git_dir.join("commondir"), git_dir.join("gitdir")];
     let writable_roots = vec![
         git_dir,
         common.join("objects"),
@@ -671,7 +656,10 @@ pub(super) fn session_git_policy(
     for root in &writable_roots {
         validate_owned_directory(root).map_err(|_| ())?;
     }
-    Ok(Some(SessionGitPolicy { writable_roots }))
+    Ok(Some(SessionGitPolicy {
+        writable_roots,
+        read_only_roots,
+    }))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
@@ -703,14 +691,12 @@ pub(super) fn read_git_indirection(
     path.canonicalize().map_err(|_| ())
 }
 
-/// Root providers may run the small read-only Git allowlist accepted by
-/// `guard-workspace`. Override process-launching repository configuration and
-/// optional index refreshes from daemon-owned, highest-precedence environment.
+/// Override process-launching repository configuration and optional index refreshes.
 pub(super) fn insert_root_git_environment(spawn: &mut SpawnProvision) {
     for (name, value) in [
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
-        ("GIT_CONFIG_COUNT", "5"),
+        ("GIT_CONFIG_COUNT", "6"),
         ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
         ("GIT_CONFIG_VALUE_0", "false"),
         ("GIT_CONFIG_KEY_1", "core.hooksPath"),
@@ -721,6 +707,8 @@ pub(super) fn insert_root_git_environment(spawn: &mut SpawnProvision) {
         ("GIT_CONFIG_VALUE_3", "false"),
         ("GIT_CONFIG_KEY_4", "diff.ignoreSubmodules"),
         ("GIT_CONFIG_VALUE_4", "all"),
+        ("GIT_CONFIG_KEY_5", "extensions.worktreeConfig"),
+        ("GIT_CONFIG_VALUE_5", "false"),
         ("GIT_OPTIONAL_LOCKS", "0"),
         ("GIT_PAGER", ""),
         ("GIT_EXTERNAL_DIFF", ""),

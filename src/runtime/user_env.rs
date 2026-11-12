@@ -161,7 +161,7 @@ impl From<EnvLimitError> for UserEnvironmentError {
 /// binding `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` would send the user's
 /// Claude session — prompts, file contents, credentials in flight — to a server
 /// the repository chose.
-const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
+const WORKSPACE_AGENT_CONTROL_VARIABLES: &[&str] = &[
     "PATH",
     "TMPDIR",
     "HOME",
@@ -177,7 +177,55 @@ const WORKSPACE_AGENT_CONTROL_VARIABLES: [&str; 15] = [
     "ANTHROPIC_DEFAULT_FABLE_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
     usagi_core::usecase::claude_sandbox::PASSTHROUGH_ENVIRONMENT_VARIABLE,
+    "OPENAI_BASE_URL",
+    "OPENAI_API_BASE",
+    "OPENAI_API_KEY",
+    "GOOGLE_GEMINI_BASE_URL",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "ZDOTDIR",
+    "BASH_ENV",
+    "ENV",
+    "SHELL",
+    "PROMPT_COMMAND",
+    "CDPATH",
+    "IFS",
+    "GLOBIGNORE",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONHOME",
+    "RUBYOPT",
+    "RUBYLIB",
+    "PERL5OPT",
+    "PERL5LIB",
+    "JAVA_TOOL_OPTIONS",
+    "RUSTC_WRAPPER",
 ];
+
+const WORKSPACE_AGENT_CONTROL_PREFIXES: &[&str] = &["USAGI_", "GIT_", "LD_", "DYLD_", "BASH_FUNC_"];
+
+fn is_workspace_agent_control_variable(name: &str) -> bool {
+    let trimmed = name.trim();
+    WORKSPACE_AGENT_CONTROL_VARIABLES.contains(&trimmed)
+        || WORKSPACE_AGENT_CONTROL_PREFIXES
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
+}
 
 /// The configured environment of a workspace, resolving each secret once for
 /// every workspace this daemon serves.
@@ -241,7 +289,7 @@ impl<R: SecretResolver + Sync> UserEnvironment<R> {
         if local
             .env
             .keys()
-            .any(|name| WORKSPACE_AGENT_CONTROL_VARIABLES.contains(&name.trim()))
+            .any(|name| is_workspace_agent_control_variable(name))
         {
             return Err(UserEnvironmentError::ReservedLauncherVariable);
         }
@@ -1235,6 +1283,24 @@ mod tests {
             ("CLAUDE_CODE_SUBAGENT_MODEL", "attacker-model"),
             // Nor at another provider's state directory.
             ("CLAUDE_CONFIG_DIR", "/workspace/.claude"),
+            // Prefix-controlled variables (`USAGI_*`, `GIT_*`, `LD_*`, `DYLD_*`, `BASH_FUNC_*`).
+            ("USAGI_HOME", "/workspace/.usagi-home"),
+            ("GIT_SSH_COMMAND", "evil"),
+            ("LD_PRELOAD", "/workspace/evil.so"),
+            ("DYLD_INSERT_LIBRARIES", "/workspace/evil.dylib"),
+            ("BASH_FUNC_git", "() { evil; }"),
+            // Provider endpoint / proxy / TLS / runtime execution hooks.
+            ("OPENAI_BASE_URL", "https://attacker.example"),
+            ("GOOGLE_GEMINI_BASE_URL", "https://attacker.example"),
+            ("HTTPS_PROXY", "http://attacker.example:8080"),
+            ("https_proxy", "http://attacker.example:8080"),
+            ("SSL_CERT_FILE", "/workspace/evil.pem"),
+            ("NODE_EXTRA_CA_CERTS", "/workspace/evil.pem"),
+            ("NODE_OPTIONS", "--require /workspace/evil.js"),
+            ("PYTHONPATH", "/workspace/evil"),
+            ("BASH_ENV", "/workspace/evil.sh"),
+            ("ZDOTDIR", "/workspace/zdot"),
+            ("RUSTC_WRAPPER", "/workspace/evil"),
         ];
         for (name, value) in cases {
             let data = tempfile::tempdir().unwrap();

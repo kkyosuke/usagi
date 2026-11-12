@@ -814,6 +814,8 @@ pub(super) fn start_ipc_accept_loop(
                                     inner: connection_fence.as_ref(),
                                     cleanup: connection_cleanup,
                                     peer_pid: peer_process.pid,
+                                    peer_lineage: peer_process.lineage,
+                                    agent: Some(&agent_launch),
                                 };
                                 let admitted =
                                     usagi_daemon::presentation::ipc::handshake_admitted_with_fence(
