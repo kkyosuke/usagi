@@ -3243,11 +3243,7 @@ fn real_pty_cold_restart_resumes_or_dismisses_only_the_selected_interrupted_tab_
     let hidden = fixtures.bin.join("claude.unavailable");
     fs::rename(fixtures.bin.join("claude"), &hidden).unwrap();
     send(&mut master, b"\x0fr");
-    wait_for_screen_since(
-        &captured,
-        cold_baseline,
-        "agent CLI is unavailable or not authenticated",
-    );
+    wait_for_screen_since(&captured, cold_baseline, "agent CLI is not installed");
     assert_eq!(
         fixtures.claude_spawns(),
         2,
