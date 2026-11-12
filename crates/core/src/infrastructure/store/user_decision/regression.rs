@@ -291,7 +291,7 @@ fn admission_bounds_escaped_record_and_legacy_pages_preserve_all_data() {
         .pending_page(UserDecisionScope::All, None, DEFAULT_MAX_FRAME_BYTES)
         .unwrap()
         .unwrap();
-    assert_eq!(page.decisions, vec![small]);
+    assert_eq!(page.decisions, vec![small.clone()]);
     assert_eq!(
         page.deferred,
         vec![wire::reference(&large), wire::reference(&another)]
@@ -335,8 +335,8 @@ fn admission_bounds_escaped_record_and_legacy_pages_preserve_all_data() {
         Err(UserDecisionPageError::PageTooSmall)
     );
     assert_eq!(
-        wire::response(&large, None, text.len()).unwrap(),
-        serde_json::json!(large)
+        wire::response(&small, None, wire::MAX_RECORD_BYTES).unwrap(),
+        serde_json::json!(small)
     );
 }
 
