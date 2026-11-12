@@ -1900,9 +1900,14 @@ const fn is_user_activity(key: &Key) -> bool {
 fn workspace_has_unsaved_surface(runtime: &WorkspaceRuntime) -> bool {
     let state = runtime.state();
     state.create_session_form().is_some()
+        || state.rename_session_form().is_some()
         || state.note_editor().is_some()
         || state.environment_editor().is_some()
         || state.role_editor().is_some()
+        || state
+            .decision_overlay()
+            .and_then(crate::usecase::application::controller::DecisionOverlayState::editor)
+            .is_some_and(crate::usecase::application::controller::DecisionEditor::has_unsaved_draft)
 }
 
 /// Carry sidebar state and the shared decision observation across composition

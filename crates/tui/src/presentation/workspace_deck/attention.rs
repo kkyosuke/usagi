@@ -142,23 +142,35 @@ impl AttentionList {
             return OverlayIntent::Stay;
         }
         let rows = rows(slots, &self.filter, self.view);
+        let has_selected = self
+            .selected
+            .as_ref()
+            .is_none_or(|selected| rows.iter().any(|row| &row.identity == selected));
         let index = self.index(&rows);
         let next = match key {
-            Key::Up => index.saturating_sub(1),
-            Key::Down => (index + 1).min(rows.len().saturating_sub(1)),
+            Key::Up => {
+                if has_selected {
+                    index.saturating_sub(1)
+                } else {
+                    0
+                }
+            }
+            Key::Down => {
+                if has_selected {
+                    (index + 1).min(rows.len().saturating_sub(1))
+                } else {
+                    0
+                }
+            }
             Key::PageUp => index.saturating_sub(8),
             Key::PageDown => (index + 8).min(rows.len().saturating_sub(1)),
             Key::Enter => {
                 return rows
                     .get(index)
-                    .filter(|row| {
-                        self.selected
-                            .as_ref()
-                            .is_none_or(|selected| *selected == row.identity)
-                    })
+                    .filter(|_| has_selected)
                     .map_or(OverlayIntent::Stay, |row| row.intent.clone());
             }
-            Key::Escape => return OverlayIntent::Cancel,
+            Key::Escape | Key::Quit => return OverlayIntent::Cancel,
             Key::Char(character) => {
                 self.filter.push(*character);
                 self.select_first(slots);
@@ -170,7 +182,14 @@ impl AttentionList {
                 return OverlayIntent::Stay;
             }
             Key::Backspace => {
-                self.filter.pop();
+                self.filter.truncate(
+                    unicode_segmentation::UnicodeSegmentation::grapheme_indices(
+                        self.filter.as_str(),
+                        true,
+                    )
+                    .next_back()
+                    .map_or(0, |(idx, _)| idx),
+                );
                 self.select_first(slots);
                 return OverlayIntent::Stay;
             }
@@ -531,8 +550,20 @@ mod tests {
         assert!(
             matches!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::AttentionVisit { session, .. } if session == second.session)
         );
-        update(&mut deck, 0, vec![first]);
+        update(&mut deck, 0, vec![first.clone(), second.clone()]);
+        assert_eq!(deck.handle_overlay_key(&Key::Down), OverlayIntent::Stay);
+        update(&mut deck, 0, vec![first.clone()]);
+        let unhighlighted = render_overlay(&deck, 24, 80, &vec![String::new(); 24]).join("\n");
+        assert!(!unhighlighted.contains("> ["));
         assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
+        deck.handle_overlay_key(&Key::Down);
+        assert!(matches!(
+            deck.handle_overlay_key(&Key::Enter),
+            OverlayIntent::AttentionVisit { .. }
+        ));
+        update(&mut deck, 0, vec![second.clone(), first.clone()]);
+        deck.handle_overlay_key(&Key::Down);
+        update(&mut deck, 0, vec![first]);
         deck.handle_overlay_key(&Key::Up);
         assert!(matches!(
             deck.handle_overlay_key(&Key::Enter),
@@ -541,6 +572,9 @@ mod tests {
         for key in [
             Key::PageDown,
             Key::PageUp,
+            Key::Paste("e\u{301}z".into()),
+            Key::Backspace,
+            Key::Backspace,
             Key::Char('z'),
             Key::Backspace,
             Key::Paste("nomatch".into()),
@@ -553,6 +587,8 @@ mod tests {
         let frame = render_overlay(&deck, 24, 80, &vec![String::new(); 24]).join("\n");
         assert!(frame.contains("No items match this filter"));
         assert!(frame.contains("safe error"));
+        assert_eq!(deck.handle_overlay_key(&Key::Quit), OverlayIntent::Cancel);
+        deck.open_attention();
         assert_eq!(deck.handle_overlay_key(&Key::Escape), OverlayIntent::Cancel);
     }
 

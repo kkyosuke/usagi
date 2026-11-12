@@ -726,11 +726,13 @@ impl HomeProjection {
         workspace_name: &str,
         sessions: Arc<[ProjectedSession]>,
     ) -> Self {
-        let create_draft = state.create_session_form().map(CreateDraft::from);
+        let create_form = state
+            .create_session_form()
+            .filter(|_| state.overlay() == Some(Overlay::CreateSession));
+        let create_draft = create_form.map(CreateDraft::from);
         let cleanup_queue = project_cleanup_queue(state, &sessions);
         let remove_queue = project_remove_queue(state, &sessions);
-        let create_role = state
-            .create_session_form()
+        let create_role = create_form
             .and_then(CreateSessionForm::selected_role)
             .map(|role| role.id.to_string());
         let preview = preview_session(state);

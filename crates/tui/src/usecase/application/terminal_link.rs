@@ -243,8 +243,9 @@ fn url_spans(chars: &[char]) -> Vec<Range<usize>> {
         while run_end < chars.len() && !chars[run_end].is_whitespace() {
             run_end += 1;
         }
-        if let Some(scheme_off) =
-            (run_start..run_end).find(|&j| SCHEMES.iter().any(|s| starts_with_at(chars, j, s)))
+        let mut cursor = run_start;
+        while let Some(scheme_off) =
+            (cursor..run_end).find(|&j| SCHEMES.iter().any(|s| starts_with_at(chars, j, s)))
         {
             // A URL is ASCII, so it ends at the first character it cannot
             // contain. Japanese text often butts straight against a link with no
@@ -260,6 +261,7 @@ fn url_spans(chars: &[char]) -> Vec<Range<usize>> {
             if !SCHEMES.contains(&url) {
                 spans.push(scheme_off..scheme_off + url.chars().count());
             }
+            cursor = url_end;
         }
         i = run_end;
     }
@@ -755,5 +757,18 @@ mod tests {
             assert_ne!(format!("{variant:?}"), "");
         }
         assert_ne!(UrlRejection::Empty, UrlRejection::MissingHost);
+    }
+
+    #[test]
+    fn url_at_and_link_cells_find_every_url_in_a_whitespace_free_cjk_run() {
+        let view = grid(40, &["参照https://a.ioとhttps://b.ioです"]);
+        // "参照" occupies cols 0..4, "https://a.io" cols 4..16, "と" cols 16..18,
+        // "https://b.io" cols 18..30.
+        assert_eq!(url_at(&view, at(0, 5)).as_deref(), Some("https://a.io"));
+        assert_eq!(url_at(&view, at(0, 16)), None);
+        assert_eq!(url_at(&view, at(0, 20)).as_deref(), Some("https://b.io"));
+        let cells = link_cells(&view);
+        assert!(cells.contains(&at(0, 4)));
+        assert!(cells.contains(&at(0, 18)));
     }
 }
