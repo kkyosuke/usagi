@@ -411,7 +411,7 @@ pub fn write_stdin_bounded(
             }
         }
     };
-    let status = status.and_then(|()| {
+    if status.is_ok() {
         close_descendant_resources(
             pid,
             &stdout,
@@ -420,21 +420,26 @@ pub fn write_stdin_bounded(
             policy.terminate_grace,
             preserve_closed_pipe_descendants && !output_exceeded.load(Ordering::Acquire),
         );
-        child.wait().or(Err(ChildInputExecution::ObservationFailed))
-    });
+    }
     cancelled.store(true, Ordering::Release);
     let (stdout, stderr, writer) = (stdout.join(), stderr.join(), writer.join());
-    let Ok(status) = status else {
-        return status.unwrap_err();
-    };
+    if let Err(failure) = status {
+        return failure;
+    }
     let (Ok(stdout), Ok(stderr), Ok(writer)) = (stdout, stderr, writer) else {
-        if preserve_closed_pipe_descendants {
-            signal_group(pid, libc::SIGTERM);
-            signal_group(pid, libc::SIGKILL);
-        }
+        terminate_and_reap(&mut child, policy.terminate_grace);
         return ChildInputExecution::ObservationFailed;
     };
-    let outcome = normalize_input_completion(status.success(), &stdout, &stderr, writer);
+    let pipe_outcome = normalize_input_completion(true, &stdout, &stderr, writer);
+    if pipe_outcome != ChildInputExecution::Success {
+        terminate_and_reap(&mut child, policy.terminate_grace);
+        return pipe_outcome;
+    }
+    let Ok(exit_status) = child.wait() else {
+        terminate_and_reap(&mut child, policy.terminate_grace);
+        return ChildInputExecution::ObservationFailed;
+    };
+    let outcome = normalize_input_completion(exit_status.success(), &stdout, &stderr, writer);
     if preserve_closed_pipe_descendants && outcome != ChildInputExecution::Success {
         signal_group(pid, libc::SIGTERM);
         signal_group(pid, libc::SIGKILL);
@@ -1232,6 +1237,34 @@ else:
             ),
             ChildInputExecution::ExitFailure
         );
+        let failed_pid: libc::pid_t = std::fs::read_to_string(&failed_path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            // SAFETY: signal zero only observes the fixture's exact PID.
+            let running = unsafe { libc::kill(failed_pid, 0) == 0 };
+            #[cfg(target_os = "linux")]
+            let running = if running {
+                let state = std::fs::read_to_string(format!("/proc/{failed_pid}/stat"));
+                state.is_ok_and(|stat| {
+                    !stat
+                        .rsplit_once(')')
+                        .unwrap()
+                        .1
+                        .trim_start()
+                        .starts_with('Z')
+                })
+            } else {
+                false
+            };
+            if !running {
+                break;
+            }
+            assert!(Instant::now() < deadline, "failed descendant survived");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

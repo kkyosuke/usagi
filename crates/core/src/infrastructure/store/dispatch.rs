@@ -299,36 +299,44 @@ fn prune_workspace_registry_entry(
     }
     let mut protected = BTreeSet::new();
     if let Some(state) = lifecycle {
-        for session in &state.sessions {
-            protected.insert((state.workspace_id, session.session_id));
-        }
+        protected.extend(
+            state
+                .sessions
+                .iter()
+                .map(|session| (state.workspace_id, session.session_id)),
+        );
     }
     for prompt in &workspace_registry.prompts {
-        if let Some(session_id) = prompt.session_id {
-            protected.insert((prompt.workspace_id, session_id));
-        }
-        if let Some(session_id) = prompt.caller.as_ref().and_then(|caller| caller.session_id) {
-            protected.insert((prompt.workspace_id, session_id));
-        }
+        protected.extend(prompt.session_id.map(|id| (prompt.workspace_id, id)));
+        protected.extend(
+            prompt
+                .caller
+                .as_ref()
+                .and_then(|caller| caller.session_id)
+                .map(|id| (prompt.workspace_id, id)),
+        );
     }
-    for reservation in &workspace_registry.delegation_reservations {
-        if let Some(parent) = reservation.parent {
-            protected.insert((reservation.workspace, parent));
-        }
-    }
-    for binding in &registry.bindings {
-        if let Some(&workspace) = workspace_registry
+    protected.extend(
+        workspace_registry
+            .delegation_reservations
+            .iter()
+            .filter_map(|res| res.parent.map(|parent| (res.workspace, parent))),
+    );
+    protected.extend(registry.bindings.iter().flat_map(|binding| {
+        workspace_registry
             .agent_workspaces
             .get(&binding.worker.agent_id)
-        {
-            if let Some(session_id) = binding.caller.session_id {
-                protected.insert((workspace, session_id));
-            }
-            if let Some(session_id) = binding.worker.session_id {
-                protected.insert((workspace, session_id));
-            }
-        }
-    }
+            .copied()
+            .into_iter()
+            .flat_map(move |workspace| {
+                binding
+                    .caller
+                    .session_id
+                    .into_iter()
+                    .chain(binding.worker.session_id)
+                    .map(move |id| (workspace, id))
+            })
+    }));
     loop {
         let mut added = false;
         for lineage in &workspace_registry.lineages {

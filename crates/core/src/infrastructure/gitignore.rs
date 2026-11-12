@@ -154,6 +154,11 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        symlink(outside_dir.path(), tmp.path().join(".usagi")).unwrap();
+        assert!(migrate_usagi_ignore_rules(tmp.path()).is_err());
+        fs::remove_file(tmp.path().join(".usagi")).unwrap();
+
         let outside = tmp.path().join("outside");
         fs::write(&outside, "keep\n").unwrap();
         symlink(&outside, tmp.path().join(".gitignore")).unwrap();

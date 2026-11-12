@@ -739,6 +739,7 @@ mod tests {
 
     #[test]
     fn config_selects_a_template_and_workspace_settings_override_global() {
+        let _guard = crate::test_support::process_env_guard();
         let root = tempdir().unwrap();
         let home = root.path().join("home");
         let workspace = root.path().join("workspace");
@@ -812,9 +813,14 @@ mod tests {
 
     #[test]
     fn damaged_settings_fail_closed_without_granting_template_roles() {
+        let _guard = crate::test_support::process_env_guard();
         let root = tempdir().unwrap();
         let home = root.path().join("home");
         let workspace = root.path().join("workspace");
+        // SAFETY: guarded by `process_env_guard`.
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, &home);
+        }
         fs::create_dir_all(&home).unwrap();
         fs::write(home.join("settings.json"), "{ broken").unwrap();
         assert!(load_effective(&home, &workspace).unwrap().roles.is_empty());
@@ -829,6 +835,10 @@ mod tests {
         fs::create_dir_all(local.path().parent().unwrap()).unwrap();
         fs::write(local.path(), "{ broken").unwrap();
         let catalog = load_effective(&home, &workspace).unwrap();
+        // SAFETY: guarded by `process_env_guard`.
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
         assert!(!catalog.configured);
         assert!(catalog.roles.is_empty());
     }

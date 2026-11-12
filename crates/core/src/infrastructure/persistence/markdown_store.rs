@@ -165,9 +165,11 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Paths of every source markdown file in the directory. Empty when the
     /// directory does not exist.
     pub(crate) fn entry_files(&self) -> Result<Vec<PathBuf>> {
-        ensure_not_symlink(&self.dir)?;
         let entries = match fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
+            Ok(entries) => {
+                ensure_not_symlink(&self.dir)?;
+                entries
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if path_is_genuinely_missing(&self.dir)? {
                     return Ok(Vec::new());
@@ -390,7 +392,6 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Load `index.json`, returning `None` when it is missing or corrupt. A
     /// present-but-corrupt cache is recoverable but logged before rebuilding.
     fn load_index(&self) -> Result<Option<MarkdownIndex<E>>> {
-        ensure_not_symlink(&self.dir)?;
         let index_path = self.index_path();
         ensure_not_symlink(&index_path)?;
         let text = match fs::read_to_string(&index_path) {
@@ -400,6 +401,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
                 return Err(e).context(format!("failed to read {}", index_path.display()));
             }
         };
+        ensure_not_symlink(&self.dir)?;
         match serde_json::from_str::<E::IndexFile>(&text) {
             Ok(index) => {
                 let (version, source_fingerprint, summaries) = E::index_parts(index);
