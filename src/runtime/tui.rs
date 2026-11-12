@@ -967,7 +967,9 @@ fn run_daemon_control_command(
     action: DaemonAction,
 ) -> std::io::Result<DaemonCommandOutput> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
-    command.current_dir(root).args(["daemon", action.argument()]);
+    command
+        .current_dir(root)
+        .args(["daemon", action.argument()]);
     let output = match usagi_core::infrastructure::bounded_process::execute_command_output(
         command,
         DAEMON_CONTROL_POLICY,
@@ -2922,13 +2924,15 @@ impl LaneConnection {
             Err(_) => {
                 self.cold_start_budget -= 1;
                 match self.workspace_root.as_deref() {
-                    Some(root) => match crate::runtime::daemon::policy_client_for_selected_workspace(
-                        ClientPolicy::tui(),
-                        root,
-                    ) {
-                        Ok(client) => Ok(Box::new(client)),
-                        Err(error) => Err(format!("daemon unavailable: {error}")),
-                    },
+                    Some(root) => {
+                        match crate::runtime::daemon::policy_client_for_selected_workspace(
+                            ClientPolicy::tui(),
+                            root,
+                        ) {
+                            Ok(client) => Ok(Box::new(client)),
+                            Err(error) => Err(format!("daemon unavailable: {error}")),
+                        }
+                    }
                     None => match crate::runtime::daemon::policy_client(ClientPolicy::tui()) {
                         Ok(client) => Ok(Box::new(client)),
                         Err(error) => Err(format!("daemon unavailable: {error}")),
@@ -4622,7 +4626,9 @@ impl DoctorPort for RuntimeDoctorPort {
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=native_viewer_observes_helpers_and_preserves_unconfirmed_launches
 pub(super) fn platform_open_command(url: &str) -> Result<Command, String> {
     if url.is_empty() || url.starts_with('-') || url.chars().any(char::is_control) {
-        return Err("refusing to open an empty, option-like, or control-character target".to_owned());
+        return Err(
+            "refusing to open an empty, option-like, or control-character target".to_owned(),
+        );
     }
     let mut command = if cfg!(target_os = "macos") {
         let mut command = Command::new("open");
