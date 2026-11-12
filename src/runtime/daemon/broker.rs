@@ -9,11 +9,11 @@ use usagi_core::infrastructure::paths;
 use crate::runtime::bootstrap;
 
 use super::{
-    ATTEMPTED_REPLACEMENTS, Arc, BROKER_IDLE_POLL, BROKER_IDLE_TIMEOUT, BROKER_OK, BROKER_PING,
-    BROKER_READINESS_ATTEMPTS, BROKER_REQUEST_TIMEOUT, BROKER_START, BROKER_STOP,
-    BuildArtifactDecision, BuildIdentity, CliDaemonCommand, ClientError, ClientWorkspace, Condvar,
-    Deserialize, Duration, ErrorLog, Instant, IpcClient, Mutex, Path, PathBuf,
-    PrivateLockModePolicy, PrivateLockWait, Read, RealSleeper, Serialize, Write,
+    ATTEMPTED_REPLACEMENTS, Arc, BROKER_DAEMON_READINESS_ATTEMPTS, BROKER_IDLE_POLL,
+    BROKER_IDLE_TIMEOUT, BROKER_OK, BROKER_PING, BROKER_READINESS_ATTEMPTS, BROKER_REQUEST_TIMEOUT,
+    BROKER_START, BROKER_STOP, BuildArtifactDecision, BuildIdentity, CliDaemonCommand, ClientError,
+    ClientWorkspace, Condvar, Deserialize, Duration, ErrorLog, Instant, IpcClient, Mutex, Path,
+    PathBuf, PrivateLockModePolicy, PrivateLockWait, Read, RealSleeper, Serialize, Write,
     bootstrap_serve_command, broker_may_retire, build_artifact_decision, build_rollover_trigger,
     cold_start_workspace, current_build, current_daemon_is_reachable, ensure_private_dir_all,
     lock_private_exclusive, opened_workspace, reap_child, recover_stale_client_endpoint,
@@ -64,14 +64,37 @@ pub(super) fn bootstrap_broker_address(
     }
 }
 
+pub(super) fn verify_broker_socket_endpoint(socket: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+
+    let metadata = std::fs::symlink_metadata(socket)?;
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "bootstrap broker endpoint is not a direct Unix socket",
+        ));
+    }
+    // SAFETY: geteuid has no preconditions.
+    let expected_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != expected_uid || (metadata.permissions().mode() & 0o777) != 0o600 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "bootstrap broker socket has unsafe ownership or permissions",
+        ));
+    }
+    Ok(())
+}
+
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=bootstrap_broker_accepts_only_ping_start_and_stop
 pub(super) fn request_bootstrap_broker(
     address: &BootstrapBrokerAddress,
     request: u8,
 ) -> std::io::Result<()> {
+    verify_broker_socket_endpoint(&address.socket)?;
     let mut stream = std::os::unix::net::UnixStream::connect(&address.socket)?;
+    usagi_daemon::infrastructure::unix_transport::verify_same_user_peer(&stream)?;
     let timeout = if request == BROKER_START {
-        Duration::from_secs(6)
+        Duration::from_secs(31)
     } else {
         BROKER_REQUEST_TIMEOUT
     };
@@ -94,7 +117,7 @@ pub(super) fn request_broker_start(
     let exe = exe.canonicalize()?;
     let address = bootstrap_broker_address(data_dir, workspace, &exe);
     request_bootstrap_broker(&address, BROKER_START)?;
-    for _ in 0..BROKER_READINESS_ATTEMPTS {
+    for _ in 0..BROKER_DAEMON_READINESS_ATTEMPTS {
         if current_daemon_is_reachable(data_dir) {
             return Ok(());
         }
@@ -119,7 +142,13 @@ pub(super) fn spawn_bootstrap_broker(
     // waiting for that daemon's readiness. Requiring a ping reply would make
     // both processes wait on each other. The identity-scoped socket path and a
     // successful connect are sufficient to prove that this broker is present.
-    if std::os::unix::net::UnixStream::connect(&address.socket).is_ok() {
+    if verify_broker_socket_endpoint(&address.socket).is_ok()
+        && std::os::unix::net::UnixStream::connect(&address.socket)
+            .and_then(|stream| {
+                usagi_daemon::infrastructure::unix_transport::verify_same_user_peer(&stream)
+            })
+            .is_ok()
+    {
         return Ok(());
     }
     let mut command = std::process::Command::new(&exe);
@@ -153,14 +182,18 @@ pub(super) fn launch_broker_daemon(
     if current_daemon_is_reachable(data_dir) {
         return Ok(());
     }
-    let child = bootstrap_serve_command(exe, workspace).spawn()?;
-    for _ in 0..BROKER_READINESS_ATTEMPTS {
+    let mut child = bootstrap_serve_command(exe, workspace).spawn()?;
+    for _ in 0..BROKER_DAEMON_READINESS_ATTEMPTS {
         if current_daemon_is_reachable(data_dir) {
             reap_child(child);
             return Ok(());
         }
+        if child.try_wait().is_ok_and(|status| status.is_some()) {
+            break;
+        }
         RealSleeper.sleep();
     }
+    let _ = child.kill();
     reap_child(child);
     Err(std::io::Error::other(
         "brokered daemon did not become ready",
@@ -416,7 +449,11 @@ pub(super) fn bootstrap_client<S: Read + Write>(
     let _bootstrap_lock =
         match acquire_bootstrap_lock_io_within(&data_dir, PrivateLockWait::BOOTSTRAP) {
             Ok(lock) => lock,
-            Err(lock_error) if lock_error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(lock_error)
+                if lock_error
+                    .raw_os_error()
+                    .is_some_and(|code| matches!(code, libc::EACCES | libc::EPERM)) =>
+            {
                 let broker_workspace = launch_workspace()?;
                 if request_broker_start(&data_dir, &broker_workspace, &exe).is_err() {
                     return Err(map_bootstrap_lock_error(&lock_error));

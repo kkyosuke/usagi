@@ -12342,3 +12342,31 @@ fn session_lineage_requires_a_valid_available_session_and_parent_id() {
         Some((session, None))
     );
 }
+
+#[test]
+fn broker_socket_endpoint_requires_an_owned_0600_unix_socket() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+    let regular = temp.path().join("regular");
+    std::fs::write(&regular, b"not a socket").unwrap();
+    assert_eq!(
+        broker::verify_broker_socket_endpoint(&regular)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+
+    let sock = temp.path().join("broker.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        broker::verify_broker_socket_endpoint(&sock)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).unwrap();
+    broker::verify_broker_socket_endpoint(&sock).unwrap();
+}

@@ -357,6 +357,7 @@ pub(super) fn spawn_ipc_server(
     background_workers.push(teardown_worker);
     let cache_jobs = usagi_daemon::usecase::session_cache_jobs::CacheJobs::default();
     background_workers.push(start_orphan_cleanup_worker(
+        data_dir.to_path_buf(),
         &workspaces,
         fence.gate.clone(),
         Arc::clone(&agent),
@@ -394,9 +395,22 @@ pub(super) fn spawn_ipc_server(
             "daemon startup compensated {compensated} delegated session(s) whose dispatch never started"
         ));
     }
+    let visibility =
+        usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility::open(data_dir);
+    {
+        let mut retained = std::collections::BTreeSet::new();
+        if let Ok(terminal) = terminal.lock() {
+            retained.extend(terminal.retained_resources());
+        }
+        if let Ok(agent) = agent.lock() {
+            retained.extend(agent.retained_resources());
+        }
+        visibility.retain(|terminal, _| retained.contains(&terminal.terminal_id.as_str()));
+    }
     background_workers.push(start_retention_gc_worker(
         Arc::clone(&terminal),
         Arc::clone(&agent),
+        visibility.clone(),
         open_runtime_state(data_dir, daemon_generation, &children, terminal_limit)?,
         Arc::clone(&shutdown),
     )?);
@@ -439,6 +453,7 @@ pub(super) fn spawn_ipc_server(
             cache_jobs,
             terminal,
             agent,
+            visibility,
             retention,
             pr_inventory,
             projection,
@@ -600,6 +615,7 @@ pub(super) struct IpcAcceptContext {
     pub(super) cache_jobs: usagi_daemon::usecase::session_cache_jobs::CacheJobs,
     pub(super) terminal: SharedTerminalRuntime,
     pub(super) agent: SharedAgentRuntime,
+    pub(super) visibility: usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility,
     pub(super) retention: usagi_daemon::usecase::terminal_retention_ipc::SharedTerminalRetention,
     pub(super) pr_inventory: SharedPrInventory,
     pub(super) projection: Arc<PrProjectionQueue>,
@@ -632,6 +648,7 @@ pub(super) fn start_ipc_accept_loop(
         cache_jobs,
         terminal,
         agent,
+        visibility,
         retention,
         pr_inventory,
         projection,
@@ -657,11 +674,6 @@ pub(super) fn start_ipc_accept_loop(
             // returns `None` once the queue is closed and drained, so the thread
             // needs no shutdown flag of its own and never polls one.
             let _projection = ClosePrProjectionOnExit { projection };
-            // One workspace-global visibility authority for exited terminal
-            // tombstones (#525), shared by every client connection so multiple
-            // TUIs converge on the same Observed / Dismissed state.
-            let visibility =
-                usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility::new();
             let pre_handshake =
                 PreHandshakeAdmission::new(PRE_HANDSHAKE_CONNECTION_LIMIT);
             let mut capacity_log = CapacityRefusalLog::default();
@@ -1908,6 +1920,9 @@ pub(super) fn serve_bootstrap_broker(
         };
         if workspace.canonicalize().ok().as_deref() != Some(workspace.as_path()) {
             break;
+        }
+        if usagi_daemon::infrastructure::unix_transport::verify_same_user_peer(&stream).is_err() {
+            continue;
         }
         // A readiness probe may disconnect immediately after `connect`. Some
         // platforms reject timeout setup on that already-disconnected socket;

@@ -887,6 +887,7 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `agent-restart-intent.lock` | private lock file | 続行 intent の保存と operation を照合した削除を直列化する |
 | `bootstrap-broker-<digest>.lock` | lock file | sandbox 外の bootstrap broker を canonical workspace・executable path ごとに 1 process へ制限する |
 | `bootstrap-broker-<digest>.sock` | private Unix socket | 対応する workspace・executable の read-only sandbox client から cold start だけを受理する |
+| `bootstrap-broker-<digest>.json` | JSON | 対応する bootstrap broker の pid と `process_start_identity`。停止・テスト回収時に exact process を識別する |
 | `record.lock` | lock file | `daemon.json` の read、save、incarnation-conditional clear を cross-process で直列化する |
 | `current.lock` | lock file | current locator の publish と generation-fenced retire を cross-process で直列化する |
 | `current.json` | private atomic JSON locator | active daemon generation の Unix socket endpoint を公開する。安全な publication の正本は [4. IPC の Unix transport](04-ipc.md#unix-transport) |
@@ -903,7 +904,10 @@ daemon の process lifecycle と Unix transport は `<data-dir>/daemon/` を使�
 | `sessions.json.migrated` | 退役した legacy JSON | 移行時に subtree が既に authoritative な document を持っていた場合、legacy の bytes をここへ退役させる。調査用に残るが、どの build も再び読まない |
 | `runtime-migration.json` | durable atomic JSON | legacy store から shard への一方向 migration の記録。schema、移行した generation、adopt 件数、証明不能だった件数を持つ（[legacy record の adoption](#legacy-record-の-adoption)） |
 | `agents.json.migrated` / `terminals.json.migrated` | 退役した legacy JSON | migration が rename で退役させた legacy whole-snapshot store。bytes は調査用に残るが、どの build も再び読まない |
+| `terminal-visibility.json` | durable atomic JSON | 終了済み terminal tombstone の workspace 横断 visibility ledger（`Observed` / `Dismissed` と compare-and-swap revision）。起動時と retention GC tick で保持中 terminal に prune される |
 | `pr-inventory.json` | durable atomic JSON | session ごとの canonical PR、last-known title/state、user-owned pin/dismiss、safe refresh state |
+| `notifications.json` / `notifications.lock` | durable atomic JSON / lock file | desktop notification の発火済み記録と cross-process 直列化 lock |
+| `user-decisions.json` / `user-decisions.lock` | durable atomic JSON / lock file | workspace / session の意思決定ログと cross-process 直列化 lock |
 | `dispatch.json` | durable atomic JSON | dispatchable agent、legacy prompt queue、dispatch run、caller↔worker binding のレジストリ。planned rollover 中の旧 draining generation も更新するため schema は旧 build と共通に保つ。run ID は既存の durable `OperationId` を使う |
 | `dispatch-workspaces.json` | durable atomic JSON | Agent の workspace ownership、workspace/session ごとの prompt queue、run retention から独立した immutable session lineage、委譲 admission から child publish までの concurrency reservation。旧 draining generation が `dispatch.json` を whole-snapshot 保存しても未知 field として消されない sidecar |
 | `inbox/<caller-session-id>/<caller-agent-id>.jsonl` | durable sequence JSONL | caller agent 単位の完了報告 inbox。fsync append、derived offset index、atomic ACK watermark、cross-process lock で、caller の停止中と daemon restart 後にも未 ACK 報告を保持する |
@@ -2372,8 +2376,8 @@ bounded queue への publish、drop 集計、wire snapshot はこの broker が�
 subscriber と drop count は 0 から始まる。TUI は push queue を登録せず snapshot を周期的に取得する。
 subscribe する client は再接続後に新しい observer を登録し、その queue を drain する。
 
-daemon の長寿命 worker は、maintenance 8 種（PR refresh、session teardown、custody、retention GC、draining
-collection、decision maintenance、tenant retirement、orphan cleanup）と critical pipeline 3 種
+daemon の長寿命 worker は、maintenance 10 種（PR refresh、session teardown、custody、retention GC、draining
+collection、decision maintenance、tenant retirement、orphan cleanup、desktop notifications、Agent restart recovery）と critical pipeline 3 種
 （Agent observer、generic terminal observer、PR projection）の closed vocabulary を共有する。共通境界は panic と unexpected normal exit の両方を worker ごとの
 process-local failure bit へ記録して shared shutdown を要求し、metrics broker は endpoint retirement 前に取得された snapshot に
 失敗 worker 数を載せる。新しい daemon incarnation では count は 0 へ戻る。
