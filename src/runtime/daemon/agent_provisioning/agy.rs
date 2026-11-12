@@ -22,8 +22,16 @@ use super::{
     validate_isolated_sandbox_root, validate_owned_directory,
 };
 
+mod alias;
 mod security;
-use security::prepare_agy_writable_paths;
+#[cfg(test)]
+pub(in crate::runtime::daemon) use alias::agy_workspace_alias_name;
+pub(in crate::runtime::daemon) use alias::{
+    agy_arguments_for_integration, publish_agy_workspace_alias,
+};
+#[cfg(test)]
+pub(in crate::runtime::daemon) use security::agentapi_repair_mode;
+pub(in crate::runtime::daemon) use security::prepare_agy_writable_paths;
 
 /// Resolves the checkout, Antigravity workspace integration, prompt, environment, and outer
 /// sandbox for the `agy` adapter.
@@ -101,6 +109,7 @@ impl AgyProvisioner for RootAgyProvisioner {
             context.inject_mcp,
             self.sandbox_passthrough,
             &policy,
+            &working_directory,
         )
         .map_err(|()| AgyProvisionFailure::MaterializationFailed)?;
         read_only_roots.extend(integration);
@@ -155,6 +164,9 @@ impl AgyProvisioner for RootAgyProvisioner {
     }
 }
 
+/// Materializes the integration outside the write surface and returns the
+/// AGY arguments that add it to the managed launch, together with the
+/// canonical integration root the sandbox must keep read-only.
 pub(in crate::runtime::daemon) fn agy_workspace_arguments(
     data_home: &paths::DataHome,
     workspace: usagi_core::domain::id::WorkspaceId,
@@ -162,23 +174,15 @@ pub(in crate::runtime::daemon) fn agy_workspace_arguments(
     enabled: bool,
     passthrough: bool,
     policy: &SandboxPolicyInputs<'_>,
+    working_directory: &std::path::Path,
 ) -> Result<(Vec<String>, Option<PathBuf>), ()> {
     let target = agy_integration_root(data_home, workspace, enabled)?;
     if !passthrough {
         validate_isolated_sandbox_root(policy, &target).map_err(|_| ())?;
     }
     let integration = materialize_agy_workspace(data_home, workspace, command, enabled)?;
-    agy_arguments_for_integration(&integration)
-}
-
-pub(in crate::runtime::daemon) fn agy_arguments_for_integration(
-    integration: &std::path::Path,
-) -> Result<(Vec<String>, Option<PathBuf>), ()> {
-    let integration = integration.to_str().ok_or(())?;
-    Ok((
-        vec!["--add-dir".to_owned(), integration.to_owned()],
-        Some(PathBuf::from(integration)),
-    ))
+    let alias = publish_agy_workspace_alias(policy.workspace_root, &integration)?;
+    agy_arguments_for_integration(working_directory, &alias, &integration)
 }
 
 fn agy_integration_root(

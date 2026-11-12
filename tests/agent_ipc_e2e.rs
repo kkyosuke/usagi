@@ -2111,10 +2111,28 @@ fn assert_private_agy_workspace(
         .and_then(|position| arguments.get(position + 1))
         .map(PathBuf::from)
         .expect("managed AGY launch carries its private configuration workspace");
+    // AGY runs commands in the first workspace in path order, so the launch
+    // adds the integration through an alias that sorts after the worktree.
+    assert_eq!(
+        add_dir
+            .parent()
+            .map(|parent| parent.canonicalize().unwrap()),
+        Some(repo.canonicalize().unwrap().join(".usagi")),
+        "managed plugin workspace {} must be the workspace alias",
+        add_dir.display()
+    );
     assert!(
-        add_dir.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
+        add_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("workspace-agy-")
+    );
+    let integration = fs::read_link(&add_dir).expect("the alias is a symlink");
+    assert!(
+        integration.starts_with(data_dir.canonicalize().unwrap().join("agent-integrations")),
         "managed plugin workspace {} escaped daemon data {}",
-        add_dir.display(),
+        integration.display(),
         data_dir.display()
     );
     let plugin = add_dir.join(".agents");

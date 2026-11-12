@@ -2092,10 +2092,11 @@ Antigravity は server 単位の事前許可を指定する起動 flag がない
 同じ MCP server を daemon data の
 `agent-integrations/<workspace-id>/agy/workspace/.agents/mcp_config.json` に書いた設定から起動する。
 daemon は専用 workspace configuration directory だけを atomic update し、その synthetic workspace を private `--add-dir` で managed launch
-へだけ追加する。integration root が worktree、provider state、temporary directory を含む実効 writable surface と重なる構成は
+へだけ追加する（worktree を作業 directory に保つ alias の配置は [Claude 起動の多層防御](02-architecture.md#claude-起動の多層防御) の Antigravity workspace integration を参照する）。
+integration root が worktree、provider state、temporary directory を含む実効 writable surface と重なる構成は
 作成前に拒否し、sandbox でも read-only に戻す。managed launch は `~/.gemini` を writable root にせず、
-`~/.gemini/antigravity-cli/conversations/`・`brain/`、state 直下の conversation summary DB 3 ファイルと
-`bin/agentapi` ファイルだけを writable allowlist にする。認証は OS keyring を使い、動的 log は `--log-file /dev/null` へ送る。
+[agent state の writable root](02-architecture.md#agent-state-の-writable-root) の runtime state だけを writable allowlist にする。
+認証は OS keyring を使い、動的 log は `--log-file /dev/null` へ送る。
 これにより `~/.gemini/GEMINI.md`、global config、plugin、skill、settings、status/title command script を含む
 既存/将来の customization は未作成 path も含めて read-only になり、実 workspace の `.agents/` も置換しない。
 

@@ -478,6 +478,7 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One sandbox run must show every granted AGY runtime path beside every denied customization path.
 fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -486,6 +487,9 @@ fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
     let repo = fixture.join("repo");
     let home = fixture.join("home");
     let bin = fixture.join("bin");
+    let integration = fixture.join("data/agent-integrations/workspace/agy/workspace");
+    let integration_hooks = integration.join(".agents/hooks.json");
+    let alias = repo.join(".usagi/workspace-agy-0123456789abcdef");
     let config = home.join(".gemini/config");
     let plugin = config.join("plugins/existing/plugin.json");
     let hooks = config.join("hooks.json");
@@ -501,14 +505,25 @@ fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
     let title = state.join("title.sh");
     let global_context = home.join(".gemini/GEMINI.md");
     let conversations = state.join("conversations");
+    let brain = state.join("brain");
+    let presence = state.join("presence");
+    let crashes = state.join("crashes");
     let summaries = state.join("conversation_summaries.db");
+    let summaries_shm = state.join("conversation_summaries.db-shm");
+    let summaries_wal = state.join("conversation_summaries.db-wal");
+    let agentapi = state.join("bin/agentapi");
     for path in [
-        &repo,
+        &repo.join(".usagi"),
         &bin,
         plugin.parent().unwrap(),
         state_plugin.parent().unwrap(),
         state_skill.parent().unwrap(),
+        integration_hooks.parent().unwrap(),
+        agentapi.parent().unwrap(),
         &conversations,
+        &brain,
+        &presence,
+        &crashes,
     ] {
         fs::create_dir_all(path).unwrap();
     }
@@ -523,14 +538,61 @@ fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
         &statusline,
         &title,
         &global_context,
+        &integration_hooks,
         &summaries,
+        &summaries_shm,
+        &summaries_wal,
+        &agentapi,
     ] {
         fs::write(path, ORIGINAL).unwrap();
     }
+    // The daemon prepares the helper anchor executable (see
+    // `prepare_agy_writable_paths`); AGY then rewrites it in place.
+    fs::set_permissions(
+        &agentapi,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    let integration = integration.canonicalize().unwrap();
+    std::os::unix::fs::symlink(&integration, &alias).unwrap();
     let program = bin.join("agy");
     fs::write(
         &program,
-        "#!/bin/sh\ntouch \"$1/.gemini/antigravity-cli/conversations/state-probe\" || exit 10\nprintf summary > \"$1/.gemini/antigravity-cli/conversation_summaries.db\" || exit 11\nprintf attack > \"$1/.gemini/config/hooks.json\" && exit 20\nprintf attack > \"$1/.gemini/config/mcp_config.json\" && exit 21\nmkdir -p \"$1/.gemini/config/plugins/injected\" && exit 22\nmv \"$1/.gemini/config\" \"$1/.gemini/config-moved\" && exit 23\nprintf attack > \"$1/.gemini/antigravity-cli/settings.json\" && exit 24\nprintf attack > \"$1/.gemini/antigravity-cli/import_manifest.json\" && exit 25\nmkdir -p \"$1/.gemini/antigravity-cli/plugins/injected\" && exit 26\nprintf attack > \"$1/.gemini/antigravity-cli/skills/existing/SKILL.md\" && exit 27\nprintf attack > \"$1/.gemini/GEMINI.md\" && exit 28\nprintf attack > \"$1/.gemini/antigravity-cli/statusline.sh\" && exit 29\nprintf attack > \"$1/.gemini/antigravity-cli/title.sh\" && exit 30\nprintf attack > \"$1/.gemini/antigravity-cli/new-status-command.sh\" && exit 31\nmv \"$1/.gemini/antigravity-cli\" \"$1/.gemini/antigravity-cli-moved\" && exit 32\nmv \"$1/.gemini\" \"$1/.gemini-moved\" && exit 33\nexit 0\n",
+        format!(
+            "#!/bin/sh\n\
+             S=\"$1/.gemini/antigravity-cli\"\n\
+             touch \"$S/conversations/state-probe\" || exit 10\n\
+             printf summary > \"$S/conversation_summaries.db\" || exit 11\n\
+             printf wal > \"$S/conversation_summaries.db-wal\" || exit 12\n\
+             printf shm > \"$S/conversation_summaries.db-shm\" || exit 13\n\
+             printf '#!/bin/sh\\nprintf helper-ran\\n' > \"$S/bin/agentapi\" || exit 14\n\
+             mkdir \"$S/brain/conversation\" || exit 15\n\
+             \"$S/bin/agentapi\" > \"$S/brain/conversation/task.md\" || exit 16\n\
+             touch \"$S/presence/conversation.lock\" || exit 17\n\
+             touch \"$S/crashes/crash.log\" || exit 18\n\
+             printf attack > \"$1/.gemini/config/hooks.json\" && exit 20\n\
+             printf attack > \"$1/.gemini/config/mcp_config.json\" && exit 21\n\
+             mkdir -p \"$1/.gemini/config/plugins/injected\" && exit 22\n\
+             mv \"$1/.gemini/config\" \"$1/.gemini/config-moved\" && exit 23\n\
+             printf attack > \"$S/settings.json\" && exit 24\n\
+             printf attack > \"$S/import_manifest.json\" && exit 25\n\
+             mkdir -p \"$S/plugins/injected\" && exit 26\n\
+             printf attack > \"$S/skills/existing/SKILL.md\" && exit 27\n\
+             printf attack > \"$1/.gemini/GEMINI.md\" && exit 28\n\
+             printf attack > \"$S/statusline.sh\" && exit 29\n\
+             printf attack > \"$S/title.sh\" && exit 30\n\
+             printf attack > \"$S/new-status-command.sh\" && exit 31\n\
+             mv \"$S\" \"$1/.gemini/antigravity-cli-moved\" && exit 32\n\
+             mv \"$1/.gemini\" \"$1/.gemini-moved\" && exit 33\n\
+             printf attack > \"$S/bin/injected\" && exit 34\n\
+             printf attack > '{hooks}' && exit 35\n\
+             printf attack > '{alias}/.agents/hooks.json' && exit 36\n\
+             rm '{alias}' && exit 37\n\
+             ln -sfn \"$1\" '{alias}' && exit 38\n\
+             exit 0\n",
+            hooks = integration.join(".agents/hooks.json").display(),
+            alias = alias.display(),
+        ),
     )
     .unwrap();
     fs::set_permissions(
@@ -539,18 +601,42 @@ fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
     )
     .unwrap();
 
-    let output = run_agent_in_root_with_policy(&repo, &home, &program, &[&summaries], &[]);
+    let output = run_agent_in_root_with_policy(
+        &repo,
+        &home,
+        &program,
+        &[
+            &brain,
+            &presence,
+            &crashes,
+            &summaries,
+            &summaries_shm,
+            &summaries_wal,
+            &agentapi,
+        ],
+        &[&integration],
+    );
     if !output.status.success() && sandbox_backend_unavailable(&output) {
         let _ = fs::remove_dir_all(&fixture);
         return;
     }
     assert!(
         output.status.success(),
-        "AGY conversations must remain writable while global customization is denied: {}",
+        "AGY runtime state must remain writable while global customization is denied (exit {:?}): {}",
+        output.status.code(),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(conversations.join("state-probe").is_file());
     assert_eq!(fs::read(&summaries).unwrap(), b"summary");
+    assert_eq!(fs::read(&summaries_wal).unwrap(), b"wal");
+    assert_eq!(fs::read(&summaries_shm).unwrap(), b"shm");
+    assert_eq!(
+        fs::read(brain.join("conversation/task.md")).unwrap(),
+        b"helper-ran",
+        "the rewritten run_command helper must stay executable"
+    );
+    assert!(presence.join("conversation.lock").is_file());
+    assert!(crashes.join("crash.log").is_file());
     for path in [
         &plugin,
         &hooks,
@@ -562,12 +648,15 @@ fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
         &statusline,
         &title,
         &global_context,
+        &integration.join(".agents/hooks.json"),
     ] {
         assert_unchanged(path);
     }
+    assert_eq!(fs::read_link(&alias).unwrap(), integration);
     assert!(!config.join("plugins/injected").exists());
     assert!(!state.join("plugins/injected").exists());
     assert!(!state.join("new-status-command.sh").exists());
+    assert!(!state.join("bin/injected").exists());
     assert!(config.is_dir());
     assert!(state.is_dir());
     assert!(!home.join(".gemini/config-moved").exists());

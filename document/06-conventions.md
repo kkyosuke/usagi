@@ -87,7 +87,7 @@ JSON-RPC）と `usagi-daemon` の IPC メッセージ (de)serialize でも使う
 `unicode-segmentation` は `usagi-tui` の入力 widget・表示の折り返しと省略・出力選択で使い、domain には持ち込まない。
 `clap` / `clap_complete` は `usagi-cli` が使う。
 `sha2` は合成ルートの `build.rs` が source / build configuration identity、runtime が workspace・executable 別の bootstrap broker endpoint、IPC contract が rollover operation ID を
-作るほか、root runtime が設定 env の secret cache を分離する `op read` credential identity を作り、
+作るほか、root runtime が設定 env の secret cache を分離する `op read` credential identity と managed AGY の workspace alias 名を作り、
 `usagi-cli` が配布 binary に同梱した self-update installer の identity 検証にも使う。
 `chrono` / `anyhow` は `usagi-cli` の MCP store adapter が実時計の束縛と core usecase の
 エラー変換にも使う。`fs2` は `usagi-daemon` の current locator publish / retire と、ルート結合テストの[重い E2E の直列化](#重い-e2e-の直列化)も直列化する。
