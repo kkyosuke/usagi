@@ -218,37 +218,53 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
     if request
         .backend
         .as_ref()
-        .is_some_and(|backend| !backend.is_absolute())
+        .is_some_and(|backend| !backend.is_absolute() || !valid_sandbox_path(backend))
     {
-        return Some("sandbox backend が absolute path ではありません".to_owned());
+        return Some("sandbox backend が安全な absolute path ではありません".to_owned());
     }
     let protected = request.protected_root.as_deref();
-    for root in writable_roots(request) {
-        if !root.is_absolute() || root == Path::new("/") {
-            return Some("writable root が安全な absolute path ではありません".to_owned());
-        }
-        let overlaps_workspace = protected.is_some_and(|workspace| {
-            workspace.starts_with(&root)
-                || (request.mode == SandboxMode::Root && root.starts_with(workspace))
-        });
-        if overlaps_workspace {
-            return Some("writable root が保護対象 workspace の ancestor です".to_owned());
-        }
+    if protected.is_some_and(|workspace| {
+        !workspace.is_absolute()
+            || strip_trailing_slash(workspace) == Path::new("/")
+            || !valid_sandbox_path(workspace)
+    }) {
+        return Some("protected root が安全な absolute path ではありません".to_owned());
     }
+    let protected_roots = protected
+        .map_or_default(|workspace| effective_roots(request.platform, &[workspace.to_path_buf()]));
     for prefix in writable_prefixes(request) {
-        if !prefix.is_absolute() || prefix.to_str().is_none() {
+        if !prefix.is_absolute() || !valid_sandbox_path(&prefix) {
             return Some("writable prefix が安全な absolute path ではありません".to_owned());
         }
-        let overlaps_workspace = protected.is_some_and(|workspace| {
-            path_has_prefix(workspace, &prefix)
-                || (request.mode == SandboxMode::Root && prefix.starts_with(workspace))
-        });
-        if overlaps_workspace {
-            return Some("writable prefix が保護対象 workspace と重なります".to_owned());
+        for prefix in effective_roots(request.platform, &[prefix]) {
+            let overlaps_workspace = protected_roots.iter().any(|workspace| {
+                path_has_prefix(workspace, &prefix)
+                    || (request.mode == SandboxMode::Root && prefix.starts_with(workspace))
+            });
+            if overlaps_workspace {
+                return Some("writable prefix が保護対象 workspace と重なります".to_owned());
+            }
+        }
+    }
+    for raw_root in writable_roots(request) {
+        let normalized = strip_trailing_slash(&raw_root);
+        if !raw_root.is_absolute() || normalized == Path::new("/") || !valid_sandbox_path(&raw_root)
+        {
+            return Some("writable root が安全な absolute path ではありません".to_owned());
+        }
+        for root in effective_roots(request.platform, &[raw_root]) {
+            let overlaps_workspace = protected_roots.iter().any(|workspace| {
+                workspace.starts_with(&root)
+                    || (request.mode == SandboxMode::Root && root.starts_with(workspace))
+            });
+            if overlaps_workspace {
+                return Some("writable root が保護対象 workspace の ancestor です".to_owned());
+            }
         }
     }
     for root in &request.read_only_roots {
-        if !root.is_absolute() || root == Path::new("/") || root.to_str().is_none() {
+        let normalized = strip_trailing_slash(root);
+        if !root.is_absolute() || normalized == Path::new("/") || !valid_sandbox_path(root) {
             return Some("read-only root が安全な absolute path ではありません".to_owned());
         }
     }
@@ -259,19 +275,37 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
         ) else {
             return Some("Linux HOME entry inventory がありません".to_owned());
         };
-        if home == Path::new("/")
-            || home.to_str().is_none()
-            || protected.is_some_and(|workspace| home.starts_with(workspace))
+        let normalized_home = strip_trailing_slash(home);
+        if normalized_home == Path::new("/")
+            || protected_roots
+                .iter()
+                .any(|workspace| normalized_home.starts_with(workspace))
         {
             return Some("Linux HOME が安全な writable directory ではありません".to_owned());
         }
         if entries.iter().any(|entry| {
-            !entry.is_absolute() || entry.to_str().is_none() || entry.parent() != Some(home)
+            !entry.is_absolute() || !valid_sandbox_path(entry) || entry.parent() != Some(home)
         }) {
             return Some("Linux HOME entry inventory が安全な直下 path ではありません".to_owned());
         }
     }
     None
+}
+
+fn valid_sandbox_path(path: &Path) -> bool {
+    path.to_str()
+        .is_some_and(|text| !text.chars().any(char::is_control))
+}
+
+fn effective_roots(platform: Platform, roots: &[PathBuf]) -> BTreeSet<PathBuf> {
+    if platform == Platform::MacOs {
+        macos_write_roots(roots)
+    } else {
+        roots
+            .iter()
+            .map(|root| strip_trailing_slash(root))
+            .collect()
+    }
 }
 
 fn reject_backend(backend: &str) -> SandboxPlan {
@@ -905,7 +939,7 @@ mod tests {
 
     #[test]
     fn session_policy_rejects_root_relative_and_workspace_ancestor_write_roots() {
-        for root in ["/", "relative", "/repo"] {
+        for root in ["/", "///", "relative", "/repo", "/repo/", "/bad\nroot"] {
             let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
             request.launch_roots = vec![PathBuf::from(root)];
             assert!(
@@ -915,9 +949,34 @@ mod tests {
                 "{root} must be rejected"
             );
         }
+        for protected in ["/", "///", "relative", "/repo\nnewline"] {
+            let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
+            request.protected_root = Some(PathBuf::from(protected));
+            assert!(
+                plan(&request)
+                    .into_reject()
+                    .is_some_and(|reason| reason.contains("protected root")),
+                "{protected} must be rejected"
+            );
+        }
+        let mut macos_firmlink = request(Platform::MacOs, Some("/usr/bin/sandbox-exec"));
+        macos_firmlink.protected_root = Some(PathBuf::from("/private/tmp/repo"));
+        macos_firmlink.launch_roots = vec![PathBuf::from("/tmp/repo")];
+        assert!(
+            plan(&macos_firmlink)
+                .into_reject()
+                .is_some_and(|reason| reason.contains("writable root"))
+        );
         let relative_backend = request(Platform::Linux, Some("relative/bwrap"));
         assert!(
             plan(&relative_backend)
+                .into_reject()
+                .unwrap()
+                .contains("backend")
+        );
+        let control_backend = request(Platform::Linux, Some("/usr/bin/bwrap\n"));
+        assert!(
+            plan(&control_backend)
                 .into_reject()
                 .unwrap()
                 .contains("backend")
@@ -931,7 +990,7 @@ mod tests {
                 .is_some_and(|reason| reason.contains("writable root"))
         );
 
-        for read_only in ["/", "relative"] {
+        for read_only in ["/", "///", "relative", "/repo/read\nonly"] {
             let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
             request.read_only_roots = vec![PathBuf::from(read_only)];
             assert!(

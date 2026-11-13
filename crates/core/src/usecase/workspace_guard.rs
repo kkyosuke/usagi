@@ -344,12 +344,76 @@ fn git_command_is_read_only(git_tokens: &[String]) -> bool {
         });
     let diff_helpers_disabled = !DIFF_CAPABLE_GIT_SUBCOMMANDS.contains(&subcommand)
         || (subcommand == "log" && !log_requests_diff)
-        || (subcommand_args.iter().any(|token| token == "--no-ext-diff")
-            && subcommand_args.iter().any(|token| token == "--no-textconv"));
+        || diff_helpers_disabled_in_args(subcommand_args);
     READ_ONLY_GIT_SUBCOMMANDS.contains(&subcommand)
         && !unsafe_option
         && !reflog_mutates
         && diff_helpers_disabled
+}
+
+fn diff_helpers_disabled_in_args(subcommand_args: &[String]) -> bool {
+    let prefix = subcommand_args
+        .iter()
+        .take_while(|token| git_arg_cannot_consume_next_token(token));
+    prefix.clone().any(|token| token == "--no-ext-diff")
+        && prefix.into_iter().any(|token| token == "--no-textconv")
+}
+
+fn git_arg_cannot_consume_next_token(token: &str) -> bool {
+    if token == "--" {
+        return false;
+    }
+    if !token.starts_with('-') {
+        return true;
+    }
+    if token.starts_with("--") {
+        return token.contains('=')
+            || matches!(
+                token,
+                "--no-ext-diff"
+                    | "--no-textconv"
+                    | "--stat"
+                    | "--numstat"
+                    | "--shortstat"
+                    | "--summary"
+                    | "--patch"
+                    | "--raw"
+                    | "--name-only"
+                    | "--name-status"
+                    | "--cc"
+                    | "--remerge-diff"
+                    | "--full-diff"
+                    | "--check"
+                    | "--cached"
+                    | "--staged"
+                    | "--no-renames"
+                    | "--oneline"
+                    | "--graph"
+                    | "--decorate"
+                    | "--no-decorate"
+                    | "--all"
+                    | "--branches"
+                    | "--tags"
+                    | "--remotes"
+                    | "--first-parent"
+                    | "--merges"
+                    | "--no-merges"
+                    | "--reverse"
+                    | "--follow"
+                    | "--quiet"
+                    | "--exit-code"
+            );
+    }
+    token[1..].chars().all(|flag| {
+        matches!(
+            flag,
+            'p' | 'u' | 's' | 'q' | 'R' | 'b' | 'w' | 'W' | 'm' | 'c' | 'r' | 't' | 'd' | '0'..='9'
+        )
+    }) || (token.len() > 2
+        && matches!(
+            token.as_bytes()[1],
+            b'S' | b'G' | b'L' | b'U' | b'B' | b'M' | b'C' | b'D' | b'X' | b'n'
+        ))
 }
 
 /// Match the browser flag as gh parses it, including grouped short flags.
@@ -976,13 +1040,18 @@ mod tests {
             "git diff --no-ext-diff --no-textconv --config-env=core.pager=ENV HEAD",
             "git diff --no-ext-diff --no-textconv --paginate HEAD",
             "git diff --no-ext-diff --no-textconv --exec=sh HEAD",
+            "git diff HEAD~1 HEAD -- . --no-ext-diff --no-textconv",
+            "git diff --dst-prefix --no-ext-diff --src-prefix --no-textconv HEAD",
+            "git log -S --no-ext-diff --no-textconv main",
         ] {
             assert!(!root_command_is_read_only(command), "allowed {command}");
         }
         for command in [
             "git -P --literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs status",
             "git log -U0 --no-ext-diff --no-textconv main",
+            "git log --unified=0 -p --no-ext-diff --no-textconv main",
             "git log --remerge-diff --no-ext-diff --no-textconv main",
+            "git diff HEAD --no-ext-diff --no-textconv",
             "git log -n 5 main",
             "git grep -n needle -- -Osh",
         ] {
