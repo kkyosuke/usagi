@@ -307,9 +307,7 @@ where
                         row: next_row,
                         notches: next_notches,
                     }),
-                ) => {
-                    *column = next_column;
-                    *row = next_row;
+                ) if *column == next_column && *row == next_row => {
                     *notches = notches.saturating_add(next_notches);
                 }
                 _ => {
@@ -342,7 +340,8 @@ fn recover_mouse_report(
 ) -> io::Result<Option<Event>> {
     let mut candidate = pending_mouse.take().expect("mouse candidate exists");
     let poll_deadline = source.now() + timeout;
-    while candidate.report.len() < MOUSE_REPORT_MAX_CHARS {
+    loop {
+        debug_assert!(candidate.report.len() < MOUSE_REPORT_MAX_CHARS);
         let now = source.now();
         let grace = candidate.deadline.saturating_duration_since(now);
         // Consuming a partial prefix is not a completed poll. Continue waiting
@@ -849,9 +848,9 @@ mod tests {
 
     #[test]
     fn recovered_mouse_reports_join_wheel_bursts_without_reordering_keys() {
-        let mut events = vec![wheel(MouseEventKind::ScrollUp, 1, 2)];
+        let mut events = vec![wheel(MouseEventKind::ScrollUp, 41, 12)];
         events.extend(split_report("[<64;42;13M"));
-        events.extend(split_report("[<64;43;14M"));
+        events.extend(split_report("[<64;42;13M"));
         events.push(Event::Key(KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::NONE,
@@ -866,8 +865,8 @@ mod tests {
         assert_eq!(
             pump.next(T0).unwrap(),
             RuntimeEvent::Input(LiveInput::WheelUp {
-                column: 42,
-                row: 13,
+                column: 41,
+                row: 12,
                 notches: 3,
             })
         );
@@ -1596,12 +1595,13 @@ mod tests {
     #[test]
     fn same_direction_wheel_burst_is_coalesced_before_the_next_frame() {
         let source = FakeSource::with([
-            wheel(MouseEventKind::ScrollUp, 4, 7),
-            wheel(MouseEventKind::ScrollUp, 5, 8),
+            wheel(MouseEventKind::ScrollUp, 6, 9),
+            wheel(MouseEventKind::ScrollUp, 6, 9),
             // An ignored focus notification neither splits nor reorders the
             // surrounding wheel burst.
             Event::FocusGained,
             wheel(MouseEventKind::ScrollUp, 6, 9),
+            wheel(MouseEventKind::ScrollUp, 10, 20),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         ]);
         let mut pump = EventPump::new(source, FakeEventBackend::default(), TICK, T0);
@@ -1612,6 +1612,14 @@ mod tests {
                 column: 6,
                 row: 9,
                 notches: 3,
+            })
+        );
+        assert_eq!(
+            pump.next(T0).unwrap(),
+            RuntimeEvent::Input(LiveInput::WheelUp {
+                column: 10,
+                row: 20,
+                notches: 1,
             })
         );
         assert!(matches!(

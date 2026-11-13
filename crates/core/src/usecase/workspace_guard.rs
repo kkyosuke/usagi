@@ -178,10 +178,6 @@ const READ_ONLY_GIT_SUBCOMMANDS: &[&str] = &[
     "version",
 ];
 
-/// サブコマンドより前の git グローバルオプションで、直後のトークンを値として消費するもの
-/// （例: `git -C /path commit`）。その値をサブコマンドと取り違えないために使う。
-const GIT_OPTS_WITH_VALUE: &[&str] = &["-C", "--git-dir", "--work-tree", "--namespace"];
-
 /// Commands whose output can enter Git's diff machinery. They are allowed only
 /// when both external diff and textconv are explicitly disabled.
 const DIFF_CAPABLE_GIT_SUBCOMMANDS: &[&str] = &[
@@ -276,74 +272,80 @@ fn root_simple_command_is_read_only(command: &str) -> bool {
     )
 }
 
+fn short_flag_group(token: &str) -> Option<&str> {
+    token
+        .strip_prefix('-')
+        .filter(|flags| !flags.is_empty() && !flags.starts_with('-'))
+}
+
 fn git_command_is_read_only(git_tokens: &[String]) -> bool {
     let Some((subcommand_index, subcommand)) = git_subcommand_from_tokens(git_tokens) else {
         return false;
     };
-    let unsafe_option = git_tokens.iter().any(|token| {
+    let subcommand_args = &git_tokens[subcommand_index + 1..];
+    let unsafe_option = subcommand_args.iter().any(|token| {
         token.starts_with("-c")
-            || token == "--config-env"
-            || token.starts_with("--config-env=")
-            || (token == "-C"
-                && git_tokens
-                    .windows(2)
-                    .any(|pair| pair[0] == "-C" && pair[1] != "."))
-            || (token.starts_with("-C") && token != "-C" && token != "-C." && token != "-C=.")
-            || token == "--git-dir"
-            || token.starts_with("--git-dir=")
-            || token == "--work-tree"
-            || token.starts_with("--work-tree=")
-            || token == "--exec-path"
-            || token.starts_with("--exec-path=")
+            || token.starts_with("--config-env")
+            || token.starts_with("-C")
+            || token.starts_with("--git-dir")
+            || token.starts_with("--work-tree")
             || token.starts_with("-o")
-            || token == "--output"
-            || token.starts_with("--output=")
-            || token == "--upload-pack"
-            || token.starts_with("--upload-pack=")
-            || token == "--open-files-in-pager"
-            || token.starts_with("--open-files-in-pager=")
-            || token == "-O"
-            || (token.starts_with("-O") && token.len() > 2)
-            || token == "-p"
-            || token == "--paginate"
-            || token.starts_with("--paginate=")
-            || token == "--ext-diff"
-            || token.starts_with("--ext-diff=")
-            || token == "--textconv"
-            || token.starts_with("--textconv=")
-            || token == "--show-signature"
+            || token.starts_with("--output")
+            || token.starts_with("--upload-pack")
+            || token.starts_with("--exec")
+            || token.starts_with("--open")
+            || token.starts_with("-O")
+            || (subcommand == "grep"
+                && short_flag_group(token).is_some_and(|flags| flags.contains('O')))
+            || (subcommand == "status"
+                && (token.starts_with("--verb")
+                    || token == "--long"
+                    || short_flag_group(token).is_some_and(|flags| flags.contains('v'))))
+            || token.starts_with("--paginate")
+            || token.starts_with("--ext-d")
+            || token.starts_with("--textc")
+            || token.starts_with("--show-sig")
     });
     let reflog_mutates = subcommand == "reflog"
-        && git_tokens[subcommand_index + 1..]
+        && subcommand_args
             .iter()
             .find(|token| !token.starts_with('-'))
             .is_some_and(|action| {
                 matches!(action.as_str(), "delete" | "expire" | "exists" | "drop")
             });
     let log_requests_diff = subcommand == "log"
-        && git_tokens.iter().any(|token| {
-            matches!(
-                token.as_str(),
-                "-p" | "-u"
-                    | "--patch"
-                    | "--patch-with-stat"
-                    | "--patch-with-raw"
-                    | "--stat"
-                    | "--numstat"
-                    | "--shortstat"
-                    | "--raw"
-                    | "--name-only"
-                    | "--name-status"
-                    | "--cc"
-                    | "-m"
-            ) || token.starts_with("-S")
-                || token.starts_with("-G")
-                || token.starts_with("-L")
+        && subcommand_args.iter().any(|token| {
+            token.starts_with("--patch")
+                || token.starts_with("--stat")
+                || token == "--numstat"
+                || token == "--shortstat"
+                || token == "--raw"
+                || token.starts_with("--name-")
+                || token == "--cc"
+                || token.starts_with("--remerge")
+                || token.starts_with("--diff-merges")
+                || token.starts_with("--unified")
+                || token.starts_with("--dirstat")
+                || token.starts_with("--word-diff")
+                || token.starts_with("--color-words")
+                || token == "--full-diff"
+                || token == "--summary"
+                || token == "--check"
+                || token.starts_with("--find-renames")
+                || token.starts_with("--find-copies")
+                || short_flag_group(token).is_some_and(|flags| {
+                    flags.chars().any(|flag| {
+                        matches!(
+                            flag,
+                            'p' | 'u' | 'U' | 'm' | 'S' | 'G' | 'L' | 'B' | 'M' | 'C' | 'D' | 'X'
+                        )
+                    })
+                })
         });
     let diff_helpers_disabled = !DIFF_CAPABLE_GIT_SUBCOMMANDS.contains(&subcommand)
         || (subcommand == "log" && !log_requests_diff)
-        || (git_tokens.iter().any(|token| token == "--no-ext-diff")
-            && git_tokens.iter().any(|token| token == "--no-textconv"));
+        || (subcommand_args.iter().any(|token| token == "--no-ext-diff")
+            && subcommand_args.iter().any(|token| token == "--no-textconv"));
     READ_ONLY_GIT_SUBCOMMANDS.contains(&subcommand)
         && !unsafe_option
         && !reflog_mutates
@@ -378,10 +380,7 @@ fn gh_opens_browser(tokens: &[String]) -> bool {
             arguments.next();
             continue;
         }
-        let Some(flags) = token
-            .strip_prefix('-')
-            .filter(|flags| !flags.starts_with('-'))
-        else {
+        let Some(flags) = short_flag_group(token) else {
             continue;
         };
         for (offset, flag) in flags.char_indices() {
@@ -399,27 +398,42 @@ fn gh_opens_browser(tokens: &[String]) -> bool {
     false
 }
 
+/// サブコマンドより前の git グローバルオプションは、副作用や未知の値消費を持たない最小限の
+/// allowlist だけを受け付ける。未知のグローバルオプション（`--attr-source <tree>` 等）は値トークンを
+/// サブコマンドと誤認させるため fail-closed で拒否する。
 fn git_subcommand_from_tokens(tokens: &[String]) -> Option<(usize, &str)> {
     let mut index = 0;
     while index < tokens.len() {
-        let token = tokens[index].as_str();
-        if token.starts_with('-') {
-            index += 1;
-            if GIT_OPTS_WITH_VALUE.contains(&token) {
+        match tokens[index].as_str() {
+            "--no-pager"
+            | "-P"
+            | "--no-optional-locks"
+            | "--literal-pathspecs"
+            | "--glob-pathspecs"
+            | "--noglob-pathspecs"
+            | "--icase-pathspecs"
+            | "-C."
+            | "-C=." => {
                 index += 1;
             }
-        } else {
-            return Some((index, token));
+            "-C" => {
+                if tokens.get(index + 1).map(String::as_str) != Some(".") {
+                    return None;
+                }
+                index += 2;
+            }
+            token if token.starts_with('-') => return None,
+            subcommand => return Some((index, subcommand)),
         }
     }
     None
 }
 
 /// ツールの対象パスが `root`（session worktree）の外へ解決されるかどうか。true のとき呼び出し側は
-/// 拒否する。新規ファイルのため末尾の存在しない component は許容し、存在する symlink 付き ancestor
-/// まで解決してから字句的に付け直す。`root` / `cwd` を canonicalize できない、または cwd が root の
-/// 外にあるケースは、安全のため escape 扱い（true）にする（fail-closed）。
-/// 存在する ancestor の解決に失敗した場合も拒否し、検査中に path が変化しても panic しない。
+/// 拒否する。新規ファイルのため末尾の存在しない component は許容し、`symlink_metadata` で実在する
+/// ancestor（リンク先未作成の dangling symlink を含む）まで解決してから字句的に付け直す。
+/// `root` / `cwd` を canonicalize できない、dangling symlink を踏む、または cwd が root の外にある
+/// ケースは、安全のため escape 扱い（true）にする（fail-closed）。
 #[must_use]
 pub fn path_escapes_root(root: &Path, cwd: &Path, target: &Path) -> bool {
     let (Ok(root), Ok(cwd)) = (std::fs::canonicalize(root), std::fs::canonicalize(cwd)) else {
@@ -433,17 +447,26 @@ pub fn path_escapes_root(root: &Path, cwd: &Path, target: &Path) -> bool {
     } else {
         cwd.join(target)
     };
-    // Preserve symlink/.. ordering until the filesystem has resolved the
-    // existing prefix. Collapsing .. first would turn link/../file into a
-    // different path from the one the kernel opens.
-    absolute
-        .ancestors()
-        .find(|ancestor| ancestor.exists())
-        .is_none_or(|existing| {
-            std::fs::canonicalize(existing).map_or(true, |mut resolved| {
-                resolved.push(absolute.strip_prefix(existing).unwrap_or(Path::new("")));
-                !normalize(&resolved).starts_with(&root)
-            })
+    // Preserve symlink/.. ordering on the raw path first, then re-verify the
+    // normalized path so `missing/../escape_symlink/file` cannot expose an
+    // unchecked symlink after lexical `..` folding.
+    let Some(first) = resolve_against_existing_ancestor(&absolute) else {
+        return true;
+    };
+    if !first.starts_with(&root) {
+        return true;
+    }
+    first != absolute
+        && resolve_against_existing_ancestor(&first).is_none_or(|second| !second.starts_with(&root))
+}
+
+fn resolve_against_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|ancestor| ancestor.symlink_metadata().is_ok())
+        .and_then(|existing| {
+            let mut resolved = std::fs::canonicalize(existing).ok()?;
+            resolved.push(path.strip_prefix(existing).unwrap_or(Path::new("")));
+            Some(normalize(&resolved))
         })
 }
 
@@ -906,5 +929,110 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&elsewhere).unwrap();
         assert!(path_escapes_root(&root, &elsewhere, Path::new("file")));
+    }
+
+    #[test]
+    fn git_global_flag_smuggling_and_diff_or_pager_bypasses_are_denied() {
+        for command in [
+            "git --attr-source status reset --hard",
+            "git --list-cmds=main",
+            "git -C",
+            "git -C /tmp status",
+            "git grep --open=sh needle",
+            "git grep --open needle",
+            "git grep --open-files=sh needle",
+            "git grep -nOsh needle",
+            "git grep --textconv needle",
+            "git grep --textc needle",
+            "git status -v",
+            "git status -sv",
+            "git status --verbose",
+            "git status --verb",
+            "git status --long",
+            "git log -U0 main",
+            "git log --unified=0 main",
+            "git log -1p main",
+            "git log -c main",
+            "git log --remerge-diff main",
+            "git log --diff-merges=on main",
+            "git log --dirstat main",
+            "git log --word-diff main",
+            "git log --color-words main",
+            "git log --full-diff main",
+            "git log --summary main",
+            "git log --check main",
+            "git log --find-renames main",
+            "git log --find-copies main",
+            "git log --numstat main",
+            "git log --shortstat main",
+            "git log --raw main",
+            "git log --name-only main",
+            "git show --no-ext-diff --no-textconv --show-sig HEAD",
+            "git diff --ext-d HEAD",
+            "git diff --no-ext-diff --no-textconv -C /tmp HEAD",
+            "git diff --no-ext-diff --no-textconv --git-dir=/tmp HEAD",
+            "git diff --no-ext-diff --no-textconv --work-tree=/tmp HEAD",
+            "git diff --no-ext-diff --no-textconv --exec-path=/tmp HEAD",
+            "git diff --no-ext-diff --no-textconv --config-env=core.pager=ENV HEAD",
+            "git diff --no-ext-diff --no-textconv --paginate HEAD",
+            "git diff --no-ext-diff --no-textconv --exec=sh HEAD",
+        ] {
+            assert!(!root_command_is_read_only(command), "allowed {command}");
+        }
+        for command in [
+            "git -P --literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs status",
+            "git log -U0 --no-ext-diff --no-textconv main",
+            "git log --remerge-diff --no-ext-diff --no-textconv main",
+            "git log -n 5 main",
+            "git grep -n needle -- -Osh",
+        ] {
+            // Note: `-Osh` is denied even after `--` because subcommand_args is fail-closed;
+            // verify only the safe forms pass.
+            if command.contains("-Osh") {
+                assert!(!root_command_is_read_only(command));
+            } else {
+                assert!(root_command_is_read_only(command), "denied {command}");
+            }
+        }
+    }
+
+    #[test]
+    fn dangling_and_post_collapse_symlinks_cannot_escape_worktree_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo/.usagi/sessions/work");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let missing_outside = temp.path().join("not-created-yet");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&missing_outside, worktree.join("dangling")).unwrap();
+            std::os::unix::fs::symlink(&outside, worktree.join("escape")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(&missing_outside, worktree.join("dangling")).unwrap();
+            std::os::windows::fs::symlink_dir(&outside, worktree.join("escape")).unwrap();
+        }
+        assert!(path_escapes_root(
+            &worktree,
+            &worktree,
+            Path::new("dangling")
+        ));
+        assert!(path_escapes_root(
+            &worktree,
+            &worktree,
+            Path::new("dangling/new.txt")
+        ));
+        assert!(path_escapes_root(
+            &worktree,
+            &worktree,
+            Path::new("missing/../escape/sentinel")
+        ));
+        assert!(path_escapes_root(
+            &worktree,
+            &worktree,
+            Path::new("missing/../dangling/sentinel")
+        ));
     }
 }

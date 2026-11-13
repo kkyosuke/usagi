@@ -166,7 +166,10 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// directory does not exist.
     pub(crate) fn entry_files(&self) -> Result<Vec<PathBuf>> {
         let entries = match fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
+            Ok(entries) => {
+                ensure_not_symlink(&self.dir)?;
+                entries
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if path_is_genuinely_missing(&self.dir)? {
                     return Ok(Vec::new());
@@ -248,9 +251,11 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 
     pub(crate) fn write_markdown(&self, entry: &E::Entry) -> Result<PathBuf> {
+        ensure_not_symlink(&self.dir)?;
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
         let target = self.dir.join(E::file_name(entry)?);
+        ensure_not_symlink(&target)?;
         json_file::write_text_atomic(&target, &entry.to_markdown())?;
         Ok(target)
     }
@@ -259,9 +264,12 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// any later point leaves enough information for the next reader to repair
     /// derived files from the source state that actually reached disk.
     pub(crate) fn mark_derived_dirty(&self) -> Result<()> {
+        ensure_not_symlink(&self.dir)?;
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
-        json_file::write_text_atomic(&self.dirty_path(), "rebuild from markdown\n")
+        let dirty = self.dirty_path();
+        ensure_not_symlink(&dirty)?;
+        json_file::write_text_atomic(&dirty, "rebuild from markdown\n")
     }
 
     /// Convert a derived refresh result into the outcome of an already
@@ -301,16 +309,18 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     }
 
     pub(crate) fn derived_is_dirty(&self) -> bool {
-        self.dirty_path().exists()
+        fs::symlink_metadata(self.dirty_path()).is_ok()
     }
 
     fn clear_derived_dirty(&self) -> Result<()> {
-        match fs::remove_file(self.dirty_path()) {
+        let dirty = self.dirty_path();
+        ensure_not_symlink(&dirty)?;
+        match fs::remove_file(&dirty) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error).context(format!(
                 "failed to clear derived rebuild marker {}",
-                self.dirty_path().display()
+                dirty.display()
             )),
         }
     }
@@ -341,11 +351,14 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
 
     /// Write the sorted summaries to `index.json` as a rebuildable cache.
     pub(crate) fn write_index(&self, summaries: &[E::Summary]) -> Result<()> {
+        ensure_not_symlink(&self.dir)?;
         fs::create_dir_all(&self.dir)
             .context(format!("failed to create {}", self.dir.display()))?;
+        let index_path = self.index_path();
+        ensure_not_symlink(&index_path)?;
         let fingerprint = Self::source_fingerprint(self.entry_files()?)?;
         let index = E::index_file_ref(summaries, &fingerprint);
-        json_file::write_atomic_cache(&self.dir, &self.index_path(), &index)
+        json_file::write_atomic_cache(&self.dir, &index_path, &index)
     }
 
     /// Rebuild all derived files from the complete markdown source set, so an
@@ -379,13 +392,16 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
     /// Load `index.json`, returning `None` when it is missing or corrupt. A
     /// present-but-corrupt cache is recoverable but logged before rebuilding.
     fn load_index(&self) -> Result<Option<MarkdownIndex<E>>> {
-        let text = match fs::read_to_string(self.index_path()) {
+        let index_path = self.index_path();
+        ensure_not_symlink(&index_path)?;
+        let text = match fs::read_to_string(&index_path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
-                return Err(e).context(format!("failed to read {}", self.index_path().display()));
+                return Err(e).context(format!("failed to read {}", index_path.display()));
             }
         };
+        ensure_not_symlink(&self.dir)?;
         match serde_json::from_str::<E::IndexFile>(&text) {
             Ok(index) => {
                 let (version, source_fingerprint, summaries) = E::index_parts(index);
@@ -399,7 +415,7 @@ impl<E: MarkdownEntry> MarkdownStore<E> {
                 ErrorLog::record(&format!(
                     "{} index {} is corrupt; rebuilding from markdown: {e}",
                     E::NAME,
-                    self.index_path().display()
+                    index_path.display()
                 ));
                 Ok(None)
             }
@@ -440,7 +456,7 @@ fn path_is_genuinely_missing(path: &Path) -> Result<bool> {
     Ok(false)
 }
 
-fn ensure_not_symlink(path: &Path) -> Result<()> {
+pub(crate) fn ensure_not_symlink(path: &Path) -> Result<()> {
     anyhow::ensure!(
         !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
         "failed to read {}: refusing to follow symlink",

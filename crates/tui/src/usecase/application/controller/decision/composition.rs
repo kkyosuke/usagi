@@ -2,6 +2,37 @@
 use super::{
     AppKey, DecisionEditor, Effect, SafeError, SafeMessage, UserDecisionAnswer, WorkspaceId,
 };
+use unicode_segmentation::UnicodeSegmentation;
+use usagi_core::domain::presentation_text::presentation_character_is_safe;
+
+pub(super) fn sanitize_decision_text(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', " ")
+        .chars()
+        .filter(|c| *c == '\n' || presentation_character_is_safe(*c))
+        .collect()
+}
+
+pub(super) fn push_decision_char(target: &mut String, ch: char) {
+    if ch == '\r' || ch == '\n' {
+        target.push('\n');
+    } else if ch == '\t' {
+        target.push(' ');
+    } else if presentation_character_is_safe(ch) {
+        target.push(ch);
+    }
+}
+
+pub(super) fn pop_decision_grapheme(target: &mut String) {
+    target.truncate(
+        target
+            .grapheme_indices(true)
+            .next_back()
+            .map_or(0, |(index, _)| index),
+    );
+}
 
 pub(super) fn answer_comment(editor: &DecisionEditor) -> Option<String> {
     (editor.decision.allow_comment && !editor.comment.trim().is_empty())
@@ -57,11 +88,9 @@ pub(super) fn move_input(editor: &mut DecisionEditor, forward: bool) {
 
 pub(super) fn edit_comment(editor: &mut DecisionEditor, key: &AppKey) -> bool {
     match key {
-        AppKey::Char(ch) => editor.comment.push(*ch),
-        AppKey::Paste(text) => editor.comment.push_str(text),
-        AppKey::Backspace => {
-            editor.comment.pop();
-        }
+        AppKey::Char(ch) => push_decision_char(&mut editor.comment, *ch),
+        AppKey::Paste(text) => editor.comment.push_str(&sanitize_decision_text(text)),
+        AppKey::Backspace => pop_decision_grapheme(&mut editor.comment),
         _ => return false,
     }
     editor.scroll_offset = None;
@@ -82,10 +111,13 @@ fn valid_answer(editor: &mut DecisionEditor, answer: &UserDecisionAnswer) -> boo
         .validate_answer(answer, chrono::Utc::now())
         .is_err()
     {
+        let message = if matches!(answer, UserDecisionAnswer::Freeform { .. }) {
+            "freeform answers must be at most 16384 UTF-8 bytes without control characters."
+        } else {
+            "select a valid answer; comments must be at most 2048 UTF-8 bytes without control characters."
+        };
         editor.error = Some(SafeError {
-            message: SafeMessage::new(
-                "select a valid answer; comments must be at most 2048 UTF-8 bytes without control characters.",
-            ),
+            message: SafeMessage::new(message),
             error_id: "decision-invalid-answer".into(),
         });
         return false;

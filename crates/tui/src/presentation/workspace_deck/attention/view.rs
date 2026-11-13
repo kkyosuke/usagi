@@ -107,6 +107,11 @@ fn append_items(layout: &mut Layout, list: &AttentionList, capacity: usize) {
     };
     let count = (available / layout.item_height).max(1);
     let selected = list.index(&layout.items);
+    let has_selection = layout.items.get(selected).is_some_and(|item| {
+        list.selected
+            .as_ref()
+            .is_none_or(|selected| *selected == item.identity)
+    });
     let (start, end) = modal::list_window(layout.items.len(), selected, count);
     if !layout.compact && start > 0 {
         layout.body.push(modal::caption(&format!("↑ {start} more")));
@@ -119,7 +124,8 @@ fn append_items(layout: &mut Layout, list: &AttentionList, capacity: usize) {
     for index in start..end {
         let item = &layout.items[index];
         let top = layout.body.len();
-        let style = if index == selected {
+        let is_selected = has_selection && index == selected;
+        let style = if is_selected {
             role.style().bold()
         } else {
             role.style()
@@ -135,7 +141,7 @@ fn append_items(layout: &mut Layout, list: &AttentionList, capacity: usize) {
         };
         layout.body.push(format!(
             "  {} {}",
-            modal::selection_marker(index == selected),
+            modal::selection_marker(is_selected),
             widgets::clip_to_width(
                 &highlight(&action, &list.filter, style),
                 layout.inner.saturating_sub(4)
@@ -150,7 +156,7 @@ fn append_items(layout: &mut Layout, list: &AttentionList, capacity: usize) {
                 )
             ));
         }
-        let reason_style = if index == selected {
+        let reason_style = if is_selected {
             Style::new()
         } else {
             Style::new().dim()

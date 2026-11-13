@@ -640,7 +640,6 @@ pub enum SessionAction {
     List,
     Status,
     Overview,
-    Setup,
     Prompt,
     Complete,
     Pr,

@@ -121,24 +121,37 @@ pub fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     // `LineStart` back to the reserved `+ new session` action (IME-safe),
     // and `key_to_terminal_bytes` still forwards U+0001 / U+0005 to a focused
     // shell. `Home` / `End` carry the same split without the control modifier.
-    if (key.modifiers.control && key.code == KeyCode::Char('a'))
-        || key.code == KeyCode::Char('\u{1}')
+    let ctrl_only = key.modifiers.control
+        && !key.modifiers.shift
+        && !key.modifiers.alt
+        && !key.modifiers.super_
+        && !key.modifiers.hyper
+        && !key.modifiers.meta;
+    let plain_or_ctrl = key.modifiers == Modifiers::default() || ctrl_only;
+    if (ctrl_only && key.code == KeyCode::Char('a'))
+        || (plain_or_ctrl && key.code == KeyCode::Char('\u{1}'))
     {
         return Key::LineStart;
     }
-    if (key.modifiers.control && key.code == KeyCode::Char('e'))
-        || key.code == KeyCode::Char('\u{5}')
+    if (ctrl_only && key.code == KeyCode::Char('e'))
+        || (plain_or_ctrl && key.code == KeyCode::Char('\u{5}'))
     {
         return Key::LineEnd;
     }
     // Shift+motion extends a selection in the focused input; a live shell still
     // receives movement via `key_to_terminal_bytes`. Handle these before the
     // generic modified-chord passthrough below swallows the Shift.
+    let shift_only = key.modifiers.shift
+        && !key.modifiers.control
+        && !key.modifiers.alt
+        && !key.modifiers.super_
+        && !key.modifiers.hyper
+        && !key.modifiers.meta;
     match key.code {
-        KeyCode::Left if key.modifiers.shift => return Key::SelectLeft,
-        KeyCode::Right if key.modifiers.shift => return Key::SelectRight,
-        KeyCode::Home if key.modifiers.shift => return Key::SelectHome,
-        KeyCode::End if key.modifiers.shift => return Key::SelectEnd,
+        KeyCode::Left if shift_only => return Key::SelectLeft,
+        KeyCode::Right if shift_only => return Key::SelectRight,
+        KeyCode::Home if shift_only => return Key::SelectHome,
+        KeyCode::End if shift_only => return Key::SelectEnd,
         _ => {}
     }
     // The live classifier has already encoded the original terminal input.
@@ -147,12 +160,6 @@ pub fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
     // Crossterm reports Shift even though `Char` already carries the resulting
     // uppercase (or shifted-symbol) Unicode scalar.  It is text input, not an
     // opaque terminal chord, so pass it to management forms normally.
-    let shift_only = key.modifiers.shift
-        && !key.modifiers.control
-        && !key.modifiers.alt
-        && !key.modifiers.super_
-        && !key.modifiers.hyper
-        && !key.modifiers.meta;
     if key.modifiers != Modifiers::default()
         && !(shift_only && matches!(key.code, KeyCode::Char(_)))
     {
@@ -181,5 +188,144 @@ pub fn passthrough_key(input: &LiveInput, bytes: Vec<u8>) -> Key {
         KeyCode::Escape => Key::Escape,
         KeyCode::Char(ch) => Key::Char(ch),
         _ => Key::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::usecase::terminal_input::KeyEvent;
+
+    #[test]
+    fn line_edge_and_selection_keys_require_exact_ctrl_or_shift_modifiers() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            passthrough_key(
+                &LiveInput::Key(KeyEvent::new(KeyCode::Char('a'), ctrl, KeyEventKind::Press)),
+                vec![1],
+            ),
+            Key::LineStart
+        );
+        assert_eq!(
+            passthrough_key(
+                &LiveInput::Key(KeyEvent::new(KeyCode::Char('e'), ctrl, KeyEventKind::Press)),
+                vec![5],
+            ),
+            Key::LineEnd
+        );
+        for extra in [
+            Modifiers {
+                control: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                control: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                control: true,
+                super_: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                control: true,
+                hyper: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                control: true,
+                meta: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert!(matches!(
+                passthrough_key(
+                    &LiveInput::Key(KeyEvent::new(
+                        KeyCode::Char('a'),
+                        extra,
+                        KeyEventKind::Press,
+                    )),
+                    vec![1],
+                ),
+                Key::Passthrough(_)
+            ));
+            assert!(matches!(
+                passthrough_key(
+                    &LiveInput::Key(KeyEvent::new(
+                        KeyCode::Char('e'),
+                        extra,
+                        KeyEventKind::Press,
+                    )),
+                    vec![5],
+                ),
+                Key::Passthrough(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn selection_keys_require_exact_shift_modifier() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            passthrough_key(
+                &LiveInput::Key(KeyEvent::new(KeyCode::Left, shift, KeyEventKind::Press)),
+                b"\x1b[1;2D".to_vec(),
+            ),
+            Key::SelectLeft
+        );
+        for extra in [
+            Modifiers {
+                shift: true,
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                shift: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                shift: true,
+                super_: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                shift: true,
+                hyper: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                shift: true,
+                meta: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert!(matches!(
+                passthrough_key(
+                    &LiveInput::Key(KeyEvent::new(KeyCode::Left, extra, KeyEventKind::Press)),
+                    b"\x1b[1;6D".to_vec(),
+                ),
+                Key::Passthrough(_)
+            ));
+            assert!(matches!(
+                passthrough_key(
+                    &LiveInput::Key(KeyEvent::new(
+                        KeyCode::Char('A'),
+                        extra,
+                        KeyEventKind::Press,
+                    )),
+                    b"A".to_vec(),
+                ),
+                Key::Passthrough(_)
+            ));
+        }
     }
 }

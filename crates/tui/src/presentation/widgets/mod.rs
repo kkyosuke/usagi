@@ -194,10 +194,9 @@ pub fn display_width(text: &str) -> usize {
             }
             continue;
         }
-        if !presentation_character_is_safe(ch) {
-            continue;
+        if presentation_character_is_safe(ch) {
+            width += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
-        width += UnicodeWidthChar::width(ch).unwrap_or(0);
     }
     width
 }

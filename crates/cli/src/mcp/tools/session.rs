@@ -533,7 +533,7 @@ impl Tool for SessionPrompt {
         "認証済み caller が作成した実行中の session agent に追加指示を送る。name と prompt は必須。live（既定）は live agent が無ければ失敗し、agent を起動したい場合は session_dispatch を使う。queue は次回起動まで待たせることを意図した場合だけ使う。"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string","minLength":1},"mode":{"type":"string","enum":["queue","live"]},"agent_cli":{"type":"string"},"model":{"type":"string"}},"required":["name","prompt"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"name":{"type":"string"},"prompt":{"type":"string","minLength":1},"mode":{"type":"string","enum":["queue","live"]}},"required":["name","prompt"],"additionalProperties":false}"#
     }
 }
 

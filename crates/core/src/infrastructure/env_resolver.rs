@@ -447,6 +447,7 @@ mod real {
                     stderr,
                     None,
                     self.cleanup_grace,
+                    false,
                 );
             }
             self.group_closed = true;

@@ -47,12 +47,13 @@ use agent::{
 use workers::{
     AgentReadiness, AgentReadinessProbe, AutomaticOrphanCleanup, ClosePrProjectionOnExit,
     ConnectionCleanup, ConnectionCleanupInbox, DaemonBackgroundWorkers, InitialWorkspaceFence,
-    OrphanCleanupPass, ReadinessBounds, ShutdownOnIpcWorkerExit, ShutdownOnUnexpectedWorkerExit,
-    ShutdownOnWorkerPanic, ShutdownPipe, SignalShutdown, SigtermTerminator, SystemAgentReadiness,
-    retain_client_worker, spawn_critical_worker, spawn_orphan_cleanup_worker,
-    spawn_pr_refresh_worker, spawn_tenant_retire_worker, start_connection_cleanup_worker,
-    start_draining_collection_worker, start_lock_watchdog, start_pr_projection_worker,
-    start_retention_gc_worker, start_session_teardown_worker,
+    OrphanCleanupPass, ReadinessBounds, ReadinessPolicy, ShutdownOnIpcWorkerExit,
+    ShutdownOnUnexpectedWorkerExit, ShutdownOnWorkerPanic, ShutdownPipe, SignalShutdown,
+    SigtermTerminator, SystemAgentReadiness, readiness_verdict, retain_client_worker,
+    spawn_critical_worker, spawn_orphan_cleanup_worker, spawn_pr_refresh_worker,
+    spawn_tenant_retire_worker, start_connection_cleanup_worker, start_draining_collection_worker,
+    start_lock_watchdog, start_pr_projection_worker, start_retention_gc_worker,
+    start_session_teardown_worker,
 };
 #[cfg(test)]
 use workers::{
@@ -634,9 +635,9 @@ fn readiness_from_observation(observation: &ChildObservation) -> AgentReadiness 
     match observation {
         // Status commands need not print a version or other public detail.
         ChildObservation::Success(_) | ChildObservation::EmptyOutput => AgentReadiness::Ready,
-        ChildObservation::SpawnFailed
-        | ChildObservation::ExitFailure
-        | ChildObservation::TimedOut
+        ChildObservation::SpawnFailed => AgentReadiness::Missing,
+        ChildObservation::ExitFailure => AgentReadiness::SignedOut,
+        ChildObservation::TimedOut
         | ChildObservation::OutputTooLarge
         | ChildObservation::InvalidOutput
         | ChildObservation::ObservationFailed => AgentReadiness::Unavailable,
@@ -3645,6 +3646,73 @@ pub(crate) fn diagnostic_client(
         policy.timeout_ms,
     )
     .map_err(|error| ClientError::Unavailable(error.to_string()))
+}
+
+/// Repairs non-lifecycle state (`0700` data/daemon directories, `0600` settings
+/// file, and stale crashed-daemon endpoint locator) without starting, stopping,
+/// or restarting any daemon or Agent process.
+pub(crate) fn repair_non_lifecycle_doctor_state(data_dir: &Path) {
+    repair_doctor_data_dir(data_dir);
+    let daemon_dir = data_dir.join("daemon");
+    if daemon_dir.is_dir()
+        && !current_daemon_is_reachable(data_dir)
+        && let Ok(_bootstrap) = lock_private_exclusive(
+            &daemon_dir.join("bootstrap.lock"),
+            "bootstrap lock",
+            PrivateLockModePolicy::OwnerLegacy0644,
+            PrivateLockWait::BOOTSTRAP,
+        )
+    {
+        let _ = recover_stale_client_endpoint(data_dir);
+        let absence = FileInstanceLock {
+            path: daemon_dir.join("daemon.lock"),
+            held: RefCell::new(None),
+        };
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon_dir.join("daemon.json"),
+        });
+        if absence.acquire().unwrap_or(false) && store.load().ok().flatten().is_none() {
+            let _ = usagi_daemon::infrastructure::unix_transport::remove_current_locator(data_dir);
+        }
+    }
+}
+
+pub(crate) fn repair_doctor_data_dir(data_dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        let euid = unsafe { libc::geteuid() };
+        for dir in [data_dir, &data_dir.join("daemon")] {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
+                .open(dir)
+                && file
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_dir() && meta.uid() == euid)
+            {
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let settings_path = data_dir.join("settings.json");
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&settings_path)
+            && file
+                .metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.uid() == euid && meta.nlink() == 1)
+        {
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    if data_dir.is_dir() {
+        let _ = ensure_private_dir(data_dir);
+    }
+    let daemon_dir = data_dir.join("daemon");
+    if daemon_dir.is_dir() {
+        let _ = ensure_private_dir(&daemon_dir);
+    }
 }
 
 /// Cross-process lifecycle custody for one managed update synchronization.
