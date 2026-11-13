@@ -140,7 +140,8 @@ fn reap_children(state: &ReaperState, lifetime: &Weak<()>) {
                         }
                     }
                     Err(_) => {
-                        if let Some(sender) = children[index].completion.take() {
+                        let mut tracked = children.swap_remove(index);
+                        if let Some(sender) = tracked.completion.take() {
                             let _ = sender.send(HelperExit::Unconfirmed);
                         }
                     }

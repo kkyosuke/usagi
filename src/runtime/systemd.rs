@@ -87,7 +87,39 @@ mod real_io {
     }
 
     fn write_file(path: &Path, contents: String) -> std::io::Result<()> {
-        std::fs::write(path, contents)
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        if let Ok(meta) = std::fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refusing to overwrite symlinked systemd unit",
+            ));
+        }
+        let temp = path.with_extension(format!("service.tmp.{}", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&temp)?;
+        if let Err(error) = file.write_all(&contents.into_bytes()) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+        if let Err(error) = file.sync_all() {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+        drop(file);
+        if let Err(error) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn remove_file(path: &Path) -> std::io::Result<()> {
@@ -231,7 +263,7 @@ fn render_with_trust_root(
          [Install]\n\
          WantedBy=default.target\n",
         specifier_safe(workspace),
-        quoted(executable),
+        quoted(executable).replace('$', "$$"),
         assignment(DATA_DIR_ENV, base),
         assignment(RUNTIME_MODE_ENV, data_home.mode().as_env_value()),
         specifier_safe(stderr_log)
@@ -239,8 +271,16 @@ fn render_with_trust_root(
 }
 
 fn utf8<'a>(path: &'a Path, message: &str) -> std::io::Result<&'a str> {
-    path.to_str()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, message.to_owned()))
+    let text = path
+        .to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, message.to_owned()))?;
+    if text.chars().any(char::is_control) || text.ends_with('\\') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            message.to_owned(),
+        ));
+    }
+    Ok(text)
 }
 
 /// Escape a value systemd reads literally to end of line
@@ -713,5 +753,30 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::Other
         );
+    }
+
+    #[test]
+    fn rendered_unit_rejects_control_characters_and_trailing_backslash() {
+        for bad in ["/opt/usagi\ninjected=1", "/opt/usagi\\"] {
+            assert_eq!(
+                render(
+                    Path::new(bad),
+                    Path::new("/tmp/log"),
+                    &home(),
+                    Path::new(WORKSPACE),
+                )
+                .unwrap_err()
+                .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        let unit = render(
+            Path::new("/opt/$usagi/bin"),
+            Path::new("/tmp/log"),
+            &home(),
+            Path::new(WORKSPACE),
+        )
+        .unwrap();
+        assert!(unit.contains("ExecStart=\"/opt/$$usagi/bin\" daemon serve"));
     }
 }

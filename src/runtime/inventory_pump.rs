@@ -394,14 +394,16 @@ fn lock(state: &Mutex<InventoryState>) -> std::sync::MutexGuard<'_, InventorySta
 /// Runs every due observation once. Returns nothing to the caller but the state
 /// updates; the lock is never held across a `fetch` call, so the render thread's
 /// watch and drain never wait on IO.
-fn run_round<F>(state: &Mutex<InventoryState>, now: Duration, fetch: &mut F)
+fn run_round<N, F>(state: &Mutex<InventoryState>, mut now: N, fetch: &mut F)
 where
+    N: FnMut() -> Duration,
     F: FnMut(&InventoryJob) -> Result<Vec<TerminalInventoryEntry>, ()>,
 {
-    let jobs = lock(state).begin_round(now);
+    let jobs = lock(state).begin_round(now());
     for job in jobs {
-        let result = fetch(&job);
-        lock(state).apply(&job, result, now);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fetch(&job)))
+            .unwrap_or(Err(()));
+        lock(state).apply(&job, result, now());
     }
 }
 
@@ -447,7 +449,7 @@ impl TerminalInventoryPump {
         let thread_stop = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
-                run_round(&thread_shared.state, started.elapsed(), &mut fetch);
+                run_round(&thread_shared.state, || started.elapsed(), &mut fetch);
                 let interval = lock(&thread_shared.state).next_wait(started.elapsed());
                 // Shutdown needs no second check here: dropping the pump sets the
                 // stop flag *and* signals, so a wait started after it returns at
@@ -947,5 +949,23 @@ mod tests {
             pump.take_exited(8),
             [] as [usagi_core::domain::id::TerminalRef; 0]
         );
+    }
+
+    #[test]
+    fn run_round_uses_post_fetch_timestamp_and_recovers_from_panicking_fetch() {
+        let state = Mutex::new(InventoryState::default());
+        let background = terminal();
+        lock(&state).watch(1, std::slice::from_ref(&background), ms(0));
+        let mut ticks = [ms(0), ms(300)].into_iter();
+        let mut fetch = |_job: &InventoryJob| -> Result<Vec<TerminalInventoryEntry>, ()> {
+            panic!("simulated fetch panic");
+        };
+        run_round(
+            &state,
+            || ticks.next().unwrap_or_else(|| ms(300)),
+            &mut fetch,
+        );
+        assert_eq!(lock(&state).metrics().failures, 1);
+        assert_eq!(lock(&state).next_wait(ms(300)), BACKOFF_BASE);
     }
 }

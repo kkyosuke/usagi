@@ -143,7 +143,7 @@ mod action_io {
                     // `bootstrap.lock`; cold-starting here would both fail
                     // that sandbox boundary and target a daemon that cannot
                     // know the parent runtime being claimed.
-                    McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp())
+                    McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp(), None)
                         .map(|client| Box::new(client) as Box<dyn DaemonClient>),
                     // A manually started MCP server remains a user entry
                     // surface and therefore keeps daemon autostart.
@@ -234,7 +234,7 @@ mod action_io {
                 // `PermissionDenied` there and every hook would fall through to the
                 // broker and report `daemon transport is unavailable`. A per-tool-call
                 // hook must not start a daemon, and must not pay bootstrap latency.
-                match daemon::attached_client(ClientPolicy::cli()) {
+                match daemon::attached_client(ClientPolicy::cli(), None) {
                     Ok(mut client) => match client.request(request) {
                         Ok(_) => Ok(ExitCode::SUCCESS),
                         Err(error) => {
@@ -270,7 +270,7 @@ mod action_io {
                 // `PermissionDenied` there and every hook would fall through to the
                 // broker and report `daemon transport is unavailable`. A per-tool-call
                 // hook must not start a daemon, and must not pay bootstrap latency.
-                match daemon::attached_client(ClientPolicy::cli()) {
+                match daemon::attached_client(ClientPolicy::cli(), None) {
                     Ok(mut client) => match usagi_cli::cli::hooks::agent_phase::report_to_daemon(
                         &mut client,
                         request,

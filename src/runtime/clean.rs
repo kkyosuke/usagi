@@ -734,13 +734,19 @@ const HELPER_REAP_POLLS: usize = 100;
 /// stop a workspace cleanup.
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=helper_process_listing_is_read_conservatively
 fn discover_processes(daemon_dir: &Path) -> Vec<ObservedProcess> {
-    let Ok(listing) = std::process::Command::new("ps")
-        .args(["-A", "-o", PS_FORMAT])
-        .output()
-    else {
+    let mut command = std::process::Command::new("ps");
+    command.args(["-A", "-o", PS_FORMAT]);
+    let Ok(listing) = usagi_core::infrastructure::bounded_process::execute_command_output(
+        command,
+        usagi_core::infrastructure::bounded_process::ChildPolicy {
+            timeout: std::time::Duration::from_secs(5),
+            terminate_grace: std::time::Duration::from_millis(200),
+            output_limit: 4 * 1024 * 1024,
+        },
+    ) else {
         return Vec::new();
     };
-    if !listing.status.success() {
+    if !listing.success {
         return Vec::new();
     }
     let accounted = accounted_processes(daemon_dir);

@@ -152,11 +152,14 @@ mod tests {
             }
         }
         let command = super::super::tui::platform_open_command("/fixture/report.html").unwrap();
-        assert!(
-            command
-                .get_args()
-                .any(|argument| argument == "/fixture/report.html")
-        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args, vec!["--", "/fixture/report.html"]);
+        for invalid in ["", "-a", "--help", "https://example.com\ninjected"] {
+            assert!(super::super::tui::platform_open_command(invalid).is_err());
+        }
         wait_until(|| reaper.tracked() == Some(0));
     }
 

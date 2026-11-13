@@ -212,6 +212,7 @@ mod tests {
             lane: LaneConnection {
                 client: Some(Box::new(Replies(replies.into()))),
                 cold_start_budget: 0,
+                workspace_root: None,
             },
             workspace: ClientWorkspace::Selected {
                 root: "/workspace".into(),
@@ -243,6 +244,7 @@ mod tests {
                 lane: LaneConnection {
                     client: None,
                     cold_start_budget: 0,
+                    workspace_root: None,
                 },
                 ..
             }
