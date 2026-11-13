@@ -55,10 +55,11 @@ mod action_io {
     #![coverage(off)]
 
     use super::{
-        AppInfo, ClientPolicy, DaemonClient, DaemonReply, EntryScreen, ExitCode,
-        LauncherPolicyInputs, McpDaemonRoute, RunOutcome, TuiRequest, Write, claude_sandbox, clean,
-        daemon, execute_self_update, exit_code, guard_workspace, managed_update_sync_exit_code,
-        mcp_daemon_route, tui, write_client_error, write_daemon_outcome,
+        AppInfo, ClientPolicy, DaemonClient, EntryScreen, ExitCode, LauncherPolicyInputs,
+        McpDaemonRoute, RunOutcome, TuiRequest, Write, claude_sandbox, clean, daemon,
+        doctor_exit_code, execute_self_update, exit_code, guard_workspace,
+        managed_update_sync_exit_code, mcp_daemon_route, resolve_mcp_child_claim, tui,
+        write_client_error, write_daemon_outcome,
     };
 
     #[allow(clippy::too_many_lines)] // 1 つの決定表を分けると読み手が追う状態が増えるため、この関数はまとめて置く。
@@ -71,17 +72,20 @@ mod action_io {
         match outcome {
             RunOutcome::Exit(code) => Ok(exit_code(code)),
             RunOutcome::LaunchTui(TuiRequest::Welcome) => {
-                tui::launch(out, info, &EntryScreen::Welcome).map(|()| ExitCode::SUCCESS)
+                tui::launch(out, info, &EntryScreen::Welcome, false)?;
+                Ok(ExitCode::SUCCESS)
             }
             RunOutcome::LaunchTui(TuiRequest::Workspace { path }) => {
                 let path = tui::resolve_workspace_path(&path.unwrap_or(std::env::current_dir()?))?;
-                tui::launch(out, info, &EntryScreen::Workspace { path }).map(|()| ExitCode::SUCCESS)
+                tui::launch(out, info, &EntryScreen::Workspace { path }, false)?;
+                Ok(ExitCode::SUCCESS)
             }
             RunOutcome::LaunchTui(TuiRequest::Config) => {
-                tui::launch(out, info, &EntryScreen::Config).map(|()| ExitCode::SUCCESS)
+                tui::launch(out, info, &EntryScreen::Config, false)?;
+                Ok(ExitCode::SUCCESS)
             }
             RunOutcome::LaunchTui(TuiRequest::Doctor { fix }) => {
-                tui::launch_doctor(out, info, fix).map(|()| ExitCode::SUCCESS)
+                Ok(doctor_exit_code(tui::launch_doctor(out, info, fix)?))
             }
             RunOutcome::LaunchDaemon(command) => {
                 daemon::run(out, command, info, None).map(|()| ExitCode::SUCCESS)
@@ -131,51 +135,42 @@ mod action_io {
                 let stdin = std::io::stdin();
                 let workspace_root =
                     std::env::var_os(usagi_core::infrastructure::paths::WORKSPACE_ROOT_ENV);
-                let client: Result<Box<dyn DaemonClient>, _> =
-                    match mcp_daemon_route(workspace_root.as_deref()) {
-                        // This child was provisioned by the daemon whose live
-                        // Agent runtime it must claim. It runs in a sandbox that
-                        // deliberately cannot write the data home's
-                        // `bootstrap.lock`; cold-starting here would both fail
-                        // that sandbox boundary and target a daemon that cannot
-                        // know the parent runtime being claimed.
-                        McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp())
-                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
-                        // A manually started MCP server remains a user entry
-                        // surface and therefore keeps daemon autostart.
-                        McpDaemonRoute::Bootstrap => daemon::policy_client(ClientPolicy::mcp())
-                            .map(|client| Box::new(client) as Box<dyn DaemonClient>),
-                    };
+                let route = mcp_daemon_route(workspace_root.as_deref());
+                let client: Result<Box<dyn DaemonClient>, _> = match route {
+                    // This child was provisioned by the daemon whose live
+                    // Agent runtime it must claim. It runs in a sandbox that
+                    // deliberately cannot write the data home's
+                    // `bootstrap.lock`; cold-starting here would both fail
+                    // that sandbox boundary and target a daemon that cannot
+                    // know the parent runtime being claimed.
+                    McpDaemonRoute::Attached => daemon::attached_client(ClientPolicy::mcp(), None)
+                        .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                    // A manually started MCP server remains a user entry
+                    // surface and therefore keeps daemon autostart.
+                    McpDaemonRoute::Bootstrap => daemon::policy_client(ClientPolicy::mcp())
+                        .map(|client| Box::new(client) as Box<dyn DaemonClient>),
+                };
                 match client {
                     Ok(mut client) => {
-                        let (credential, store_root, memory_root) = match client
-                            .request(usagi_core::infrastructure::ipc::DaemonRequest::McpChildClaim)
-                        {
-                            Ok(DaemonReply::Ok(body)) => (
-                                body.get("credential")
-                                    .and_then(serde_json::Value::as_str)
-                                    .filter(|value| !value.is_empty())
-                                    .map(str::to_owned),
-                                body.get("store_root")
-                                    .and_then(serde_json::Value::as_str)
-                                    .filter(|value| !value.is_empty())
-                                    .map(std::path::PathBuf::from),
-                                body.get("memory_root")
-                                    .and_then(serde_json::Value::as_str)
-                                    .filter(|value| !value.is_empty())
-                                    .map(std::path::PathBuf::from),
-                            ),
-                            _ => (None, None, None),
-                        };
-                        if let Some(credential) = credential {
-                            if let Some(store_root) = store_root {
-                                if let Some(memory_root) = memory_root {
+                        let claim =
+                            match resolve_mcp_child_claim(client.request(
+                                usagi_core::infrastructure::ipc::DaemonRequest::McpChildClaim,
+                            )) {
+                                Ok(claim) => claim,
+                                Err(message) => {
+                                    writeln!(err, "{message}")?;
+                                    return Ok(ExitCode::FAILURE);
+                                }
+                            };
+                        if let Some(claim) = claim {
+                            if let Some(store_root) = claim.store_root {
+                                if let Some(memory_root) = claim.memory_root {
                                     usagi_cli::mcp::serve_with_client_and_caller_at_roots(
                                         stdin.lock(),
                                         out,
                                         info.version,
                                         &mut *client,
-                                        &credential,
+                                        &claim.credential,
                                         &store_root,
                                         &memory_root,
                                     )
@@ -185,7 +180,7 @@ mod action_io {
                                         out,
                                         info.version,
                                         &mut *client,
-                                        &credential,
+                                        &claim.credential,
                                         &store_root,
                                     )
                                 }
@@ -198,7 +193,7 @@ mod action_io {
                                     out,
                                     info.version,
                                     &mut *client,
-                                    &credential,
+                                    &claim.credential,
                                 )
                             }
                         } else {
@@ -239,7 +234,7 @@ mod action_io {
                 // `PermissionDenied` there and every hook would fall through to the
                 // broker and report `daemon transport is unavailable`. A per-tool-call
                 // hook must not start a daemon, and must not pay bootstrap latency.
-                match daemon::attached_client(ClientPolicy::cli()) {
+                match daemon::attached_client(ClientPolicy::cli(), None) {
                     Ok(mut client) => match client.request(request) {
                         Ok(_) => Ok(ExitCode::SUCCESS),
                         Err(error) => {
@@ -275,7 +270,7 @@ mod action_io {
                 // `PermissionDenied` there and every hook would fall through to the
                 // broker and report `daemon transport is unavailable`. A per-tool-call
                 // hook must not start a daemon, and must not pay bootstrap latency.
-                match daemon::attached_client(ClientPolicy::cli()) {
+                match daemon::attached_client(ClientPolicy::cli(), None) {
                     Ok(mut client) => match usagi_cli::cli::hooks::agent_phase::report_to_daemon(
                         &mut client,
                         request,
@@ -394,6 +389,9 @@ fn update_installer_command(select_version: bool, restart_agents: bool) -> std::
         .arg("--")
         .current_dir("/")
         .env("USAGI_MANAGED_UPDATE", "1")
+        .env_remove("BASH_ENV")
+        .env_remove("ENV")
+        .env_remove("USAGI_VERSION")
         .stdin(Stdio::piped())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -640,6 +638,68 @@ fn validate_launcher_path(
     Ok(())
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+const fn doctor_exit_code(healthy: bool) -> ExitCode {
+    if healthy {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct McpCallerClaim {
+    credential: String,
+    store_root: Option<PathBuf>,
+    memory_root: Option<PathBuf>,
+}
+
+fn non_empty_string_field(body: &serde_json::Value, key: &str) -> Option<String> {
+    let value = body.get(key)?.as_str()?;
+    (!value.is_empty()).then_some(value.to_owned())
+}
+
+fn resolve_mcp_child_claim(
+    reply: Result<DaemonReply, ClientError>,
+) -> Result<Option<McpCallerClaim>, String> {
+    match reply {
+        Ok(DaemonReply::Ok(body)) => match non_empty_string_field(&body, "credential") {
+            Some(credential) => Ok(Some(McpCallerClaim {
+                credential,
+                store_root: non_empty_string_field(&body, "store_root").map(PathBuf::from),
+                memory_root: non_empty_string_field(&body, "memory_root").map(PathBuf::from),
+            })),
+            None => Err("mcp claim failed: daemon did not issue a caller credential".to_owned()),
+        },
+        Ok(DaemonReply::Accepted { .. }) => {
+            Err("mcp claim failed: daemon did not confirm caller credential".to_owned())
+        }
+        Err(ClientError::Protocol(error))
+            if error.code == usagi_core::infrastructure::ipc::ErrorCode::OwnershipUnknown =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(format!("mcp claim failed: {error:?}")),
+    }
+}
+
 // daemon bootstrap の trusted environment で sandbox backend を一度だけ探索する。macOS は既定パスの
 // `sandbox-exec`、Linux は PATH 上の `bwrap` を canonical absolute path にする。Agent child は再探索しない。
 #[coverage(off)] // coverage: reason=real_io owner=root-cli expires=2027-01-31 tests=a_missing_backend_is_rejected_on_each_supported_platform
@@ -647,14 +707,22 @@ pub(crate) fn resolve_sandbox_backend(platform: Platform) -> Option<PathBuf> {
     match platform {
         Platform::MacOs => {
             let path = PathBuf::from("/usr/bin/sandbox-exec");
-            path.canonicalize().ok()
+            if is_executable_file(&path) {
+                path.canonicalize().ok()
+            } else {
+                None
+            }
         }
-        Platform::Linux => std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|directory| directory.join("bwrap"))
-                .find(|candidate| candidate.is_file())
-                .and_then(|candidate| candidate.canonicalize().ok())
-        }),
+        Platform::Linux => {
+            let paths = std::env::var_os("PATH")?;
+            for directory in std::env::split_paths(&paths) {
+                let candidate = directory.join("bwrap");
+                if is_executable_file(&candidate) {
+                    return candidate.canonicalize().ok();
+                }
+            }
+            None
+        }
         Platform::Unsupported => None,
     }
 }
@@ -1209,6 +1277,13 @@ mod tests {
             environment.get(std::ffi::OsStr::new("USAGI_MANAGED_UPDATE")),
             Some(&Some(std::ffi::OsStr::new("1")))
         );
+        for removed in ["BASH_ENV", "ENV", "USAGI_VERSION"] {
+            assert_eq!(
+                environment.get(std::ffi::OsStr::new(removed)),
+                Some(&None),
+                "{removed} must be cleared"
+            );
+        }
         let no_daemon = update_installer_command(false, false);
         assert_eq!(no_daemon.get_args().collect::<Vec<_>>(), ["-s", "--"]);
         assert!(no_daemon.get_current_dir().is_some());
@@ -1217,6 +1292,26 @@ mod tests {
             restart.get_args().collect::<Vec<_>>(),
             ["-s", "--", "--select-version", "--restart-agents"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_file_check_requires_regular_file_with_execute_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!super::is_executable_file(&dir.path().join("missing")));
+        assert!(!super::is_executable_file(dir.path()));
+
+        let candidate = dir.path().join("bwrap");
+        std::fs::write(&candidate, "#!/bin/sh\n").expect("write candidate");
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod 0644");
+        assert!(!super::is_executable_file(&candidate));
+
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod 0755");
+        assert!(super::is_executable_file(&candidate));
     }
 
     fn verified_installer_request() -> InstallerRequest {
@@ -1428,5 +1523,52 @@ mod tests {
             "session list [busy]: another usagi process is establishing the daemon connection; try again\n"
         );
         assert!(!rendered.contains("unavailable"));
+    }
+
+    #[test]
+    fn doctor_exit_code_and_mcp_child_claim_resolution_are_fail_closed() {
+        use super::{McpCallerClaim, doctor_exit_code, resolve_mcp_child_claim};
+        use usagi_core::infrastructure::ipc::{ErrorCode, ProtocolError};
+
+        assert_eq!(doctor_exit_code(true), ExitCode::SUCCESS);
+        assert_eq!(doctor_exit_code(false), ExitCode::FAILURE);
+
+        let claimed = resolve_mcp_child_claim(Ok(DaemonReply::Ok(serde_json::json!({
+            "credential": "secret-token",
+            "store_root": "/tmp/store",
+            "memory_root": "/tmp/memory",
+        }))))
+        .unwrap();
+        assert_eq!(
+            claimed,
+            Some(McpCallerClaim {
+                credential: "secret-token".to_owned(),
+                store_root: Some(PathBuf::from("/tmp/store")),
+                memory_root: Some(PathBuf::from("/tmp/memory")),
+            })
+        );
+
+        let missing_cred = resolve_mcp_child_claim(Ok(DaemonReply::Ok(serde_json::json!({
+            "credential": "",
+        }))));
+        assert!(missing_cred.is_err());
+
+        let accepted = resolve_mcp_child_claim(Ok(DaemonReply::Accepted {
+            operation_id: "op-1".into(),
+            revision: 1,
+            body: serde_json::json!(null),
+        }));
+        assert!(accepted.is_err());
+
+        let unowned = resolve_mcp_child_claim(Err(ClientError::Protocol(ProtocolError::new(
+            ErrorCode::OwnershipUnknown,
+            "unowned",
+        ))))
+        .unwrap();
+        assert_eq!(unowned, None);
+
+        let transport_err =
+            resolve_mcp_child_claim(Err(ClientError::Unavailable("offline".to_owned())));
+        assert!(transport_err.is_err());
     }
 }

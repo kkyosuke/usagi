@@ -545,7 +545,48 @@ fn ansi_sequence(text: &str) -> (&str, usize) {
 /// Screen control belongs to usagi's terminal adapter. View text may only
 /// carry SGR styling through this single rendering boundary.
 fn is_renderable_escape(sequence: &str) -> bool {
-    sequence.starts_with("\u{1b}[") && sequence.ends_with('m')
+    let Some(params) = sequence
+        .strip_prefix("\u{1b}[")
+        .and_then(|rest| rest.strip_suffix('m'))
+    else {
+        return false;
+    };
+    params
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b';')
+        && !sgr_params_contain_conceal(params)
+}
+
+fn sgr_params_contain_conceal(params: &str) -> bool {
+    let mut parts = params.split(';');
+    while let Some(part) = parts.next() {
+        match part.parse::<u16>().ok() {
+            Some(8) => return true,
+            Some(38 | 48 | 58) => {
+                let mut lookahead = parts.clone();
+                match (
+                    lookahead.next(),
+                    lookahead.next(),
+                    lookahead.next(),
+                    lookahead.next(),
+                ) {
+                    (Some("5"), Some(palette), _, _) if palette.parse::<u8>().is_ok() => {
+                        let _ = parts.nth(1);
+                    }
+                    (Some("2"), Some(r), Some(g), Some(b))
+                        if r.parse::<u8>().is_ok()
+                            && g.parse::<u8>().is_ok()
+                            && b.parse::<u8>().is_ok() =>
+                    {
+                        let _ = parts.nth(3);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Reflect an ANSI SGR sequence in the state used for frame diffing and report
@@ -769,14 +810,20 @@ mod tests {
 
     #[test]
     fn set_line_drops_non_sgr_escapes_so_the_alternate_screen_survives() {
-        let frame = Frame::from_lines(10, 1, ["\u{1b}[?1049lok\u{1b}[31mred"]);
+        let frame = Frame::from_lines(
+            12,
+            1,
+            [
+                "\u{1b}[?1049l\u{1b}[>4;2m\u{1b}[8m\u{1b}[1;8mok\u{1b}[31mred\u{1b}[38;5;8m\u{1b}[38;2;8;8;8m\u{1b}[38;9;1m!",
+            ],
+        );
         let visible = (0..frame.width())
             .filter_map(|column| match frame.cell(0, column) {
                 Some(Cell::Glyph { scalar, .. }) => Some(*scalar),
                 Some(Cell::Empty | Cell::Continuation) | None => None,
             })
             .collect::<String>();
-        assert_eq!(visible, "okred");
+        assert_eq!(visible, "okred!");
 
         let rendered = FrameRenderer::new().render(frame);
         let text = rendered
@@ -786,7 +833,12 @@ mod tests {
             .collect::<String>();
 
         assert!(!text.contains("\u{1b}[?1049l"));
+        assert!(!text.contains("\u{1b}[>4;2m"));
+        assert!(!text.contains("\u{1b}[8m"));
+        assert!(!text.contains("\u{1b}[1;8m"));
         assert!(text.contains("\u{1b}[31m"));
+        assert!(text.contains("\u{1b}[38;5;8m"));
+        assert!(text.contains("\u{1b}[38;2;8;8;8m"));
     }
 
     #[test]
@@ -915,6 +967,19 @@ mod tests {
         assert_eq!(style, "");
         assert!(update_active_style(&mut style, "\u{1b}[m"));
         assert_eq!(style, "");
+
+        for rejected in [
+            "\u{1b}[8m",
+            "\u{1b}[1;8m",
+            "\u{1b}[8:0m",
+            "\u{1b}[38;2;8m",
+            "\u{1b}[38;5;;8m",
+            "\u{1b}[38;2;999;8;1m",
+        ] {
+            assert!(!update_active_style(&mut style, rejected), "{rejected:?}");
+        }
+        assert!(update_active_style(&mut style, "\u{1b}[38;5;8m"));
+        assert!(update_active_style(&mut style, "\u{1b}[38;2;8;8;8m"));
     }
 
     #[test]

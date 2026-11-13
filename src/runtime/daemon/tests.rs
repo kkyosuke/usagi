@@ -8041,11 +8041,13 @@ fn root_git_environment_overrides_untrusted_process_launch_configuration() {
         ("GIT_PAGER".to_owned(), "touch PWNED".to_owned()),
         ("GIT_EXTERNAL_DIFF".to_owned(), "touch".to_owned()),
     ]));
-    assert_eq!(environment["GIT_CONFIG_COUNT"], "5");
+    assert_eq!(environment["GIT_CONFIG_COUNT"], "6");
     assert_eq!(environment["GIT_CONFIG_KEY_0"], "core.fsmonitor");
     assert_eq!(environment["GIT_CONFIG_VALUE_0"], "false");
     assert_eq!(environment["GIT_CONFIG_KEY_1"], "core.hooksPath");
     assert_eq!(environment["GIT_CONFIG_VALUE_1"], "/dev/null");
+    assert_eq!(environment["GIT_CONFIG_KEY_5"], "extensions.worktreeConfig");
+    assert_eq!(environment["GIT_CONFIG_VALUE_5"], "false");
     assert_eq!(environment["GIT_PAGER"], "");
     assert_eq!(environment["GIT_EXTERNAL_DIFF"], "");
     assert_eq!(environment["GIT_OPTIONAL_LOCKS"], "0");
@@ -8276,6 +8278,14 @@ fn session_git_policy_anchors_authority_to_the_registered_worktree() {
             common.join("objects").canonicalize().unwrap(),
             common.join("refs/heads/usagi").canonicalize().unwrap(),
             common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+        ]
+    );
+    assert_eq!(
+        policy.read_only_roots,
+        [
+            worktree.join(".git").canonicalize().unwrap(),
+            git_dir.join("commondir").canonicalize().unwrap(),
+            git_dir.join("gitdir").canonicalize().unwrap(),
         ]
     );
     assert!(
@@ -11637,12 +11647,16 @@ fn established_response_writer_covers_frame_and_transport_boundaries() {
 fn census_fence_tracks_every_admitted_connection_until_disconnect() {
     use usagi_daemon::presentation::ipc::ConnectionFence as _;
 
+    let temp = tempfile::tempdir().unwrap();
+    let agent = empty_agent_runtime(DispatchStore::new(temp.path()));
     let (cleanup, inbox) = connection_cleanup_channel();
     let connection = ConnectionId::new();
     let fence = CensusConnectionFence {
         inner: &usagi_daemon::presentation::ipc::UnfencedConnection,
         cleanup: cleanup.clone(),
         peer_pid: 41,
+        peer_ancestors: &[],
+        agent: Some(&agent),
     };
 
     fence
@@ -11653,6 +11667,19 @@ fn census_fence_tracks_every_admitted_connection_until_disconnect() {
         (BTreeSet::from([connection]), BTreeSet::from([41]))
     );
     assert!(fence.admit(&serde_json::Value::Null).unwrap().is_none());
+    let without_agent = CensusConnectionFence {
+        inner: &usagi_daemon::presentation::ipc::UnfencedConnection,
+        cleanup: cleanup.clone(),
+        peer_pid: 41,
+        peer_ancestors: &[],
+        agent: None,
+    };
+    assert!(
+        without_agent
+            .admit(&serde_json::Value::Null)
+            .unwrap()
+            .is_none()
+    );
     fence.disconnected(connection);
     assert_eq!(inbox.live(), (BTreeSet::new(), BTreeSet::new()));
 
@@ -12341,6 +12368,26 @@ fn session_lineage_requires_a_valid_available_session_and_parent_id() {
         dispatch::session_lineage_by_name(&json!({"sessions": [available]}), "child"),
         Some((session, None))
     );
+}
+
+#[test]
+fn attached_client_workspace_selects_canonical_root_or_keeps_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = paths::canonical_workspace_root(dir.path()).unwrap();
+    let fallback = ClientWorkspace::Bound {
+        root: "/fallback".to_owned(),
+    };
+    assert_eq!(
+        attached_client_workspace(None, fallback.clone()).unwrap(),
+        fallback
+    );
+    assert_eq!(
+        attached_client_workspace(Some(dir.path()), fallback.clone()).unwrap(),
+        ClientWorkspace::Selected {
+            root: paths::wire_workspace_root(canonical),
+        }
+    );
+    assert!(attached_client_workspace(Some(&dir.path().join("missing")), fallback).is_err());
 }
 
 #[test]

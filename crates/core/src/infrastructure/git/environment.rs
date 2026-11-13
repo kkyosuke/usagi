@@ -62,6 +62,9 @@ pub const CONFINED_GIT_CONFIG: &[(&str, &str)] = &[
     // Output is read by this process, never by a person at a terminal, so a
     // configured pager is only a program the repository gets to run.
     ("core.pager", "cat"),
+    // Linked worktree admin directories are writable inside a session sandbox;
+    // ignore per-worktree config files (`config.worktree`) on every confined run.
+    ("extensions.worktreeConfig", "false"),
 ];
 
 /// The values every confined git subprocess is given, whatever the parent held.
@@ -258,6 +261,7 @@ mod tests {
             "core.fsmonitor",
             "submodule.recurse",
             "core.pager",
+            "extensions.worktreeConfig",
         ] {
             assert!(injected.contains(&key), "{key} is no longer confined");
         }

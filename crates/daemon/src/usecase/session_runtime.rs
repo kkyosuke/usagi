@@ -1234,7 +1234,6 @@ impl SessionRuntime {
             | SessionAction::Clean
             | SessionAction::Cache
             | SessionAction::Sleep
-            | SessionAction::Setup
             | SessionAction::Prompt
             | SessionAction::Complete
             | SessionAction::Pr

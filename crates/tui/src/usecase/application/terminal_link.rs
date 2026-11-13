@@ -34,6 +34,9 @@
 //! reach the right edge is consequently joined with the row below, the one
 //! ambiguity of working from the rendered grid rather than the decoder's wrap
 //! bit.
+//! Bordered tables are projected into separate cell grids first, excluding the
+//! borders and one column of padding on either side. Wrapping is then inferred
+//! within each cell, without joining neighbouring columns or table sections.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -60,6 +63,8 @@ const EDGE_SLACK: usize = 1;
 struct Columns {
     rows: Vec<Vec<char>>,
     width: usize,
+    // Table cell padding is already removed; remaining blanks separate tokens.
+    indented_wrap: bool,
 }
 
 /// How row `r` connects to row `r + 1` when logical lines are rebuilt.
@@ -92,6 +97,7 @@ impl Columns {
         let last = cur.iter().rposition(|&ch| ch != ' ');
         let first = next.iter().position(|&ch| ch != ' ');
         if let (Some(last), Some(first)) = (last, first)
+            && self.indented_wrap
             && last + 1 + EDGE_SLACK >= self.width
             && is_url_char(cur[last])
             && is_url_char(next[first])
@@ -161,7 +167,11 @@ fn expand(viewport: &[String]) -> Columns {
         .max()
         .unwrap_or(0);
     let rows = viewport.iter().map(|row| columns_of(row, width)).collect();
-    Columns { rows, width }
+    Columns {
+        rows,
+        width,
+        indented_wrap: true,
+    }
 }
 
 /// One `char` per display column for a single row, padded or clipped to `width`.
@@ -179,13 +189,87 @@ fn columns_of(row: &str, width: usize) -> Vec<char> {
     cols
 }
 
+/// Content ranges between aligned vertical table borders, with the conventional
+/// single space of cell padding removed. Requiring both padding columns keeps
+/// a pipe embedded in a URL from being treated as a table boundary.
+fn table_ranges(row: &[char]) -> Vec<Range<usize>> {
+    let borders: Vec<_> = row
+        .iter()
+        .enumerate()
+        .filter_map(|(index, ch)| matches!(ch, '│' | '┃' | '║' | '|').then_some(index))
+        .collect();
+    borders
+        .windows(2)
+        .filter_map(|pair| {
+            let (left, right) = (pair[0], pair[1]);
+            (right > left + 3 && row[left + 1] == ' ' && row[right - 1] == ' ')
+                .then_some(left + 2..right - 1)
+        })
+        .collect()
+}
+
+/// Independent rectangular grids plus their original viewport origin. Table
+/// content is blanked in the ordinary grid so it cannot also yield a truncated
+/// URL through the full-terminal-width detector.
+fn link_regions(viewport: &[String]) -> Vec<(Columns, TerminalPoint)> {
+    let mut grid = expand(viewport);
+    let mut regions = Vec::new();
+    let mut row = 0;
+    while row < grid.rows.len() {
+        let ranges = table_ranges(&grid.rows[row]);
+        if ranges.is_empty() {
+            row += 1;
+            continue;
+        }
+        let mut end = row + 1;
+        while end < grid.rows.len() && table_ranges(&grid.rows[end]) == ranges {
+            end += 1;
+        }
+        for range in ranges {
+            let rows = grid.rows[row..end]
+                .iter_mut()
+                .map(|line| {
+                    let content = line[range.clone()].to_vec();
+                    line[range.clone()].fill(' ');
+                    content
+                })
+                .collect();
+            regions.push((
+                Columns {
+                    rows,
+                    width: range.len(),
+                    indented_wrap: false,
+                },
+                TerminalPoint {
+                    row,
+                    column: range.start,
+                },
+            ));
+        }
+        row = end;
+    }
+    regions.push((grid, TerminalPoint { row: 0, column: 0 }));
+    regions
+}
+
 /// Detect the `http(s)` URL the cell at `point` sits on, returning it as text, or
 /// `None` when the cell is blank or not part of a URL. A URL that wrapped onto
 /// the next row(s) is stitched back together, so a click anywhere along it yields
 /// the whole link.
 #[must_use]
 pub fn url_at(viewport: &[String], point: TerminalPoint) -> Option<String> {
-    let grid = expand(viewport);
+    link_regions(viewport)
+        .into_iter()
+        .find_map(|(grid, origin)| {
+            let point = TerminalPoint {
+                row: point.row.checked_sub(origin.row)?,
+                column: point.column.checked_sub(origin.column)?,
+            };
+            grid_url_at(&grid, point)
+        })
+}
+
+fn grid_url_at(grid: &Columns, point: TerminalPoint) -> Option<String> {
     if grid.width == 0 || point.row >= grid.rows.len() || point.column >= grid.width {
         return None;
     }
@@ -199,7 +283,21 @@ pub fn url_at(viewport: &[String], point: TerminalPoint) -> Option<String> {
 /// links to mark them clickable. Each logical line is scanned once.
 #[must_use]
 pub fn link_cells(viewport: &[String]) -> HashSet<TerminalPoint> {
-    let grid = expand(viewport);
+    let mut cells = HashSet::new();
+    for (grid, origin) in link_regions(viewport) {
+        cells.extend(
+            grid_link_cells(&grid)
+                .into_iter()
+                .map(|point| TerminalPoint {
+                    row: point.row + origin.row,
+                    column: point.column + origin.column,
+                }),
+        );
+    }
+    cells
+}
+
+fn grid_link_cells(grid: &Columns) -> HashSet<TerminalPoint> {
     let mut cells = HashSet::new();
     if grid.width == 0 {
         return cells;
@@ -224,11 +322,11 @@ fn url_in_chars(chars: &[char], idx: usize) -> Option<String> {
 }
 
 /// Every `http(s)` URL in the flattened line `chars`, as half-open char-index
-/// ranges. Each maximal whitespace-free run holds at most one link: the earliest
-/// scheme in the run starts it (dropping a leading `(` or stray prefix) and it
-/// runs to the first non-URL character (a CJK glyph or full-width punctuation
-/// butted against it with no space) with trailing prose punctuation then trimmed.
-/// A run whose only scheme has no host is skipped.
+/// ranges. Within each maximal whitespace-free run, every scheme occurrence
+/// starts a candidate link (dropping any leading `(` or stray prefix) and runs
+/// to the first non-URL character (a CJK glyph or full-width punctuation butted
+/// against it with no space) with trailing prose punctuation then trimmed. A
+/// bare scheme with no host is skipped.
 fn url_spans(chars: &[char]) -> Vec<Range<usize>> {
     let mut spans = Vec::new();
     let mut i = 0;
@@ -243,8 +341,9 @@ fn url_spans(chars: &[char]) -> Vec<Range<usize>> {
         while run_end < chars.len() && !chars[run_end].is_whitespace() {
             run_end += 1;
         }
-        if let Some(scheme_off) =
-            (run_start..run_end).find(|&j| SCHEMES.iter().any(|s| starts_with_at(chars, j, s)))
+        let mut cursor = run_start;
+        while let Some(scheme_off) =
+            (cursor..run_end).find(|&j| SCHEMES.iter().any(|s| starts_with_at(chars, j, s)))
         {
             // A URL is ASCII, so it ends at the first character it cannot
             // contain. Japanese text often butts straight against a link with no
@@ -260,6 +359,7 @@ fn url_spans(chars: &[char]) -> Vec<Range<usize>> {
             if !SCHEMES.contains(&url) {
                 spans.push(scheme_off..scheme_off + url.chars().count());
             }
+            cursor = url_end;
         }
         i = run_end;
     }
@@ -511,6 +611,103 @@ mod tests {
     }
 
     #[test]
+    fn table_wrapped_pr_links_open_from_every_underlined_cell() {
+        let first = "#1120 (https://github.com/Accel-Hack/kada";
+        let second = "i-navi/pull/1120)";
+        let url = "https://github.com/Accel-Hack/kadai-navi/pull/1120";
+        for border in ['│', '┃', '║', '|'] {
+            let view: Vec<_> = [first, second]
+                .iter()
+                .map(|content| {
+                    format!(
+                        "  {border} 日 {border} {content:width$} {border} https://other.test  {border}",
+                        width = first.len()
+                    )
+                })
+                .collect();
+            // The wide glyph in the preceding column occupies two cells.
+            let expected: HashSet<_> = (16..9 + first.len())
+                .map(|column| at(0, column))
+                .chain((9..9 + second.len() - 1).map(|column| at(1, column)))
+                .chain((0..2).flat_map(|row| {
+                    (12 + first.len()..30 + first.len()).map(move |column| at(row, column))
+                }))
+                .collect();
+            // The other column's complete links are deliberately padded, so
+            // they do not wrap into one another.
+            let cells = link_cells(&view);
+            assert_eq!(cells, expected, "{border}");
+            for row in 0..view.len() {
+                for column in 0..view[row].chars().map(char_width).sum() {
+                    let point = at(row, column);
+                    let expected_url = if !cells.contains(&point) {
+                        None
+                    } else if column < 9 + first.len() {
+                        Some(url)
+                    } else {
+                        Some("https://other.test")
+                    };
+                    assert_eq!(url_at(&view, point).as_deref(), expected_url, "{point:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_links_can_wrap_over_three_rows_and_split_the_scheme() {
+        let view = grid(
+            18,
+            &[
+                "│ https:/ │ text │",
+                "│ /exampl │ more │",
+                "│ e.test) │ end  │",
+            ],
+        );
+        for point in [at(0, 2), at(1, 2), at(2, 6)] {
+            assert_eq!(
+                url_at(&view, point).as_deref(),
+                Some("https://example.test")
+            );
+        }
+        assert_eq!(url_at(&view, at(2, 8)), None);
+    }
+
+    #[test]
+    fn table_links_stop_at_separators_blanks_and_changed_column_boundaries() {
+        for next in [
+            "├────────────────┤",
+            "│                │",
+            "│ tail            │",
+            "ordinary text",
+        ] {
+            let view = grid(24, &["│ https://a.test │", next, "│ tail          │"]);
+            assert_eq!(url_at(&view, at(0, 2)).as_deref(), Some("https://a.test"));
+            assert_eq!(url_at(&view, at(2, 2)), None);
+        }
+    }
+
+    #[test]
+    fn table_projection_preserves_links_outside_tables_and_literal_url_pipes() {
+        let view = grid(
+            70,
+            &["https://before.test │ https://cell.test  │ https://after.test"],
+        );
+        for url in [
+            "https://before.test",
+            "https://cell.test",
+            "https://after.test",
+        ] {
+            let column = view[0][..view[0].find(url).unwrap()].chars().count();
+            assert_eq!(url_at(&view, at(0, column)).as_deref(), Some(url));
+        }
+        let view = grid(50, &["https://example.test/a|b|c"]);
+        assert_eq!(
+            url_at(&view, at(0, 0)).as_deref(),
+            Some("https://example.test/a|b|c")
+        );
+    }
+
+    #[test]
     fn url_at_returns_none_outside_the_grid_or_on_an_empty_viewport() {
         let view = grid(8, &["hi"]);
         assert_eq!(url_at(&view, at(9, 0)), None);
@@ -755,5 +952,18 @@ mod tests {
             assert_ne!(format!("{variant:?}"), "");
         }
         assert_ne!(UrlRejection::Empty, UrlRejection::MissingHost);
+    }
+
+    #[test]
+    fn url_at_and_link_cells_find_every_url_in_a_whitespace_free_cjk_run() {
+        let view = grid(40, &["参照https://a.ioとhttps://b.ioです"]);
+        // "参照" occupies cols 0..4, "https://a.io" cols 4..16, "と" cols 16..18,
+        // "https://b.io" cols 18..30.
+        assert_eq!(url_at(&view, at(0, 5)).as_deref(), Some("https://a.io"));
+        assert_eq!(url_at(&view, at(0, 16)), None);
+        assert_eq!(url_at(&view, at(0, 20)).as_deref(), Some("https://b.io"));
+        let cells = link_cells(&view);
+        assert!(cells.contains(&at(0, 4)));
+        assert!(cells.contains(&at(0, 18)));
     }
 }

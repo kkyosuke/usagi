@@ -50,8 +50,10 @@ global binding は利用者が管理する trusted baseline として扱い、�
 
 | 変数 | 拒否する理由 |
 |---|---|
-| `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `USAGI_CLAUDE_SANDBOX_PASSTHROUGH` / `USAGI_TRUST_ROOT` | Agent launcher が使う filesystem の境界そのものを差し替えられる。private directory の検査境界は [daemon](05-daemon.md#private-directory-の検査起点) を参照 |
-| `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` | managed launch の宛先・アカウント・model を差し替えられる。`.usagi/settings.json` は repository に入るため、checkout 側が session の prompt・file 内容・credential を別の server へ送れてしまう |
+| `PATH` / `TMPDIR` / `HOME` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` / `USAGI_*`（`USAGI_CLAUDE_SANDBOX_PASSTHROUGH`・`USAGI_TRUST_ROOT`・`USAGI_HOME` など全 prefix） | Agent launcher と daemon が使う filesystem・IPC・sandbox の境界そのものを差し替えられる。private directory の検査境界は [daemon](05-daemon.md#private-directory-の検査起点) を参照 |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_BASE` / `OPENAI_API_KEY` / `GOOGLE_GEMINI_BASE_URL` / `GEMINI_API_KEY` / `GOOGLE_API_KEY` | managed launch の宛先・アカウント・model を差し替えられる。`.usagi/settings.json` は repository に入るため、checkout 側が session の prompt・file 内容・credential を別の server へ送れてしまう |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`（小文字含む） / `SSL_CERT_FILE` / `SSL_CERT_DIR` / `NODE_EXTRA_CA_CERTS` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` | TLS 検証や通信経路を差し替えて API トラフィックを中継・傍受できてしまう |
+| `GIT_*` / `LD_*` / `DYLD_*` / `BASH_FUNC_*` / `ZDOTDIR` / `BASH_ENV` / `ENV` / `SHELL` / `PROMPT_COMMAND` / `CDPATH` / `IFS` / `GLOBIGNORE` / `NODE_OPTIONS` / `NODE_PATH` / `PYTHONPATH` / `PYTHONSTARTUP` / `PYTHONHOME` / `RUBYOPT` / `RUBYLIB` / `PERL5OPT` / `PERL5LIB` / `JAVA_TOOL_OPTIONS` / `RUSTC_WRAPPER` | 動的リンカ、シェル初期化、git 実行境界、言語ランタイムの起動時フックを差し替えて任意コードを実行できてしまう |
 
 binding と secret reference の resource 上限は domain の env policy が正本であり、global / workspace の各保存文書と
 合成後の launch admission が同じ検証を使う。

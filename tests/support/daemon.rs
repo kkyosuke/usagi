@@ -698,6 +698,29 @@ fn wait_for_exit(record: &DaemonRecord, timeout: Duration) -> bool {
     true
 }
 
+/// `data_dir` の `daemon.json` に記録された exact daemon incarnation へ signal を送り、終了まで待つ。
+pub fn signal_exact_daemon(data_dir: &Path, signal: libc::c_int) -> bool {
+    let mut record = None;
+    for _ in 0..200 {
+        if let Some(found) = read_record(data_dir) {
+            record = Some(found);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let Some(record) = record else {
+        return false;
+    };
+    signal_exact(&record, signal);
+    for _ in 0..100 {
+        if !exact_process_alive(&record) && !data_dir.join("daemon/daemon.json").exists() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 /// `pid` の OS process-start identity。fixture が daemon record を組み立てるときに使う。
 ///
 /// # Panics
@@ -712,7 +735,11 @@ pub fn process_start_identity(pid: u32) -> String {
 fn observed_process_start_identity(pid: u32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close = stat.rfind(')')?;
-    let start_ticks = stat[close + 1..].split_whitespace().nth(19)?;
+    let mut fields = stat[close + 1..].split_whitespace();
+    if matches!(fields.next()?, "Z" | "X") {
+        return None;
+    }
+    let start_ticks = fields.nth(18)?;
     start_ticks.parse::<u64>().ok()?;
     Some(format!("linux:{start_ticks}"))
 }

@@ -57,6 +57,7 @@ mod real_io {
                 terminate_grace: Duration::from_millis(50),
                 output_limit: 8 * 1024,
             },
+            true,
         );
         match outcome {
             ChildInputExecution::Success => Ok(()),

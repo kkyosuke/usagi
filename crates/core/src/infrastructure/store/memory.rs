@@ -92,8 +92,11 @@ impl MarkdownEntry for MemoryEntry {
     }
 
     fn write_extra_derived(dir: &Path, summaries: &[MemorySummary]) -> Result<()> {
+        let toc = dir.join(TOC_FILE);
+        crate::infrastructure::persistence::markdown_store::ensure_not_symlink(dir)?;
+        crate::infrastructure::persistence::markdown_store::ensure_not_symlink(&toc)?;
         crate::infrastructure::persistence::json_file::write_text_atomic(
-            &dir.join(TOC_FILE),
+            &toc,
             &render_toc(summaries),
         )
     }
@@ -111,7 +114,13 @@ fn memory_file_name(name: &str) -> Result<String> {
              component with no separators or `..`"
         );
     }
-    Ok(format!("{name}.md"))
+    let file = format!("{name}.md");
+    if file == TOC_FILE {
+        anyhow::bail!(
+            "refusing to use {name:?} as a memory name: {TOC_FILE} is reserved for the table of contents"
+        );
+    }
+    Ok(file)
 }
 
 /// File-based persistence rooted at a repository's `.usagi/memory/` directory.
@@ -188,6 +197,7 @@ impl MemoryStore {
     ///
     /// Returns an error when the name or source file is invalid.
     pub fn read_locked(&self, name: &str) -> Result<Option<Memory>> {
+        crate::infrastructure::persistence::markdown_store::ensure_not_symlink(self.dir())?;
         let path = self.dir().join(memory_file_name(name)?);
         match self.inner.read_existing_path(&path) {
             Ok(memory) => Ok(Some(memory)),
@@ -241,6 +251,7 @@ impl MemoryStore {
     /// Returns an error only before the source removal commits.
     pub fn remove_with_outcome(&self, name: &str) -> Result<MutationOutcome<bool>> {
         let _lock = self.lock()?;
+        crate::infrastructure::persistence::markdown_store::ensure_not_symlink(self.dir())?;
         let path = self.dir().join(memory_file_name(name)?);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
@@ -1199,5 +1210,22 @@ mod tests {
 
         let overlong = "a".repeat(255);
         assert!(store.remove(&overlong).is_err());
+        assert!(store.write(&memory("MEMORY", "Reserved")).is_err());
+        assert!(store.get("MEMORY").is_err());
+        assert!(store.remove("MEMORY").is_err());
+
+        fs::remove_file(&path).unwrap();
+        store.write(&memory("valid", "Valid")).unwrap();
+        fs::remove_file(store.toc_path()).unwrap();
+        symlink(&target, store.toc_path()).unwrap();
+        assert_eq!(
+            store.write(&memory("valid", "Valid")).unwrap().derived,
+            DerivedState::RebuildNeeded
+        );
+        fs::remove_file(store.toc_path()).unwrap();
+        assert_eq!(store.summaries().unwrap().len(), 1);
+        fs::remove_file(store.index_path()).unwrap();
+        symlink(&target, store.index_path()).unwrap();
+        assert!(store.summaries().is_err());
     }
 }

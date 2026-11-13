@@ -47,6 +47,7 @@ jobs:
             'document/**/*.md'
             '.agents/**/*.md'
             '.github/**/*.md'
+            'crates/**/*.md'
           fail: true
         env:
           # github.com のリンクをレートリミットを抑えて検証するため。

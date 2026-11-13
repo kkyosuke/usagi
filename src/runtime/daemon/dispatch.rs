@@ -1761,14 +1761,18 @@ pub(super) fn dispatch_session(
 }
 
 pub(super) fn request_mcp_credential(body: &serde_json::Value) -> Option<&str> {
-    body.get("caller_context")
-        .and_then(|context| context.get("credential"))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            body.get("payload")
-                .and_then(|payload| payload.get("_caller_credential"))
+    match body.get("kind").and_then(serde_json::Value::as_str) {
+        Some("session") => body
+            .get("payload")
+            .and_then(|payload| payload.get("_caller_credential"))
+            .and_then(serde_json::Value::as_str),
+        Some("agent_inventory" | "resume_agent" | "resume_agent_headless" | "dispatch_tool") => {
+            body.get("caller_context")
+                .and_then(|context| context.get("credential"))
                 .and_then(serde_json::Value::as_str)
-        })
+        }
+        _ => None,
+    }
 }
 
 #[coverage(off)]
@@ -1918,7 +1922,6 @@ pub(super) fn session_response_envelope(
                 | SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
-                | SessionAction::Setup
                 | SessionAction::Prompt
                 | SessionAction::Complete
                 | SessionAction::Pr
@@ -2995,18 +2998,35 @@ mod tests {
         assert_eq!(session_id_by_name(&snapshot, "alpha"), Some(session_id));
         assert_eq!(session_id_by_name(&snapshot, "missing"), None);
 
+        for kind in [
+            "agent_inventory",
+            "resume_agent",
+            "resume_agent_headless",
+            "dispatch_tool",
+        ] {
+            assert_eq!(
+                request_mcp_credential(&serde_json::json!({
+                    "kind": kind,
+                    "caller_context": {"credential": "from-context"},
+                    "payload": {"_caller_credential": "from-payload"},
+                })),
+                Some("from-context")
+            );
+        }
         assert_eq!(
             request_mcp_credential(&serde_json::json!({
+                "kind": "session",
                 "caller_context": {"credential": "from-context"},
                 "payload": {"_caller_credential": "from-payload"},
             })),
-            Some("from-context")
+            Some("from-payload")
         );
         assert_eq!(
             request_mcp_credential(&serde_json::json!({
-                "payload": {"_caller_credential": "from-payload"},
+                "kind": "terminal",
+                "caller_context": {"credential": "from-context"},
             })),
-            Some("from-payload")
+            None
         );
         assert_eq!(request_mcp_credential(&serde_json::json!({})), None);
 

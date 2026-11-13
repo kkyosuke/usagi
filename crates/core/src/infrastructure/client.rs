@@ -999,7 +999,8 @@ pub enum RetryEligibility {
     /// same final across a new connection.
     DurableOperation,
     /// No cross-connection idempotency evidence: generic Terminal Launch
-    /// (#518), terminal input, `RequestId`-only mutations, and Codex capture.
+    /// without a producer `launch_operation` (#518), terminal input,
+    /// `RequestId`-only mutations, and Codex capture.
     /// After a request is dispatched the effect is unknown, so it is never
     /// blind-retried on a fresh connection. Terminal input keeps this
     /// classification even with a durable operation identity: the client
@@ -1059,6 +1060,17 @@ impl RetryEligibility {
                 } else {
                     Self::NoCrossConnectionEvidence
                 }
+            }
+            DaemonRequest::Terminal {
+                action: TerminalAction::Launch,
+                payload,
+            } if payload
+                .get("intent")
+                .and_then(|intent| intent.get("launch_operation"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|op| !op.is_empty()) =>
+            {
+                Self::DurableOperation
             }
             DaemonRequest::Rollover { .. }
             | DaemonRequest::Agent { .. }
@@ -3377,5 +3389,31 @@ mod deadline_and_retry_tests {
         ] {
             assert_ne!(key, agent_resume_semantic_key(&other), "{other:?}");
         }
+    }
+
+    #[test]
+    fn terminal_launch_with_producer_operation_is_durable_while_legacy_launch_is_not() {
+        let with_operation = DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::json!({
+                "intent": {
+                    "launch_operation": OperationId::new().to_string(),
+                }
+            }),
+        };
+        let without_operation = DaemonRequest::Terminal {
+            action: TerminalAction::Launch,
+            payload: serde_json::json!({
+                "intent": {}
+            }),
+        };
+        assert_eq!(
+            RetryEligibility::classify(&with_operation),
+            RetryEligibility::DurableOperation
+        );
+        assert_eq!(
+            RetryEligibility::classify(&without_operation),
+            RetryEligibility::NoCrossConnectionEvidence
+        );
     }
 }

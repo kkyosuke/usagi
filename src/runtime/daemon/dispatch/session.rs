@@ -532,6 +532,9 @@ pub(super) fn dispatch_session_action(
             })
         }
         SessionAction::Clean => {
+            if authenticated_caller.is_some() {
+                return Err(SessionRuntimeError::InvalidRequest);
+            }
             let flag = |name| match payload.get(name) {
                 None => Ok(false),
                 Some(serde_json::Value::Bool(value)) => Ok(*value),
@@ -556,14 +559,6 @@ pub(super) fn dispatch_session_action(
                 force,
                 target.as_ref(),
             )?)
-        }
-        SessionAction::Setup => {
-            target_session(string("name")?)?;
-            bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .handle(action, operation_id, payload)
         }
     }
 }

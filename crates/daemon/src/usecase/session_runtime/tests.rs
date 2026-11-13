@@ -771,6 +771,17 @@ fn runtime(git: FakeSessionGit) -> (TempDir, SessionRuntime) {
     .unwrap();
     (tmp, runtime)
 }
+
+fn write_linked_worktree_marker(repo_root: &Path, session_root: &Path) {
+    let name = session_root.file_name().unwrap().to_string_lossy();
+    let git_dir = repo_root.join(".git").join("worktrees").join(name.as_ref());
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let marker = session_root.join(".git");
+    std::fs::write(&marker, format!("gitdir: {}\n", git_dir.display())).unwrap();
+    std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+    std::fs::write(git_dir.join("gitdir"), format!("{}\n", marker.display())).unwrap();
+}
+
 // Most removal fixtures have no provider-verified merged head.
 fn perform_remove(
     runtime: &Mutex<SessionRuntime>,
@@ -1409,7 +1420,7 @@ fn rejects_invalid_requests_duplicates_missing_sessions_and_git_failures() {
     );
     assert_eq!(
         runtime
-            .handle(SessionAction::Setup, &operation(), &json!({}))
+            .handle(SessionAction::Prompt, &operation(), &json!({}))
             .unwrap_err(),
         SessionRuntimeError::InvalidRequest
     );
@@ -1714,11 +1725,7 @@ fn remove_forwards_force_to_the_worktree_removal() {
     runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
-    std::fs::write(
-        tmp.path().join(".usagi/sessions/one/.git"),
-        "gitdir: /fixture",
-    )
-    .unwrap();
+    write_linked_worktree_marker(tmp.path(), &tmp.path().join(".usagi/sessions/one"));
     runtime
         .handle(
             SessionAction::Remove,
@@ -2525,7 +2532,7 @@ fn failed_remove_replays_the_same_failure_without_repeating_the_effect() {
         .unwrap();
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     drop(creator);
 
     let operation = operation();
@@ -3533,7 +3540,7 @@ fn compensating_a_delegated_create_undoes_the_branch_and_frees_the_name() {
 
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("triage");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
     perform_compensating_remove(&runtime, &signal, &operation(), "triage").unwrap();
 
@@ -3591,7 +3598,7 @@ fn removing_an_available_session_safely_deletes_its_branch() {
     .unwrap();
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
     let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
@@ -3649,7 +3656,7 @@ fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
     .unwrap();
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
 
@@ -3776,7 +3783,7 @@ fn removing_a_failed_session_deletes_its_branch() {
     }
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
 
     let signal = TeardownSignal::new();
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
@@ -3852,7 +3859,7 @@ fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_work
     // Materialize a linked worktree so a teardown would have to invoke Git.
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
 
     let reply = perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
@@ -3959,7 +3966,7 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
         .unwrap();
         let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
         std::fs::create_dir_all(&session_root).unwrap();
-        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        write_linked_worktree_marker(tmp.path(), &session_root);
         let operation = operation();
         let signal = TeardownSignal::new();
         let request = json!({"name":"one", "force":first_force});

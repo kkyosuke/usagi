@@ -121,7 +121,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
 
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
     fn is_linked_worktree(&self, path: &Path) -> bool {
-        path.join(".git").is_file()
+        is_valid_linked_worktree_gitfile(path)
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=orphan_session_entries_are_sorted_and_direct
@@ -427,6 +427,46 @@ fn collect_session_worktrees(
 
 fn skipped_entry(name: &OsStr) -> bool {
     name == OsStr::new(".git") || name == OsStr::new(STATE_DIR)
+}
+
+fn is_valid_linked_worktree_gitfile(path: &Path) -> bool {
+    let marker = path.join(".git");
+    let Ok(marker_canonical) = marker.canonicalize() else {
+        return false;
+    };
+    let Some(git_dir) = read_linked_git_pointer(&marker, Some("gitdir:"), path) else {
+        return false;
+    };
+    let Some(common_dir) = read_linked_git_pointer(&git_dir.join("commondir"), None, &git_dir)
+    else {
+        return false;
+    };
+    if git_dir.parent() != common_dir.join("worktrees").canonicalize().ok().as_deref() {
+        return false;
+    }
+    read_linked_git_pointer(&git_dir.join("gitdir"), None, &git_dir)
+        .is_some_and(|backlink| backlink == marker_canonical)
+}
+
+fn read_linked_git_pointer(
+    path: &Path,
+    prefix: Option<&str>,
+    relative_to: &Path,
+) -> Option<PathBuf> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > 16 * 1024 {
+        return None;
+    }
+    let contents = std::fs::read_to_string(path).ok()?;
+    let trimmed = contents.trim();
+    let target = match prefix {
+        Some(prefix) => trimmed.strip_prefix(prefix)?.trim(),
+        None => trimmed,
+    };
+    if target.is_empty() {
+        return None;
+    }
+    relative_to.join(target).canonicalize().ok()
 }
 
 #[cfg(test)]
@@ -797,6 +837,54 @@ mod tests {
                 .remove_session_tree(&SystemGit, &session, false)
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn linked_worktree_marker_must_be_a_valid_non_symlink_gitdir_pointer_with_backlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let common = temp.path().join("repo/.git");
+        let git_dir = common.join("worktrees/work");
+        let worktree = temp.path().join("repo/.usagi/sessions/work");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        let marker = worktree.join(".git");
+        std::fs::create_dir(&marker).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+        std::fs::remove_dir(&marker).unwrap();
+
+        std::fs::write(&marker, "not-a-gitdir\n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(&marker, "gitdir:   \n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(&marker, vec![b'a'; 16 * 1024 + 1]).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+        std::fs::remove_file(&marker).unwrap();
+
+        let target = temp.path().join("real-marker");
+        std::fs::write(&target, format!("gitdir: {}\n", git_dir.display())).unwrap();
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+        std::fs::remove_file(&marker).unwrap();
+
+        std::fs::write(&marker, format!("gitdir: {}\n", git_dir.display())).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("commondir"), "..\n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("gitdir"), format!("{}\n", target.display())).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("gitdir"), format!("{}\n", marker.display())).unwrap();
+        assert!(is_valid_linked_worktree_gitfile(&worktree));
     }
 }
 

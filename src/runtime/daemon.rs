@@ -3510,7 +3510,9 @@ fn connect_deadline_client(
 /// request's retry eligibility. CLI, MCP, and the TUI's per-request calls use
 /// this so a hung daemon cannot block a surface indefinitely.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=mcp_e2e
-pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+pub(crate) fn policy_client(
+    policy: ClientPolicy,
+) -> Result<impl DaemonClient + Send + use<>, ClientError> {
     policy_client_for(policy, client_workspace())
 }
 
@@ -3525,9 +3527,8 @@ pub(crate) fn policy_client(policy: ClientPolicy) -> Result<impl DaemonClient, C
 pub(crate) fn policy_client_for_selected_workspace(
     policy: ClientPolicy,
     root: &Path,
-) -> Result<impl DaemonClient, ClientError> {
-    let root = paths::canonical_workspace_root(root)
-        .map_err(|error| ClientError::Unavailable(error.to_string()))?;
+) -> Result<impl DaemonClient + Send + use<>, ClientError> {
+    let root = client_result(paths::canonical_workspace_root(root))?;
     policy_client_for(
         policy,
         ClientWorkspace::Selected {
@@ -3539,7 +3540,7 @@ pub(crate) fn policy_client_for_selected_workspace(
 fn policy_client_for(
     policy: ClientPolicy,
     workspace: ClientWorkspace,
-) -> Result<impl DaemonClient, ClientError> {
+) -> Result<impl DaemonClient + Send + use<>, ClientError> {
     let clock = SystemClock::new();
     let initial = bootstrap_client(&workspace, |data_dir, build| {
         connect_deadline_client(
@@ -3673,6 +3674,73 @@ pub(crate) fn diagnostic_client(
     .map_err(|error| ClientError::Unavailable(error.to_string()))
 }
 
+/// Repairs non-lifecycle state (`0700` data/daemon directories, `0600` settings
+/// file, and stale crashed-daemon endpoint locator) without starting, stopping,
+/// or restarting any daemon or Agent process.
+pub(crate) fn repair_non_lifecycle_doctor_state(data_dir: &Path) {
+    repair_doctor_data_dir(data_dir);
+    let daemon_dir = data_dir.join("daemon");
+    if daemon_dir.is_dir()
+        && !current_daemon_is_reachable(data_dir)
+        && let Ok(_bootstrap) = lock_private_exclusive(
+            &daemon_dir.join("bootstrap.lock"),
+            "bootstrap lock",
+            PrivateLockModePolicy::OwnerLegacy0644,
+            PrivateLockWait::BOOTSTRAP,
+        )
+    {
+        let _ = recover_stale_client_endpoint(data_dir);
+        let absence = FileInstanceLock {
+            path: daemon_dir.join("daemon.lock"),
+            held: RefCell::new(None),
+        };
+        let store = DaemonRecordStore::new(FsRecordFile {
+            path: daemon_dir.join("daemon.json"),
+        });
+        if absence.acquire().unwrap_or(false) && store.load().ok().flatten().is_none() {
+            let _ = usagi_daemon::infrastructure::unix_transport::remove_current_locator(data_dir);
+        }
+    }
+}
+
+pub(crate) fn repair_doctor_data_dir(data_dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        let euid = unsafe { libc::geteuid() };
+        for dir in [data_dir, &data_dir.join("daemon")] {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
+                .open(dir)
+                && file
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_dir() && meta.uid() == euid)
+            {
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let settings_path = data_dir.join("settings.json");
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(&settings_path)
+            && file
+                .metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.uid() == euid && meta.nlink() == 1)
+        {
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    if data_dir.is_dir() {
+        let _ = ensure_private_dir(data_dir);
+    }
+    let daemon_dir = data_dir.join("daemon");
+    if daemon_dir.is_dir() {
+        let _ = ensure_private_dir(&daemon_dir);
+    }
+}
+
 /// Cross-process lifecycle custody for one managed update synchronization.
 ///
 /// The updater holds both client bootstrap and explicit lifecycle custody from
@@ -3796,12 +3864,14 @@ pub(crate) fn managed_update_diagnostic_client(
 /// bounded number of times. Without a running daemon an observation lane simply
 /// reports the failure and backs off.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=cli_tui_pty
-pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient, ClientError> {
+pub(crate) fn attached_client(
+    policy: ClientPolicy,
+    selected_root: Option<&Path>,
+) -> Result<impl DaemonClient + Send + use<>, ClientError> {
     let clock = SystemClock::new();
-    let data_dir =
-        paths::data_dir().map_err(|error| ClientError::Unavailable(error.to_string()))?;
+    let data_dir = client_result(paths::data_dir())?;
     let build = current_build();
-    let workspace = client_workspace();
+    let workspace = attached_client_workspace(selected_root, client_workspace())?;
     let connect = move |clock: SystemClock, budget_ms: u64| {
         connect_deadline_client(
             &data_dir,
@@ -3815,6 +3885,21 @@ pub(crate) fn attached_client(policy: ClientPolicy) -> Result<impl DaemonClient,
     };
     let initial = connect(clock, policy.timeout_ms)?;
     Ok(PolicyClient::new(clock, policy, connect, Some(initial)))
+}
+
+fn attached_client_workspace(
+    selected_root: Option<&Path>,
+    fallback: ClientWorkspace,
+) -> Result<ClientWorkspace, ClientError> {
+    match selected_root {
+        Some(root) => {
+            let root = client_result(paths::canonical_workspace_root(root))?;
+            Ok(ClientWorkspace::Selected {
+                root: paths::wire_workspace_root(root),
+            })
+        }
+        None => Ok(fallback),
+    }
 }
 
 // ------------------------------------------------- owner generation routing

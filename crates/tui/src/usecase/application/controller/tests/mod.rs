@@ -2103,6 +2103,14 @@ fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft()
     assert_eq!(editor.freeform, "x");
     let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Tab);
     let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('y'));
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('\r'));
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('\t'));
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Char('\u{7}'));
+    let _ =
+        decision::update_decision_editor(workspace, &mut editor, AppKey::Paste("e\u{301}".into()));
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Backspace);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Backspace);
+    let _ = decision::update_decision_editor(workspace, &mut editor, AppKey::Backspace);
     assert_eq!(
         decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),
         vec![Effect::ResolveDecision {
@@ -2110,6 +2118,23 @@ fn moving_back_to_an_option_submits_that_option_and_retains_the_freeform_draft()
             decision_id: request.decision_id,
             answer: UserDecisionAnswer::Freeform { text: "xy".into() },
         }]
+    );
+    let _ = decision::update_decision_editor(
+        workspace,
+        &mut editor,
+        AppKey::SetDecisionFreeform("a".repeat(17000)),
+    );
+    assert_eq!(
+        decision::update_decision_editor(workspace, &mut editor, AppKey::Enter),
+        Vec::new()
+    );
+    assert!(
+        editor
+            .error()
+            .unwrap()
+            .message
+            .as_str()
+            .contains("freeform answers must be at most 16384")
     );
 }
 
