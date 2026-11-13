@@ -406,11 +406,18 @@ impl TerminalScreen {
 
     fn logical_scan_range(&self, start: usize, end: usize, count: usize) -> (usize, usize) {
         let mut scan_start = start;
-        while scan_start > 0 && row_wraps(self.retained_row(scan_start - 1)) {
+        while scan_start > 0
+            && row_connects(
+                self.retained_row(scan_start - 1),
+                self.retained_row(scan_start),
+            )
+        {
             scan_start -= 1;
         }
         let mut scan_end = end;
-        while scan_end < count && row_wraps(self.retained_row(scan_end - 1)) {
+        while scan_end < count
+            && row_connects(self.retained_row(scan_end - 1), self.retained_row(scan_end))
+        {
             scan_end += 1;
         }
         (scan_start, scan_end)
@@ -429,10 +436,26 @@ fn row_has_content(row: &[Cell]) -> bool {
         .any(|cell| !cell.continuation() && cell.ch() != ' ')
 }
 
-// The parser records auto-wrap separately from cell contents, so a hard line
-// ending exactly at the terminal width is not mistaken for a continuation.
-fn row_wraps(row: &[Cell]) -> bool {
-    row.iter().any(Cell::wrapped)
+// The parser records auto-wrap separately from cell contents, and agent TUIs
+// may also hard-wrap a URL within one column of the right edge and indent the
+// continuation on the next row.
+fn row_connects(upper: &[Cell], lower: &[Cell]) -> bool {
+    if upper.iter().any(Cell::wrapped) {
+        return true;
+    }
+    let last = upper
+        .iter()
+        .rposition(|cell| !cell.continuation() && cell.ch() != ' ');
+    let first = lower
+        .iter()
+        .position(|cell| !cell.continuation() && cell.ch() != ' ');
+    matches!(
+        (last, first),
+        (Some(last), Some(first))
+            if last + 2 >= upper.len()
+                && upper[last].ch().is_ascii_graphic()
+                && lower[first].ch().is_ascii_graphic()
+    )
 }
 
 #[cfg(test)]
@@ -847,6 +870,26 @@ mod tests {
         assert_eq!(
             screen.rows_with_scrollback_and_cursor_selection((0, 0), (0, 2)),
             vec!["\u{1b}[7mabc\u{1b}[0mdef"]
+        );
+    }
+
+    #[test]
+    fn windowed_link_scan_connects_agent_indented_wrapped_url_rows() {
+        // Row 0 ends within 1 column of the right edge (15 of 16 cols) without
+        // soft-wrap, and row 1 continues with a 2-space indent. Rendering only
+        // row 1 via a window must still scan row 0 and underline the tail.
+        let mut screen = TerminalScreen::new(2, 16);
+        screen.advance(b"https://example\r\n  .com/path");
+        let row_one = screen.rows_with_scrollback_window(1, 2, false);
+        assert_eq!(row_one.len(), 1);
+        assert!(
+            row_one[0].contains("\u{1b}[4m.com/path\u{1b}[0m"),
+            "windowed row 1 must underline the continuation: {row_one:?}"
+        );
+        let row_zero = screen.rows_with_scrollback_window(0, 1, false);
+        assert!(
+            row_zero[0].contains("\u{1b}[4mhttps://example\u{1b}[0m"),
+            "windowed row 0 must underline the head: {row_zero:?}"
         );
     }
 }
