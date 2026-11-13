@@ -12419,7 +12419,7 @@ fn broker_socket_endpoint_requires_an_owned_0600_unix_socket() {
 }
 
 #[test]
-fn sandbox_tmpdir_and_multi_repo_git_policy_cover_nested_repositories_and_sticky_dirs() {
+fn resolve_sandbox_tmpdir_rejects_sticky_or_missing_and_accepts_owned_dirs() {
     use std::ffi::OsStr;
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -12443,6 +12443,11 @@ fn sandbox_tmpdir_and_multi_repo_git_policy_cover_nested_repositories_and_sticky
         agent_provisioning::resolve_sandbox_tmpdir(Some(owned_tmp.path().as_os_str())),
         Some(canonical_tmp)
     );
+}
+
+#[test]
+fn multi_repo_git_policy_and_root_common_dir_cover_nested_repositories() {
+    use std::os::unix::fs::PermissionsExt as _;
 
     // Non-Git workspace returns Ok(None) for session_git_policy and Ok(()) for root common dir policy.
     let plain_ws = tempfile::tempdir().unwrap();
