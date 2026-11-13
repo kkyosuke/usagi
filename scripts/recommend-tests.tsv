@@ -11,6 +11,7 @@ crates/daemon/src/test_support.rs	shared-test	shared usagi-daemon test support a
 crates/daemon/src/*	daemon	usagi-daemon source changed	cargo test -p usagi-daemon	crates/daemon/src/lib.rs
 crates/tui/tests/*.rs	tui	usagi-tui integration test target changed	cargo test -p usagi-tui --test {test}	crates/tui/tests/parity_suite.rs
 crates/tui/src/*	tui	usagi-tui source changed	cargo test -p usagi-tui	crates/tui/src/lib.rs
+crates/cli/src/*.md	cli	embedded CLI Markdown guide changed	cargo test -p usagi-cli|lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md' 'crates/**/*.md'	crates/cli/src/mcp/guides/orchestration.md
 crates/cli/src/*	cli	usagi-cli source changed	cargo test -p usagi-cli	crates/cli/src/lib.rs
 src/runtime/cli.rs	root-runtime	root CLI runtime changed	cargo test -p usagi --bin usagi	src/runtime/cli.rs
 src/runtime/daemon.rs	root-runtime	root daemon runtime changed	cargo test -p usagi --bin usagi	src/runtime/daemon.rs
@@ -19,4 +20,4 @@ src/runtime/*	root-runtime	root composition runtime changed	cargo test -p usagi 
 src/tui_input.rs	root-runtime	root terminal input adapter changed	cargo test -p usagi --bin usagi	src/tui_input.rs
 tests/support/*	shared-test	shared root integration harness affects consumer tests	cargo test --workspace --quiet	tests/support/mod.rs
 tests/*.rs	root-integration	root integration test target changed	cargo test -p usagi --test {test}	tests/agent_ipc_e2e.rs
-*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md'	README.md
+*.md	docs	documentation changed; Rust gate can be skipped for docs-only changes	lychee --config lychee.toml --no-progress '*.md' 'document/**/*.md' '.agents/**/*.md' '.github/**/*.md' 'crates/**/*.md'	README.md

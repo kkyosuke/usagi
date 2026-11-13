@@ -52,6 +52,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Verify release tag matches Cargo.toml version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$RELEASE_TAG" in
+            v*) TAG_VERSION="${RELEASE_TAG#v}" ;;
+            *)
+              echo "invalid release tag '${RELEASE_TAG}': expected v<SemVer>" >&2
+              exit 1
+              ;;
+          esac
+          ./scripts/ci/release-version.sh "$TAG_VERSION"
+          PACKAGE_VERSION="$(awk '
+            /^\[package\][[:space:]]*$/ { in_pkg = 1; next }
+            /^\[/ { in_pkg = 0 }
+            in_pkg && /^version[[:space:]]*=/ {
+              line = $0
+              sub(/^version[[:space:]]*=[[:space:]]*"/, "", line)
+              sub(/".*$/, "", line)
+              print line
+              exit
+            }
+          ' Cargo.toml)"
+          ./scripts/ci/release-version.sh "$PACKAGE_VERSION"
+          if [ "$TAG_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "release tag ${RELEASE_TAG} does not match Cargo.toml [package].version ${PACKAGE_VERSION}" >&2
+            exit 1
+          fi
+
       # component は日付なし nightly へ入り、実際のビルドは rust-toolchain.toml が
       # pin した nightly で走る。target は pin した toolchain へ追加する必要があるため
       # ここでは targets: を使わず rustup target add で入れる。

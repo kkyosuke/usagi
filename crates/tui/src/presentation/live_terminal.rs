@@ -1218,6 +1218,28 @@ mod tests {
     }
 
     #[test]
+    fn clicking_either_half_of_a_table_link_opens_the_complete_url() {
+        let mut controls = LiveTerminalControls::default();
+        let mut browser = FakeBrowser::default();
+        let viewport = vec![
+            "│ https://example.test/ │ other │".to_owned(),
+            "│ pull/1120)            │ text  │".to_owned(),
+        ];
+        for point in [
+            TerminalPoint { row: 0, column: 2 },
+            TerminalPoint { row: 1, column: 4 },
+        ] {
+            assert!(controls.open_link_at(&viewport, point, &mut browser));
+        }
+        assert!(!controls.open_link_at(
+            &viewport,
+            TerminalPoint { row: 1, column: 0 },
+            &mut browser,
+        ));
+        assert_eq!(browser.opened, vec!["https://example.test/pull/1120"; 2]);
+    }
+
+    #[test]
     fn a_click_off_any_link_opens_nothing_and_leaves_feedback_untouched() {
         let mut controls = LiveTerminalControls::default();
         controls.set_feedback("earlier");

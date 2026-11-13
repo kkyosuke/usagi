@@ -68,6 +68,7 @@ fn knowledge_search_preview_rejects_missing_escaping_symlink_and_oversized_sourc
         ".usagi/memory/",
         ".usagi/memory/a.txt",
         ".usagi/issues/001-retired.md",
+        ".usagi/memory/MEMORY.md",
         ".usagi/memory/missing.md",
     ] {
         assert!(reader.read(path).is_err(), "{path}");

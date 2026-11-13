@@ -32,9 +32,9 @@ progress() {
 
 download() {
     if [ -t 2 ]; then
-        curl -fL --progress-bar "$1" -o "$2"
+        curl --proto '=https' --tlsv1.2 --path-as-is -fL --progress-bar "$1" -o "$2"
     else
-        curl -fsSL "$1" -o "$2"
+        curl --proto '=https' --tlsv1.2 --path-as-is -fsSL "$1" -o "$2"
     fi
 }
 
@@ -95,7 +95,10 @@ select_release() {
     if [ ! -r /dev/tty ]; then
         fail "a terminal is required to select a release"
     fi
-    releases="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | awk '!seen[$0]++')"
+    [ ! -L "$USAGI_DIR" ] || fail "usagi directory must not be a symlink"
+    [ ! -L "$BIN_DIR" ] || fail "bin directory must not be a symlink"
+    [ ! -L "$TARGET" ] || fail "target binary must not be a symlink"
+    releases="$(curl --proto '=https' --tlsv1.2 --path-as-is -fsSL "https://api.github.com/repos/${REPO}/releases" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | awk '!seen[$0]++')"
     [ -n "$releases" ] || fail "could not find any stable releases"
     release_count="$(printf '%s\n' "$releases" | wc -l | tr -d ' ')"
     current_version="$(read_version "$TARGET")"
@@ -177,7 +180,7 @@ release_action() {
 
 resolve_latest_release() {
     local version
-    version="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"(v?[0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | sed -n '1p')"
+    version="$(curl --proto '=https' --tlsv1.2 --path-as-is -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -nE 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"(v?[0-9]+\.[0-9]+\.[0-9]+)"[,]?$/\1/p' | sed -n '1p')"
     [ -n "$version" ] || fail "could not resolve the latest stable release"
     case "$version" in
         v*) USAGI_VERSION=$version ;;
@@ -339,8 +342,11 @@ wait_for_legacy_lock() {
             continue
         fi
         case "$legacy_owner" in
-            ''|0|*[!0-9]*|"$LEGACY_RELEASED_PID") break ;;
+            ''|*[!0-9]*) break ;;
         esac
+        [ "${#legacy_owner}" -le 10 ] || break
+        legacy_owner=$((10#$legacy_owner))
+        [ "$legacy_owner" -gt 0 ] && [ "$legacy_owner" -lt "$LEGACY_RELEASED_PID" ] || break
         process_is_live "$legacy_owner" || break
         # Keep the observed PID until it exits: legacy cleanup removes pid
         # before the directory, and must finish before this directory is reused.
@@ -355,6 +361,7 @@ wait_for_legacy_lock() {
 acquire_lock() {
     local node candidate name maximum=0 ticket owner blocked owner_pid
     LOCK_ATTEMPTS=0
+    [ ! -L "$USAGI_DIR" ] || fail "usagi directory must not be a symlink"
     mkdir -p -- "$USAGI_DIR"
     chmod 700 "$USAGI_DIR"
     [ ! -L "$LOCK_DIR" ] || fail "update lock directory must not be a symlink"
@@ -448,6 +455,15 @@ acquire_lock() {
     LOCK_HELD=1
 }
 
+is_valid_semver() {
+    local version=$1 core prerelease_identifier build_identifier semver
+    core='(0|[1-9][0-9]*)'
+    prerelease_identifier='(0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)'
+    build_identifier='[0-9A-Za-z-]+'
+    semver="^${core}\\.${core}\\.${core}(-${prerelease_identifier}(\\.${prerelease_identifier})*)?(\\+${build_identifier}(\\.${build_identifier})*)?$"
+    [[ "$version" =~ $semver ]]
+}
+
 platform_asset() {
     local os arch
     os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -513,7 +529,9 @@ verify_expected_version() {
     case "$expected" in
         v*) expected=${expected#v} ;;
     esac
+    is_valid_semver "$expected" || fail "invalid version artifact"
     [ "$expected" = "${requested#v}" ] || fail "version artifact does not match requested release $requested"
+    [ ! -L "$candidate" ] && [ -f "$candidate" ] || fail "staged usagi must be a regular file"
     actual="$(read_version "$candidate")"
     [ -n "$actual" ] || fail "staged usagi did not report a valid version"
     [ "$actual" = "$expected" ] || fail "staged usagi version $actual does not match release $expected"
@@ -525,6 +543,7 @@ if [ "$SYNC_DAEMON_ONLY" -eq 1 ]; then
     # installed binary, never an artifact superseded by a concurrent update.
     # This path performs no download and does not replace any binary.
     acquire_lock
+    [ ! -L "$BIN_DIR" ] || fail "bin directory must not be a symlink"
     publish_legacy_pid
     USAGI_UPDATE_SYNC_OUTCOMES=1 USAGI_UPDATE_SYNC_RETRY=1 "$TARGET" daemon sync-after-update
     exit 0
@@ -538,11 +557,13 @@ acquire_lock
 
 if [ -z "${USAGI_VERSION:-}" ]; then resolve_latest_release; fi
 case "$USAGI_VERSION" in
-    v[0-9]*.[0-9]*.[0-9]*) ;;
+    v*) is_valid_semver "${USAGI_VERSION#v}" || fail "invalid requested release version" ;;
     *) fail "invalid requested release version" ;;
 esac
 BASE_URL="https://github.com/${REPO}/releases/download/${USAGI_VERSION}"
 
+[ ! -L "$BIN_DIR" ] || fail "bin directory must not be a symlink"
+[ ! -L "$TARGET" ] || fail "target binary must not be a symlink"
 mkdir -p -- "$BIN_DIR"
 chmod 700 "$BIN_DIR"
 STAGE_DIR="$(mktemp -d "$BIN_DIR/.update.XXXXXXXX")"
@@ -565,8 +586,11 @@ verify_checksum "$CHECKSUM" "$ARCHIVE" "$ASSET_NAME"
 verify_archive "$ARCHIVE"
 tar -xzf "$ARCHIVE" -C "$STAGE_DIR" -- usagi
 CANDIDATE="$STAGE_DIR/usagi"
+[ ! -L "$CANDIDATE" ] && [ -f "$CANDIDATE" ] || fail "staged usagi must be a regular file"
 chmod 755 "$CANDIDATE"
 NEW_VERSION="$(verify_expected_version "$VERSION_FILE" "$CANDIDATE" "$USAGI_VERSION")"
+[ ! -L "$BIN_DIR" ] || fail "bin directory must not be a symlink"
+[ ! -L "$TARGET" ] || fail "target binary must not be a symlink"
 OLD_VERSION="$(read_version "$TARGET")"
 progress 2 "$PROGRESS_TOTAL" "usagi 本体を置き換えています"
 
@@ -575,6 +599,8 @@ progress 2 "$PROGRESS_TOTAL" "usagi 本体を置き換えています"
 # Publish the held PID before commit so even SIGKILL after a downgrade leaves
 # metadata that the older embedded installer can recover on its next update.
 publish_legacy_pid
+[ ! -L "$BIN_DIR" ] || fail "bin directory must not be a symlink"
+[ ! -L "$TARGET" ] || fail "target binary must not be a symlink"
 mv -f -- "$CANDIDATE" "$TARGET"
 
 # A managed self-update holds update.lock until the exact installed artifact

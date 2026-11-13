@@ -12,6 +12,7 @@ import time
 
 installer, original_home, fixture, fake_bin, cwd = sys.argv[1:]
 root = Path(original_home).parent
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
 
 for phase in ("download", "sync"):
     for interrupted in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):

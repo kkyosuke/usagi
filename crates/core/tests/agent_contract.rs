@@ -199,6 +199,24 @@ fn durable_snapshot_is_fail_closed_for_schema_and_revision_changes() {
         validate_snapshot(&catalog, &snapshot),
         Err(LaunchValidationError::PlanProvenanceMismatch)
     );
+    let mut tampered_plan_snapshot = DurableLaunchSnapshot::new(request.clone(), plan(&request, 7));
+    tampered_plan_snapshot.plan.program.clear();
+    assert_eq!(
+        validate_snapshot(&catalog, &tampered_plan_snapshot),
+        Err(LaunchValidationError::InvalidProgram)
+    );
+    tampered_plan_snapshot.plan.program = "claude".into();
+    tampered_plan_snapshot.plan.working_directory = PathBuf::new();
+    assert_eq!(
+        validate_snapshot(&catalog, &tampered_plan_snapshot),
+        Err(LaunchValidationError::InvalidWorkingDirectory)
+    );
+    tampered_plan_snapshot.plan.working_directory = PathBuf::from("/workspace");
+    tampered_plan_snapshot.plan.argv = vec!["api_key=leaked".into()];
+    assert_eq!(
+        validate_snapshot(&catalog, &tampered_plan_snapshot),
+        Err(LaunchValidationError::InvalidArgumentVector)
+    );
     let mut invalid_request = request;
     invalid_request.initial_prompt = Some(String::new());
     let invalid_snapshot =

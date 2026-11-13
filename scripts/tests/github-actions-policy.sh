@@ -43,4 +43,28 @@ case "$output" in
   *) echo "unexpected missing permissions failure: $output" >&2; exit 1 ;;
 esac
 
+cp -R "$tmp/ok" "$tmp/write-all"
+sed -i.bak '/^permissions:$/,/^$/c\
+permissions: write-all
+' "$tmp/write-all/.github/workflows/test.yml"
+if output=$(ruby "$subject" "$tmp/write-all" 2>&1); then
+  echo "expected write-all permissions fixture to fail" >&2
+  exit 1
+fi
+case "$output" in
+  *"grants write permission at workflow scope"*) ;;
+  *) echo "unexpected write-all failure: $output" >&2; exit 1 ;;
+esac
+
+cp -R "$tmp/ok" "$tmp/quoted-mutable"
+sed -i.bak 's/uses: actions\/checkout@[0-9a-f]*/uses: "actions\/checkout@v7"/' "$tmp/quoted-mutable/.github/workflows/test.yml"
+if output=$(ruby "$subject" "$tmp/quoted-mutable" 2>&1); then
+  echo "expected quoted mutable Action fixture to fail" >&2
+  exit 1
+fi
+case "$output" in
+  *"must pin actions/checkout@v7 to a full commit SHA"*) ;;
+  *) echo "unexpected quoted mutable Action failure: $output" >&2; exit 1 ;;
+esac
+
 echo "GitHub Actions policy fixtures: ok"

@@ -3,6 +3,32 @@
 
 # Enforce immutable third-party Actions and a read-only workflow baseline.
 
+require "yaml"
+
+def check_action_pin(action, relative, failures)
+  unless action.is_a?(String) && !action.strip.empty?
+    failures << "#{relative} has an invalid uses declaration: #{action.inspect}"
+    return
+  end
+  return if action.start_with?("./")
+
+  reference = action.split("@", 2)[1]
+  return if reference&.match?(/\A[0-9a-f]{40}\z/)
+
+  failures << "#{relative} must pin #{action} to a full commit SHA"
+end
+
+def workflow_permissions_read_only?(permissions)
+  case permissions
+  when "read-all"
+    true
+  when Hash
+    permissions.values.all? { |level| %w[read none].include?(level) }
+  else
+    false
+  end
+end
+
 root = File.expand_path(ARGV.fetch(0, File.join(__dir__, "../..")))
 failures = []
 workflows = Dir.glob(File.join(root, ".github/workflows/*.{yml,yaml}")).sort
@@ -10,20 +36,38 @@ workflows = Dir.glob(File.join(root, ".github/workflows/*.{yml,yaml}")).sort
 workflows.each do |path|
   relative = path.delete_prefix("#{root}/")
   source = File.read(path, encoding: Encoding::UTF_8)
+  begin
+    document = Psych.safe_load(source, permitted_classes: [], aliases: false)
+  rescue Psych::Exception => e
+    failures << "#{relative} is not valid YAML: #{e.message}"
+    next
+  end
 
-  failures << "#{relative} is missing top-level permissions" unless source.match?(/^permissions:\s*$/)
-  source.lines.each_with_index do |line, index|
-    if (match = line.match(/^\s*-?\s*uses:\s*([^\s#]+)/))
-      action = match[1]
-      next if action.start_with?("./")
+  unless document.is_a?(Hash)
+    failures << "#{relative} must parse as a YAML mapping"
+    next
+  end
 
-      reference = action.split("@", 2)[1]
-      unless reference&.match?(/\A[0-9a-f]{40}\z/)
-        failures << "#{relative}:#{index + 1} must pin #{action} to a full commit SHA"
-      end
-    end
-    if line.match?(/^  [a-z-]+:\s*write\s*$/)
-      failures << "#{relative}:#{index + 1} grants write permission at workflow scope"
+  if !document.key?("permissions")
+    failures << "#{relative} is missing top-level permissions"
+  elsif !workflow_permissions_read_only?(document["permissions"])
+    failures << "#{relative} grants write permission at workflow scope"
+  end
+
+  jobs = document["jobs"]
+  next unless jobs.is_a?(Hash)
+
+  jobs.each_value do |job|
+    next unless job.is_a?(Hash)
+
+    check_action_pin(job["uses"], relative, failures) if job.key?("uses")
+    steps = job["steps"]
+    next unless steps.is_a?(Array)
+
+    steps.each do |step|
+      next unless step.is_a?(Hash) && step.key?("uses")
+
+      check_action_pin(step["uses"], relative, failures)
     end
   end
 end

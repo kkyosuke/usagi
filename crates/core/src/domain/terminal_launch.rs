@@ -17,9 +17,19 @@ use crate::domain::{
     id::{SessionId, TerminalRef, WorkspaceId, WorktreeId},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct TerminalProfileId(String);
+
+impl<'de> Deserialize<'de> for TerminalProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl TerminalProfileId {
     /// Creates a canonical terminal profile ID.
@@ -371,5 +381,14 @@ mod tests {
                 .to_string()
                 .starts_with("terminal launch validation failed")
         }));
+        assert_eq!(
+            serde_json::from_str::<TerminalProfileId>("\"login-shell\"")
+                .unwrap()
+                .as_str(),
+            "login-shell"
+        );
+        for bad in ["\"\"", "\"bad|pipe\"", "\"UPPER\""] {
+            assert!(serde_json::from_str::<TerminalProfileId>(bad).is_err());
+        }
     }
 }
