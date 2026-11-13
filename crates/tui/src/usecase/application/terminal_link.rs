@@ -63,6 +63,7 @@ const EDGE_SLACK: usize = 1;
 struct Columns {
     rows: Vec<Vec<char>>,
     width: usize,
+    // Table cell padding is already removed; remaining blanks separate tokens.
     indented_wrap: bool,
 }
 
@@ -605,6 +606,103 @@ mod tests {
         // A blank next row ends the logical line.
         let view = grid(12, &["https://a.io", ""]);
         assert_eq!(url_at(&view, at(0, 0)).as_deref(), Some("https://a.io"));
+    }
+
+    #[test]
+    fn table_wrapped_pr_links_open_from_every_underlined_cell() {
+        let first = "#1120 (https://github.com/Accel-Hack/kada";
+        let second = "i-navi/pull/1120)";
+        let url = "https://github.com/Accel-Hack/kadai-navi/pull/1120";
+        for border in ['│', '┃', '║', '|'] {
+            let view: Vec<_> = [first, second]
+                .iter()
+                .map(|content| {
+                    format!(
+                        "  {border} 日 {border} {content:width$} {border} https://other.test  {border}",
+                        width = first.len()
+                    )
+                })
+                .collect();
+            // The wide glyph in the preceding column occupies two cells.
+            let expected: HashSet<_> = (16..9 + first.len())
+                .map(|column| at(0, column))
+                .chain((9..9 + second.len() - 1).map(|column| at(1, column)))
+                .chain((0..2).flat_map(|row| {
+                    (12 + first.len()..30 + first.len()).map(move |column| at(row, column))
+                }))
+                .collect();
+            // The other column's complete links are deliberately padded, so
+            // they do not wrap into one another.
+            let cells = link_cells(&view);
+            assert_eq!(cells, expected, "{border}");
+            for row in 0..view.len() {
+                for column in 0..view[row].chars().map(char_width).sum() {
+                    let point = at(row, column);
+                    let expected_url = if !cells.contains(&point) {
+                        None
+                    } else if column < 9 + first.len() {
+                        Some(url)
+                    } else {
+                        Some("https://other.test")
+                    };
+                    assert_eq!(url_at(&view, point).as_deref(), expected_url, "{point:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn table_links_can_wrap_over_three_rows_and_split_the_scheme() {
+        let view = grid(
+            18,
+            &[
+                "│ https:/ │ text │",
+                "│ /exampl │ more │",
+                "│ e.test) │ end  │",
+            ],
+        );
+        for point in [at(0, 2), at(1, 2), at(2, 6)] {
+            assert_eq!(
+                url_at(&view, point).as_deref(),
+                Some("https://example.test")
+            );
+        }
+        assert_eq!(url_at(&view, at(2, 8)), None);
+    }
+
+    #[test]
+    fn table_links_stop_at_separators_blanks_and_changed_column_boundaries() {
+        for next in [
+            "├────────────────┤",
+            "│                │",
+            "│ tail            │",
+            "ordinary text",
+        ] {
+            let view = grid(24, &["│ https://a.test │", next, "│ tail          │"]);
+            assert_eq!(url_at(&view, at(0, 2)).as_deref(), Some("https://a.test"));
+            assert_eq!(url_at(&view, at(2, 2)), None);
+        }
+    }
+
+    #[test]
+    fn table_projection_preserves_links_outside_tables_and_literal_url_pipes() {
+        let view = grid(
+            70,
+            &["https://before.test │ https://cell.test  │ https://after.test"],
+        );
+        for url in [
+            "https://before.test",
+            "https://cell.test",
+            "https://after.test",
+        ] {
+            let column = view[0][..view[0].find(url).unwrap()].chars().count();
+            assert_eq!(url_at(&view, at(0, column)).as_deref(), Some(url));
+        }
+        let view = grid(50, &["https://example.test/a|b|c"]);
+        assert_eq!(
+            url_at(&view, at(0, 0)).as_deref(),
+            Some("https://example.test/a|b|c")
+        );
     }
 
     #[test]
