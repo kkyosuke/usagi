@@ -128,18 +128,19 @@ pub(super) fn lexical_prefix_overlaps_path(prefix: &Path, path: &Path) -> bool {
 pub(super) fn workspace_repository_relatives(workspace_root: &Path) -> Result<Vec<PathBuf>, ()> {
     use super::SystemSessionWorktreeIo;
     use usagi_daemon::usecase::session_runtime::SessionWorktreeIo as _;
+    if !workspace_root.is_dir() {
+        return Err(());
+    }
     if std::fs::symlink_metadata(workspace_root.join(".git")).is_ok() {
         return Ok(vec![PathBuf::new()]);
     }
-    SystemSessionWorktreeIo
+    let relatives = SystemSessionWorktreeIo
         .workspace_repositories(workspace_root)
-        .map(|relatives| {
-            relatives
-                .into_iter()
-                .filter(|relative| !relative.as_os_str().is_empty())
-                .collect()
-        })
-        .map_err(|_| ())
+        .unwrap_or_default();
+    Ok(relatives
+        .into_iter()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .collect())
 }
 
 /// Git authority granted to one linked session worktree.
