@@ -2352,7 +2352,7 @@ tab close / detach は予約済み retry を取り消す。
 retry 中に replacement terminal を spawn せず、stale / orphaned / exited を一時切断として再試行しない。
 
 primary screen から押し出された行は 10,000 行を上限とする local scrollback として保持し、right pane は live bottom を基準に
-表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。描画前に ready になった同方向の wheel burst は最大 32 notch まで 1 action に集約し、移動量を保ったまま frame rebuild / diff / flush を 1 回にする。逆方向または wheel 以外の最初の event は次回へ保持して入力順序を変えず、上限到達時はいったん描画する。`Ctrl-O ↑` / `Ctrl-O ↓` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
+表示する。alternate screen のスクロールは現在の full-screen frame の一部であり、過去 frame を scrollback へ混在させない。ホイールは live program の DEC input mode に従う。mouse reporting（1000 / 1002 / 1003）が有効なら pointer cell を program の encoding（既定 / UTF-8 / SGR）で PTY へ送り、mouse reporting のない alternate screen では application cursor mode に合わせた上下キーを送る。通常の primary screen のときだけ、ホイール上/下で usagi の retained history を古い出力方向／live bottom 方向へ 3 行移動する。描画前に ready になった同方向・同一 cell の wheel burst は最大 32 notch まで 1 action に集約し、移動量を保ったまま frame rebuild / diff / flush を 1 回にする。逆方向・別 cell または wheel 以外の最初の event は次回へ保持して入力順序を変えず、上限到達時はいったん描画する。`Ctrl-O ↑` / `Ctrl-O ↓` は program の mode に関係なく usagi の履歴を 1 行ずつ動かす。新しい
 snapshot で履歴が短くなった場合は offset を有効範囲へ正規化する。`↑` / `↓` は scrollback 操作に予約せず、PTY の
 history navigation へそのまま送る。right pane の footer の直前には常に 1 行の空白を置く。
 
@@ -2387,7 +2387,11 @@ burst も1件ずつ収束する。入力は1 MiB、stdout/stderr は各8 KiBを�
 出力中の `http(s)` URL は左クリックで OS 既定ブラウザに開ける。URL が載るセルは下線で装飾し、クリック可能で
 あることを示す。drag で非空の選択が成立した release は**コピー**、選択が生じない素のクリックだけを**リンクオープン**として扱い、
 両者は排他である（選択中はリンクを開かない）。クリック位置のセルを保持中の行/列へ写し、行末で折り返した URL は 1 本に結合して
-開く。端末の自動折り返しに加え、agent（Claude Code など）が自身の幅で URL を折り返し、続きを字下げした行も、右端（1 列の余白を許容）まで達した行の末尾と次の行の字下げ後の先頭がともに URL 文字であれば字下げを除いて結合する。URL 上でないセルのクリックはブラウザを開かず、通常クリックとして保持中の選択だけを解除し、scrollback offset は変えない。検出・検証は純粋コアが担い（`http(s)`
+開く。端末の自動折り返しに加え、agent（Claude Code など）が自身の幅で URL を折り返し、続きを字下げした行も、右端（1 列の余白を許容）まで達した行の末尾と次の行の字下げ後の先頭がともに URL 文字であれば字下げを除いて結合する。
+`│`・`┃`・`║`・`|` の縦罫線と左右 1 桁の空白で区切られた表では、同じ位置のセル内で折り返した URL も
+結合し、前半・後半のどちらからでも開ける。罫線・余白・隣の列はリンクに含めず、横罫線や列位置の変化を越えて結合しない。
+折り返しはセルの最終桁が空白でないことから推定するため、折り返しと同じ配置の明示的な改行は区別しない。
+URL 上でないセルのクリックはブラウザを開かず、通常クリックとして保持中の選択だけを解除し、scrollback offset は変えない。検出・検証は純粋コアが担い（`http(s)`
 スキームのみ許可し、制御文字・ESC・空白・非 ASCII を拒否する）、起動直前にも再検証してから argv で spawn するため、ANSI/端末制御
 列がブラウザ引数へ渡らない。起動は [PR modal と browser effect](#pr-modal-と-browser-effect) と同じ browser effect（macOS `open` /
 Linux `xdg-open` / Windows `cmd /C start "" <url>`）を使い、未対応 platform・起動失敗は TUI を乱さず safe feedback にする。

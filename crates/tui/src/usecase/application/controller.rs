@@ -593,6 +593,14 @@ impl DecisionEditor {
     pub fn error(&self) -> Option<&SafeError> {
         self.error.as_ref()
     }
+    #[must_use]
+    pub fn has_unsaved_draft(&self) -> bool {
+        self.decision.status == UserDecisionStatus::Pending
+            && (!self.freeform.is_empty()
+                || !self.comment.is_empty()
+                || !self.checked_options.is_empty()
+                || self.confirmation.is_some())
+    }
 }
 
 /// The decisions overlay is either its persistent pending list or one answer
@@ -5722,6 +5730,16 @@ fn activate_selected(state: &mut AppState) -> Vec<Effect> {
             state.route = Route::Home(HomeMode::Closeup);
             state.closeup_action_forced = false;
             state.overlay = None;
+            state.create_session = None;
+            state.rename_session = None;
+            state.note_editor = None;
+            state.environment_editor = None;
+            state.role_editor = None;
+            if let Some(overlay) = state.decision_overlay.as_mut() {
+                overlay.editor = None;
+                overlay.requested = overlay.requested.or(overlay.exact);
+            }
+            state.force_remove_confirmation = None;
             Vec::new()
         }
         // Root and stale session selections are not Home rows and cannot open a

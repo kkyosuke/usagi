@@ -3288,3 +3288,51 @@ fn unified_search_owns_text_paste_and_control_input_over_a_live_terminal() {
     assert_eq!(calls.inputs, vec![b"x".to_vec()]);
     assert_eq!(calls.launches, 0);
 }
+
+#[test]
+fn workspace_unsaved_surface_covers_session_rename_and_decision_drafts() {
+    let workspace = WorkspaceId::new();
+    let session = SessionId::new();
+    let mut runtime = WorkspaceRuntime::new(workspace, vec![session]);
+    let _ = runtime.apply_event(AppEvent::Backend(BackendEvent::SessionLabels(
+        BTreeMap::from([(session, "demo-session".into())]),
+    )));
+    assert!(!workspace_has_unsaved_surface(&runtime));
+
+    // Selecting the session and opening RenameSession marks the workspace as
+    // having an unsaved surface; activating a row clears open modal editors.
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Char('r')));
+    assert!(runtime.state().rename_session_form().is_some());
+    assert!(workspace_has_unsaved_surface(&runtime));
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    assert!(!workspace_has_unsaved_surface(&runtime));
+
+    let _ = runtime.apply_event(AppEvent::Key(AppKey::OpenEnvironment));
+    assert_eq!(runtime.state().overlay(), Some(Overlay::Environment));
+    let _ = runtime.apply_event(AppEvent::VisitSession(session));
+    assert_eq!(runtime.state().overlay(), None);
+    assert!(runtime.state().environment_editor().is_none());
+    let material = home_frame_material(
+        24,
+        80,
+        &runtime,
+        "demo",
+        &[],
+        None,
+        health(),
+        &BTreeMap::new(),
+        None,
+        None,
+        now(),
+    );
+    assert!(material.environment_editor.is_none());
+
+    let mut decision_runtime = super::terminal::decision_selection_runtime_with_title("Draft");
+    assert!(!workspace_has_unsaved_surface(&decision_runtime));
+    let _ = decision_runtime.apply_event(AppEvent::Key(AppKey::SetDecisionFreeform("a".into())));
+    assert!(workspace_has_unsaved_surface(&decision_runtime));
+    let _ = decision_runtime.apply_event(AppEvent::Key(AppKey::SetDecisionFreeform(String::new())));
+    assert!(!workspace_has_unsaved_surface(&decision_runtime));
+    let _ = decision_runtime.apply_event(AppEvent::Key(AppKey::Escape));
+    assert!(!workspace_has_unsaved_surface(&decision_runtime));
+}

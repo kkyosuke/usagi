@@ -276,6 +276,92 @@ fn record_lineage(
     Ok(())
 }
 
+fn prune_workspace_registry_entry(
+    workspace_registry: &mut WorkspaceRegistry,
+    registry: &Registry,
+    lifecycle: Option<&crate::domain::session_lifecycle::WorkspaceLifecycleState>,
+) -> bool {
+    let before_agents = workspace_registry.agent_workspaces.len();
+    workspace_registry.agent_workspaces.retain(|agent_id, _| {
+        registry
+            .agents
+            .iter()
+            .any(|agent| agent.agent_id == *agent_id)
+            || workspace_registry.prompts.iter().any(|prompt| {
+                prompt
+                    .caller
+                    .as_ref()
+                    .is_some_and(|caller| caller.agent_id == *agent_id)
+            })
+    });
+    if workspace_registry.agent_workspaces.len() != before_agents {
+        return true;
+    }
+    let mut protected = BTreeSet::new();
+    if let Some(state) = lifecycle {
+        protected.extend(
+            state
+                .sessions
+                .iter()
+                .map(|session| (state.workspace_id, session.session_id)),
+        );
+    }
+    for prompt in &workspace_registry.prompts {
+        protected.extend(prompt.session_id.map(|id| (prompt.workspace_id, id)));
+        protected.extend(
+            prompt
+                .caller
+                .as_ref()
+                .and_then(|caller| caller.session_id)
+                .map(|id| (prompt.workspace_id, id)),
+        );
+    }
+    protected.extend(
+        workspace_registry
+            .delegation_reservations
+            .iter()
+            .filter_map(|res| res.parent.map(|parent| (res.workspace, parent))),
+    );
+    protected.extend(registry.bindings.iter().flat_map(|binding| {
+        workspace_registry
+            .agent_workspaces
+            .get(&binding.worker.agent_id)
+            .copied()
+            .into_iter()
+            .flat_map(move |workspace| {
+                binding
+                    .caller
+                    .session_id
+                    .into_iter()
+                    .chain(binding.worker.session_id)
+                    .map(move |id| (workspace, id))
+            })
+    }));
+    loop {
+        let mut added = false;
+        for lineage in &workspace_registry.lineages {
+            if protected.contains(&(lineage.workspace, lineage.session))
+                && let Some(parent) = lineage.parent
+                && protected.insert((lineage.workspace, parent))
+            {
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    let Some(index) = workspace_registry
+        .lineages
+        .iter()
+        .position(|lineage| !protected.contains(&(lineage.workspace, lineage.session)))
+    else {
+        return false;
+    };
+    workspace_registry.lineages.remove(index);
+    true
+}
+
 /// Durable, secret-free proof that an Agent operation was prepared before its
 /// one permitted spawn attempt.  The opaque credential value is deliberately
 /// absent; only its daemon-minted ephemeral provenance is recorded.
@@ -615,11 +701,7 @@ impl DispatchStore {
         } else {
             workspace_registry.prompts.push(queued.clone());
         }
-        json_file::write_atomic(
-            &self.dir,
-            &self.workspace_registry_path(),
-            &workspace_registry,
-        )?;
+        self.write_workspace_registry(&mut workspace_registry, legacy_registry.as_ref())?;
 
         // A session UUID is resolved from the fenced workspace before this
         // method is called, so a new prompt may safely supersede its legacy
@@ -701,11 +783,7 @@ impl DispatchStore {
                     self.write_registry(&mut registry)?;
                 }
             }
-            json_file::write_atomic(
-                &self.dir,
-                &self.workspace_registry_path(),
-                &workspace_registry,
-            )?;
+            self.write_workspace_registry(&mut workspace_registry, None)?;
             return Ok(Some(prompt.into_legacy_shape()));
         }
         if session_id.is_some() {
@@ -774,8 +852,7 @@ impl DispatchStore {
             .agent_workspaces
             .insert(agent.agent_id, workspace_id);
         self.prepare_registry(&mut registry)?;
-        self.validate_workspace_registry(&workspace_registry)?;
-        self.write_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&mut workspace_registry, Some(&registry))?;
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(agent)
     }
@@ -823,7 +900,7 @@ impl DispatchStore {
             workspace_registry
                 .agent_workspaces
                 .insert(agent.agent_id, workspace_id);
-            self.write_workspace_registry(&workspace_registry)?;
+            self.write_workspace_registry(&mut workspace_registry, Some(&registry))?;
             return Ok(agent);
         }
         let agent = Agent {
@@ -843,8 +920,7 @@ impl DispatchStore {
         // inverse order could publish an unowned Agent that a later
         // workspace might incorrectly adopt.
         self.prepare_registry(&mut registry)?;
-        self.validate_workspace_registry(&workspace_registry)?;
-        self.write_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&mut workspace_registry, Some(&registry))?;
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(agent)
     }
@@ -992,7 +1068,7 @@ impl DispatchStore {
                 operation: operation_id,
                 parent: caller.session_id,
             });
-        self.write_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&mut workspace_registry, Some(&registry))?;
         Ok(DelegationReservationOutcome::Reserved)
     }
 
@@ -1010,7 +1086,7 @@ impl DispatchStore {
             .retain(|reservation| reservation.operation != operation_id);
         let changed = workspace_registry.delegation_reservations.len() != before;
         if changed {
-            self.write_workspace_registry(&workspace_registry)?;
+            self.write_workspace_registry(&mut workspace_registry, None)?;
         }
         Ok(changed)
     }
@@ -1078,8 +1154,7 @@ impl DispatchStore {
             session_id,
             parent_session_id,
         )?;
-        self.validate_workspace_registry(&workspace_registry)?;
-        self.write_workspace_registry(&workspace_registry)
+        self.write_workspace_registry(&mut workspace_registry, None)
     }
 
     /// Resolves the absolute delegation depth of an organization member from
@@ -1309,8 +1384,7 @@ impl DispatchStore {
         }
         let reservation = registry.reserve_admission(agent, run, binding, admission);
         self.prepare_registry(&mut registry)?;
-        self.validate_workspace_registry(&workspace_registry)?;
-        self.write_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&mut workspace_registry, Some(&registry))?;
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(reservation)
     }
@@ -1361,7 +1435,7 @@ impl DispatchStore {
         // would leak a concurrency slot forever.
         if !workspace_registry.delegation_reservations.is_empty() {
             workspace_registry.delegation_reservations.clear();
-            self.write_workspace_registry(&workspace_registry)?;
+            self.write_workspace_registry(&mut workspace_registry, Some(&registry))?;
         }
         self.write_registry(&mut registry)?;
         Ok(reconciled)
@@ -1480,7 +1554,7 @@ impl DispatchStore {
     pub fn upsert_binding(&self, binding: DispatchBinding) -> Result<DispatchBinding> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
-        let workspace_registry = self.load_workspace_registry()?;
+        let mut workspace_registry = self.load_workspace_registry()?;
         if let Some(existing) = registry
             .bindings
             .iter_mut()
@@ -1491,8 +1565,7 @@ impl DispatchStore {
             registry.bindings.push(binding.clone());
         }
         self.prepare_registry(&mut registry)?;
-        self.validate_workspace_registry(&workspace_registry)?;
-        self.write_workspace_registry(&workspace_registry)?;
+        self.write_workspace_registry(&mut workspace_registry, Some(&registry))?;
         json_file::write_atomic(&self.dir, &self.registry_path(), &registry)?;
         Ok(binding)
     }
@@ -1740,15 +1813,35 @@ impl DispatchStore {
         Ok(json_file::read(&self.workspace_registry_path())?.unwrap_or_default())
     }
 
-    fn write_workspace_registry(&self, registry: &WorkspaceRegistry) -> Result<()> {
-        self.validate_workspace_registry(registry)?;
+    fn write_workspace_registry(
+        &self,
+        registry: &mut WorkspaceRegistry,
+        known_registry: Option<&Registry>,
+    ) -> Result<()> {
+        self.prepare_workspace_registry(registry, known_registry)?;
         json_file::write_atomic(&self.dir, &self.workspace_registry_path(), registry)
     }
 
-    fn validate_workspace_registry(&self, registry: &WorkspaceRegistry) -> Result<()> {
-        let bytes = serialized_document_len(registry)?;
-        if bytes > self.limits.workspace_registry_bytes {
-            anyhow::bail!("dispatch workspace registry capacity is exhausted");
+    fn prepare_workspace_registry(
+        &self,
+        workspace_registry: &mut WorkspaceRegistry,
+        known_registry: Option<&Registry>,
+    ) -> Result<()> {
+        if serialized_document_len(workspace_registry)? <= self.limits.workspace_registry_bytes {
+            return Ok(());
+        }
+        let owned_registry;
+        let registry = if let Some(registry) = known_registry {
+            registry
+        } else {
+            owned_registry = self.load_registry()?;
+            &owned_registry
+        };
+        let lifecycle = DaemonLifecycleStore::new(&self.dir).load()?;
+        while serialized_document_len(workspace_registry)? > self.limits.workspace_registry_bytes {
+            if !prune_workspace_registry_entry(workspace_registry, registry, lifecycle.as_ref()) {
+                anyhow::bail!("dispatch workspace registry capacity is exhausted");
+            }
         }
         Ok(())
     }
@@ -2990,7 +3083,9 @@ mod tests {
         ownership
             .agent_workspaces
             .insert(admitted_agent_id, workspace);
-        store.write_workspace_registry(&ownership).unwrap();
+        store
+            .write_workspace_registry(&mut ownership, None)
+            .unwrap();
         store
             .record_session_parent(workspace, admitted_session, Some(parent_session))
             .unwrap();
@@ -4661,6 +4756,13 @@ mod tests {
                 .to_string()
                 .contains("workspace registry capacity is exhausted")
         );
+        assert!(
+            workspace_limited
+                .queue_prompt(WorkspaceId::new(), Some(session), "prompt".into(), now())
+                .unwrap_err()
+                .to_string()
+                .contains("workspace registry capacity is exhausted")
+        );
         assert!(!workspace_limited.registry_path().exists());
         assert!(!workspace_limited.workspace_registry_path().exists());
 
@@ -4741,6 +4843,190 @@ mod tests {
         assert_eq!(registry.runs, [] as [DispatchRun; 0]);
         assert_eq!(registry.bindings, [] as [DispatchBinding; 0]);
         assert_eq!(registry.admissions, [] as [AgentAdmissionReservation; 0]);
+    }
+
+    #[test]
+    fn workspace_registry_pruning_evicts_only_orphaned_agents() {
+        let workspace = WorkspaceId::new();
+        let live_agent = AgentId::new();
+        let prompt_caller = AgentId::new();
+        let orphan = AgentId::new();
+        let worker_agent = AgentId::new();
+        let session = SessionId::new();
+        let registry = Registry {
+            agents: vec![agent(session, live_agent), agent(session, worker_agent)],
+            bindings: vec![DispatchBinding {
+                run_id: OperationId::new(),
+                caller: CallerRef {
+                    session_id: Some(session),
+                    agent_id: live_agent,
+                },
+                worker: WorkerRef {
+                    session_id: Some(session),
+                    agent_id: worker_agent,
+                },
+            }],
+            ..Registry::default()
+        };
+        let mut workspace_registry = WorkspaceRegistry {
+            agent_workspaces: BTreeMap::from([
+                (live_agent, workspace),
+                (prompt_caller, workspace),
+                (orphan, workspace),
+                (worker_agent, workspace),
+            ]),
+            prompts: vec![WorkspacePrompt {
+                workspace_id: workspace,
+                session_id: Some(session),
+                prompt: "queued".into(),
+                queued_at: now(),
+                caller: Some(CallerRef {
+                    session_id: Some(session),
+                    agent_id: prompt_caller,
+                }),
+                operation_id: None,
+            }],
+            delegation_reservations: Vec::new(),
+            lineages: Vec::new(),
+        };
+        assert!(prune_workspace_registry_entry(
+            &mut workspace_registry,
+            &registry,
+            None
+        ));
+        assert!(!workspace_registry.agent_workspaces.contains_key(&orphan));
+        assert!(
+            workspace_registry
+                .agent_workspaces
+                .contains_key(&live_agent)
+        );
+        assert!(
+            workspace_registry
+                .agent_workspaces
+                .contains_key(&prompt_caller)
+        );
+        assert!(
+            workspace_registry
+                .agent_workspaces
+                .contains_key(&worker_agent)
+        );
+        assert!(!prune_workspace_registry_entry(
+            &mut workspace_registry,
+            &registry,
+            None
+        ));
+    }
+
+    #[test]
+    fn workspace_registry_pruning_evicts_only_retired_lineages() {
+        use crate::domain::session_lifecycle::{ManagedSession, WorkspaceLifecycleState};
+        let workspace = WorkspaceId::new();
+        let worker_agent = AgentId::new();
+        let parent = ManagedSession::adopt_available("parent".into(), now());
+        let lifecycle_parent = parent.session_id;
+        let mut child = ManagedSession::adopt_available("child".into(), now());
+        child.parent_session_id = Some(lifecycle_parent);
+        let lifecycle_child = child.session_id;
+        let prompt_s = SessionId::new();
+        let caller_s = SessionId::new();
+        let reserved_s = SessionId::new();
+        let b_caller_s = SessionId::new();
+        let b_worker_s = SessionId::new();
+        let retired_s = SessionId::new();
+        let registry = Registry {
+            agents: vec![agent(b_worker_s, worker_agent)],
+            bindings: vec![DispatchBinding {
+                run_id: OperationId::new(),
+                caller: CallerRef {
+                    session_id: Some(b_caller_s),
+                    agent_id: AgentId::new(),
+                },
+                worker: WorkerRef {
+                    session_id: Some(b_worker_s),
+                    agent_id: worker_agent,
+                },
+            }],
+            ..Registry::default()
+        };
+        let mut lifecycle = WorkspaceLifecycleState::new(workspace, now());
+        lifecycle.sessions = vec![child];
+        let lineage = |session, parent| SessionLineage {
+            workspace,
+            session,
+            parent,
+        };
+        let mut workspace_registry = WorkspaceRegistry {
+            agent_workspaces: BTreeMap::from([(worker_agent, workspace)]),
+            prompts: vec![WorkspacePrompt {
+                workspace_id: workspace,
+                session_id: Some(prompt_s),
+                prompt: "queued".into(),
+                queued_at: now(),
+                caller: Some(CallerRef {
+                    session_id: Some(caller_s),
+                    agent_id: worker_agent,
+                }),
+                operation_id: None,
+            }],
+            delegation_reservations: vec![DelegationReservation {
+                workspace,
+                operation: OperationId::new(),
+                parent: Some(reserved_s),
+            }],
+            lineages: vec![
+                lineage(retired_s, None),
+                lineage(lifecycle_parent, None),
+                lineage(lifecycle_child, Some(lifecycle_parent)),
+                lineage(prompt_s, None),
+                lineage(caller_s, None),
+                lineage(reserved_s, None),
+                lineage(b_caller_s, None),
+                lineage(b_worker_s, None),
+            ],
+        };
+        assert!(prune_workspace_registry_entry(
+            &mut workspace_registry,
+            &registry,
+            Some(&lifecycle)
+        ));
+        assert!(
+            !workspace_registry
+                .lineages
+                .iter()
+                .any(|item| item.session == retired_s)
+        );
+        assert!(!prune_workspace_registry_entry(
+            &mut workspace_registry,
+            &registry,
+            Some(&lifecycle)
+        ));
+    }
+
+    #[test]
+    fn workspace_registry_byte_pressure_evicts_retired_lineage_on_write() {
+        let workspace = WorkspaceId::new();
+        let retired_session = SessionId::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        store
+            .record_session_parent(workspace, retired_session, None)
+            .unwrap();
+        let one_lineage_bytes =
+            serialized_document_len(&store.load_workspace_registry().unwrap()).unwrap();
+        let bounded = DispatchStore::with_limits(
+            tmp.path(),
+            DispatchStoreLimits {
+                workspace_registry_bytes: one_lineage_bytes,
+                ..DispatchStoreLimits::default()
+            },
+        );
+        let replacement_session = SessionId::new();
+        bounded
+            .record_session_parent(workspace, replacement_session, None)
+            .unwrap();
+        let reloaded = bounded.load_workspace_registry().unwrap();
+        assert_eq!(reloaded.lineages.len(), 1);
+        assert_eq!(reloaded.lineages[0].session, replacement_session);
     }
 
     #[cfg(unix)]

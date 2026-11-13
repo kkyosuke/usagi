@@ -218,9 +218,19 @@ pub struct InboxMessage {
 }
 
 /// Stable, code-defined identity of an agent profile.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct AgentProfileId(String);
+
+impl<'de> Deserialize<'de> for AgentProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl AgentProfileId {
     /// Creates a canonical profile ID.
@@ -311,9 +321,19 @@ impl AgentProfile {
 }
 
 /// An adapter-opaque, syntactically validated model selector.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct ModelSelector(String);
+
+impl<'de> Deserialize<'de> for ModelSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl ModelSelector {
     /// Creates a selector without imposing an adapter-specific allowlist.
@@ -321,10 +341,16 @@ impl ModelSelector {
     /// # Errors
     ///
     /// Returns [`LaunchValidationError::InvalidModelSelector`] when `value` is
-    /// empty, too long, or contains control characters.
+    /// empty, too long, option-like, whitespace-padded, or contains control
+    /// characters.
     pub fn new(value: impl Into<String>) -> Result<Self, LaunchValidationError> {
         let value = value.into();
-        if !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control) {
+        if !value.is_empty()
+            && value.len() <= 128
+            && !value.starts_with('-')
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+        {
             Ok(Self(value))
         } else {
             Err(LaunchValidationError::InvalidModelSelector)
@@ -673,9 +699,19 @@ impl LaunchRequest {
 
 /// A public environment-variable name. A plan stores only this allowlist, not
 /// values; adapters inject any values after durable resolution.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct EnvironmentVariableName(String);
+
+impl<'de> Deserialize<'de> for EnvironmentVariableName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl EnvironmentVariableName {
     /// Creates a portable environment variable name.
@@ -733,26 +769,37 @@ impl LaunchPlan {
         environment_allowlist: impl IntoIterator<Item = EnvironmentVariableName>,
         working_directory: PathBuf,
     ) -> Result<Self, LaunchValidationError> {
-        let program = program.into();
-        if program.is_empty() || program.contains('\0') {
+        let plan = Self {
+            profile_id,
+            profile_revision,
+            program: program.into(),
+            argv,
+            environment_allowlist: environment_allowlist.into_iter().collect(),
+            working_directory,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    /// Revalidates every caller- or disk-supplied field of a launch plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for empty fields, NULs, or secret-like argument
+    /// values.
+    pub fn validate(&self) -> Result<(), LaunchValidationError> {
+        if self.program.is_empty() || self.program.contains('\0') {
             return Err(LaunchValidationError::InvalidProgram);
         }
-        if working_directory.as_os_str().is_empty() {
+        if self.working_directory.as_os_str().is_empty() {
             return Err(LaunchValidationError::InvalidWorkingDirectory);
         }
-        if argv.iter().any(|argument| {
+        if self.argv.iter().any(|argument| {
             argument.is_empty() || argument.contains('\0') || contains_secret_marker(argument)
         }) {
             return Err(LaunchValidationError::InvalidArgumentVector);
         }
-        Ok(Self {
-            profile_id,
-            profile_revision,
-            program,
-            argv,
-            environment_allowlist: environment_allowlist.into_iter().collect(),
-            working_directory,
-        })
+        Ok(())
     }
 }
 
@@ -1186,5 +1233,42 @@ mod tests {
                 .reduce(dominant_agent_status),
             Some(AgentStatus::Failed)
         );
+    }
+
+    #[test]
+    fn domain_identifiers_and_model_selectors_enforce_invariants_on_deserialize() {
+        assert_eq!(
+            serde_json::from_str::<AgentProfileId>("\"claude-code\"")
+                .unwrap()
+                .as_str(),
+            "claude-code"
+        );
+        for bad in ["\"\"", "\"UPPER\"", "\"bad space\""] {
+            assert!(serde_json::from_str::<AgentProfileId>(bad).is_err());
+        }
+
+        assert_eq!(
+            serde_json::from_str::<ModelSelector>("\"gpt-5-codex\"")
+                .unwrap()
+                .as_str(),
+            "gpt-5-codex"
+        );
+        for bad in ["\"\"", "\"-o=evil\"", "\" padded \"", "\"bad\\nmodel\""] {
+            assert!(serde_json::from_str::<ModelSelector>(bad).is_err());
+        }
+        assert_eq!(
+            ModelSelector::new("--dangerously-skip-permissions"),
+            Err(LaunchValidationError::InvalidModelSelector)
+        );
+
+        assert_eq!(
+            serde_json::from_str::<EnvironmentVariableName>("\"OPENAI_API_KEY\"")
+                .unwrap()
+                .as_str(),
+            "OPENAI_API_KEY"
+        );
+        for bad in ["\"\"", "\"1BAD\"", "\"BAD-NAME\""] {
+            assert!(serde_json::from_str::<EnvironmentVariableName>(bad).is_err());
+        }
     }
 }

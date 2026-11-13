@@ -1339,8 +1339,9 @@ generic terminal launch・inventory）は共通の resilient client を通り、
 [attempt deadline と reconnect budget](#attempt-deadline-と-reconnect-budget) として実効化する。したがって daemon が停止しても
 各 attempt は policy 時間内に typed unavailable で戻り、event loop を握る同期 request が TUI の draw / input / quit、
 CLI の exit、MCP の response loop を無期限停止させない。retry の可否は同節の request class 判定が正本であり、
-`OperationId` を持つ mutation を再送するときは元の operation identity を保持する。generic Terminal Launch は現行 wire に
-producer `OperationId` がないため、この durable retry 契約の対象外である。attach 済み terminal の stream lane（attach /
+`OperationId` を持つ mutation（producer `launch_operation` を伴う Terminal Launch を含む）を再送するときは元の
+operation identity を保持する。producer `launch_operation` を持たない旧 peer の generic Terminal Launch は
+この durable retry 契約の対象外である。attach 済み terminal の stream lane（attach /
 resume / resync / input / resize / detach）は connection-local な subscription を持つため reconnect する client には
 載せず、代わりに connection を保持したまま request ごとに deadline を張り直す
 （[terminal lane の per-request budget](#terminal-lane-の-per-request-budget)）。budget 超過は下記の `unavailable` →

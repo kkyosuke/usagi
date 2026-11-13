@@ -142,12 +142,36 @@ pub fn load_effective(
     Ok(effective)
 }
 
+fn runtime_mode_for_data_home(data_home: &Path) -> crate::infrastructure::paths::RuntimeMode {
+    use crate::infrastructure::paths::{DEV_DIR, LOCAL_DIR, RuntimeMode, runtime_mode};
+
+    match data_home.file_name().and_then(|name| name.to_str()) {
+        Some(DEV_DIR) => RuntimeMode::Development,
+        Some(LOCAL_DIR) => RuntimeMode::Local,
+        Some(".usagi") => RuntimeMode::Production,
+        _ => runtime_mode(),
+    }
+}
+
 fn load_team_template(data_home: &Path, workspace_root: &Path) -> TeamTemplate {
-    let Ok(global) = Storage::new(data_home).load_settings() else {
-        return TeamTemplate::None;
+    let global = match Storage::new(data_home).load_settings() {
+        Ok(settings) => settings,
+        Err(error) => {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "failed to load global settings for role catalog: {error:#}"
+            ));
+            return TeamTemplate::None;
+        }
     };
-    let Ok(local) = WorkspaceSettingsStore::new(workspace_root).load() else {
-        return TeamTemplate::None;
+    let mode = runtime_mode_for_data_home(data_home);
+    let local = match WorkspaceSettingsStore::new_for_mode(workspace_root, mode).load() {
+        Ok(settings) => settings,
+        Err(error) => {
+            crate::infrastructure::error_log::ErrorLog::record(&format!(
+                "failed to load workspace settings for role catalog: {error:#}"
+            ));
+            return TeamTemplate::None;
+        }
     };
     global.with_local(&local).team_template
 }
@@ -715,6 +739,7 @@ mod tests {
 
     #[test]
     fn config_selects_a_template_and_workspace_settings_override_global() {
+        let _guard = crate::test_support::process_env_guard();
         let root = tempdir().unwrap();
         let home = root.path().join("home");
         let workspace = root.path().join("workspace");
@@ -750,13 +775,52 @@ mod tests {
         assert_eq!(flat.defaults.session.unwrap().as_str(), "worker");
         assert_eq!(flat.roles[&role_id("worker")].summary, "Custom worker");
         assert!(!flat.roles.contains_key(&role_id("manager")));
+
+        for (dir_name, mode, template) in [
+            (
+                "dev",
+                crate::infrastructure::paths::RuntimeMode::Development,
+                TeamTemplate::Pipeline,
+            ),
+            (
+                "local",
+                crate::infrastructure::paths::RuntimeMode::Local,
+                TeamTemplate::Flat,
+            ),
+            (
+                ".usagi",
+                crate::infrastructure::paths::RuntimeMode::Production,
+                TeamTemplate::Hierarchical,
+            ),
+        ] {
+            let mode_home = root.path().join(dir_name);
+            Storage::new(&mode_home)
+                .save_settings(&crate::domain::settings::Settings {
+                    team_template: TeamTemplate::None,
+                    ..crate::domain::settings::Settings::default()
+                })
+                .unwrap();
+            WorkspaceSettingsStore::new_for_mode(&workspace, mode)
+                .save(&crate::domain::settings::LocalSettings {
+                    team_template: Some(template),
+                    ..crate::domain::settings::LocalSettings::default()
+                })
+                .unwrap();
+            let catalog = load_effective(&mode_home, &workspace).unwrap();
+            assert!(catalog.configured);
+        }
     }
 
     #[test]
     fn damaged_settings_fail_closed_without_granting_template_roles() {
+        let _guard = crate::test_support::process_env_guard();
         let root = tempdir().unwrap();
         let home = root.path().join("home");
         let workspace = root.path().join("workspace");
+        // SAFETY: guarded by `process_env_guard`.
+        unsafe {
+            std::env::set_var(crate::infrastructure::paths::DATA_DIR_ENV, &home);
+        }
         fs::create_dir_all(&home).unwrap();
         fs::write(home.join("settings.json"), "{ broken").unwrap();
         assert!(load_effective(&home, &workspace).unwrap().roles.is_empty());
@@ -771,6 +835,10 @@ mod tests {
         fs::create_dir_all(local.path().parent().unwrap()).unwrap();
         fs::write(local.path(), "{ broken").unwrap();
         let catalog = load_effective(&home, &workspace).unwrap();
+        // SAFETY: guarded by `process_env_guard`.
+        unsafe {
+            std::env::remove_var(crate::infrastructure::paths::DATA_DIR_ENV);
+        }
         assert!(!catalog.configured);
         assert!(catalog.roles.is_empty());
     }

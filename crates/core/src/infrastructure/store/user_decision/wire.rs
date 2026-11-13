@@ -79,7 +79,7 @@ pub fn response(
     budget: usize,
 ) -> Result<serde_json::Value, UserDecisionPageError> {
     let text = serde_json::to_string(decision).expect("decision is JSON serializable");
-    if cursor.is_none() && text.len() <= budget {
+    if cursor.is_none() && text.len() <= budget.min(MAX_RECORD_BYTES) {
         return Ok(serde_json::to_value(decision).expect("decision is JSON serializable"));
     }
     let revision = revision(&text);

@@ -316,9 +316,12 @@ fn session_rows(rows: &mut Vec<ListRow>, session: &GardenSession) {
         target: Some(target),
     });
     if !session.sidebar.branch.is_empty() {
+        let branch = usagi_core::domain::presentation_text::sanitize_presentation_line(
+            &session.sidebar.branch,
+        );
         rows.push(ListRow {
             emphasize_on_hover: false,
-            text: format!("    {}", Style::new().dim().paint(&session.sidebar.branch)),
+            text: format!("    {}", Style::new().dim().paint(&branch)),
             target: Some(target),
         });
     }

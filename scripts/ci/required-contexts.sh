@@ -37,7 +37,7 @@ classify_paths() {
     esac
 
     case "$path" in
-      *.rs|Cargo.toml|Cargo.lock|*/Cargo.toml|*/Cargo.lock|build.rs|*/build.rs|rust-toolchain*|coverage-off-allowlist.json|scripts/*|.github/workflows/*|.github/actions/*)
+      *.rs|crates/*.md|Cargo.toml|Cargo.lock|*/Cargo.toml|*/Cargo.lock|build.rs|*/build.rs|rust-toolchain*|coverage-off-*.json|scripts/*|.github/workflows/*|.github/actions/*)
         rust=true
         ;;
       *.md|lychee.toml|LICENSE|.gitignore|.gitattributes|document/assets/*)
@@ -84,10 +84,19 @@ case "${1:-}" in
     ;;
   changed)
     test "$#" -eq 3 || usage
+    diff_file=$(mktemp "${TMPDIR:-/tmp}/required-contexts-diff.XXXXXX")
+    trap 'rm -f "$diff_file"' EXIT
+    if ! git -C "$repo_root" diff --name-only -z "$2" "$3" >"$diff_file"; then
+      rm -f "$diff_file"
+      echo "required-contexts.sh: git diff failed for $2..$3" >&2
+      exit 1
+    fi
     paths=()
     while IFS= read -r -d '' path; do
       paths+=("$path")
-    done < <(git -C "$repo_root" diff --name-only -z "$2" "$3")
+    done <"$diff_file"
+    rm -f "$diff_file"
+    trap - EXIT
     classify_paths "${paths[@]}"
     ;;
   report)

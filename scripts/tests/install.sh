@@ -93,7 +93,7 @@ output=""
 url=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -o) output=$2; shift 2 ;;
+        -o|--proto) [ "$1" != "-o" ] || output=$2; shift 2 ;;
         -*) shift ;;
         *) url=$1; shift ;;
     esac
@@ -664,6 +664,27 @@ second_pid=$!
 wait "$first_pid"
 wait "$second_pid"
 unset FAKE_CURL_GUARD
+prepare_case invalid-version-traversal
+if (cd "$CWD_DIR" && HOME="$HOME_DIR" USAGI_HOME="$HOME_DIR/.usagi" FIXTURE_DIR="$FIXTURE_DIR" \
+    PATH="$FAKE_BIN:$PATH" USAGI_VERSION='v1.0.0/../../evil' bash "$INSTALLER" >"$CASE_DIR/out" 2>"$CASE_DIR/err"); then
+    echo "expected USAGI_VERSION path traversal to fail" >&2
+    exit 1
+fi
+assert_old_preserved
+
+prepare_case symlink-target-binary
+mv "$HOME_DIR/.usagi/bin/usagi" "$CASE_DIR/real-usagi"
+ln -s "$CASE_DIR/real-usagi" "$HOME_DIR/.usagi/bin/usagi"
+if run_installer >"$CASE_DIR/out" 2>"$CASE_DIR/err"; then
+    echo "expected symlinked target binary to fail" >&2
+    exit 1
+fi
+cmp "$CASE_DIR/old-bytes" "$CASE_DIR/real-usagi"
+
+prepare_case legacy-zero-padded-pid
+mkdir -p "$HOME_DIR/.usagi/update.lock"
+printf '00\n' > "$HOME_DIR/.usagi/update.lock/pid"
+run_installer >/dev/null
 [ "$("$HOME_DIR/.usagi/bin/usagi" --version)" = "usagi 2.0.0" ]
 
 python3 "$ROOT/scripts/tests/install-lock.py" "$INSTALLER" "$TEST_ROOT"
