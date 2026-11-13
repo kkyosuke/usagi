@@ -1136,9 +1136,10 @@ MCP 承認**を `~/.claude` の中ではなく隣の `~/.claude.json` に置き�
   entry 列挙に失敗した場合や直下 path でない結果は無保護に続行せず fail closed にする。mount policy は起動後に
   作られる別名の直下 entry を config temp と区別できないため、Linux では新規 `$HOME` 直下 entry の作成も許可されるが、
   起動時点に存在する entry の内容と subtree は上記の再 bind で保護する。
-- 判定は state root と同じく launcher が exec する program の basename だけを根拠にし、値の正本は
+- 判定は state root と同じく daemon が明示的に渡す `--agent <selector>`（`DefaultModel`）を正本とし、
+  `--agent` が省略された直起動経路でだけ launcher が exec する program の basename へ fallback する。値の正本は
   `usagi-core` の `domain::settings::DefaultModel::global_config_prefix` である。daemon 側の policy gate も
-  同じ program から prefix を決め、保護対象 workspace・Git common dir と重なる構成を拒否する。
+  同じ `DefaultModel` から prefix を決め、保護対象 workspace・Git common dir と重なる構成を拒否する。
 
 #### macOS の MDS cache
 

@@ -5,8 +5,11 @@
 //! orchestration remain in the parent composition module.
 
 use super::secure_path::{
-    InvalidOwnedDirectory, ensure_owned_subdirectories, tighten_owned_directories,
-    validate_owned_directory, validate_owned_path,
+    InvalidOwnedDirectory, tighten_owned_directories, validate_owned_directory, validate_owned_path,
+};
+pub(super) use super::secure_path::{
+    SessionGitPolicy, lexical_prefix_overlaps_path, resolve_sandbox_tmpdir, session_git_policy,
+    workspace_repository_relatives,
 };
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
@@ -597,71 +600,6 @@ pub(super) fn session_git_common_dir(workspace_root: &Path) -> Result<Option<Pat
     }
 }
 
-/// Git authority granted to one linked session worktree.
-pub(super) struct SessionGitPolicy {
-    pub(super) writable_roots: Vec<PathBuf>,
-    pub(super) read_only_roots: Vec<PathBuf>,
-}
-
-/// Resolve the narrow Git metadata set a linked session worktree needs for a
-/// normal `git add` / `git commit` transaction, keeping its `.git` file and
-/// worktree-admin indirection pointers read-only.
-pub(super) fn session_git_policy(
-    workspace_root: &Path,
-    worktree: &Path,
-) -> Result<Option<SessionGitPolicy>, ()> {
-    let marker = worktree.join(".git");
-    let marker_metadata = match std::fs::symlink_metadata(&marker) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return match std::fs::symlink_metadata(workspace_root.join(".git")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                _ => Err(()),
-            };
-        }
-        Err(_) => return Err(()),
-    };
-    if !marker_metadata.file_type().is_file() {
-        let workspace_root = workspace_root.canonicalize().map_err(|_| ())?;
-        let worktree = worktree.canonicalize().map_err(|_| ())?;
-        return if marker_metadata.file_type().is_dir() && worktree == workspace_root {
-            Ok(None)
-        } else {
-            Err(())
-        };
-    }
-    let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
-    let common = session_git_common_dir(worktree)?.ok_or(())?;
-    let expected_common = session_git_common_dir(workspace_root)?.ok_or(())?;
-    if common != expected_common {
-        return Err(());
-    }
-    let worktrees = common.join("worktrees").canonicalize().map_err(|_| ())?;
-    if git_dir.parent() != Some(worktrees.as_path()) {
-        return Err(());
-    }
-    let backlink = read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?;
-    if backlink != marker.canonicalize().map_err(|_| ())? {
-        return Err(());
-    }
-    let subdirs = ["refs/heads/usagi", "logs/refs/heads/usagi"];
-    ensure_owned_subdirectories(&common, &subdirs).map_err(|_| ())?;
-    let read_only_roots = vec![backlink, git_dir.join("commondir"), git_dir.join("gitdir")];
-    let writable_roots = vec![
-        git_dir,
-        common.join("objects"),
-        common.join("refs/heads/usagi"),
-        common.join("logs/refs/heads/usagi"),
-    ];
-    for root in &writable_roots {
-        validate_owned_directory(root).map_err(|_| ())?;
-    }
-    Ok(Some(SessionGitPolicy {
-        writable_roots,
-        read_only_roots,
-    }))
-}
-
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
 pub(super) fn read_git_indirection(
     path: &Path,
@@ -734,15 +672,23 @@ pub(super) fn validate_root_git_common_dir_policy(
     home: Option<&Path>,
     cache_dir: Option<&Path>,
 ) -> Result<(), ()> {
-    let common = git_common_dir(workspace_root)?;
+    let commons = workspace_repository_relatives(workspace_root)?
+        .into_iter()
+        .map(|relative| git_common_dir(&workspace_root.join(relative)))
+        .collect::<Result<Vec<_>, ()>>()?;
+    if commons.is_empty() {
+        return Ok(());
+    }
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
         writable.push(home.join(agent.state_directory()));
-        if agent
-            .global_config_prefix()
-            .is_some_and(|prefix| lexical_prefix_overlaps_path(&home.join(prefix), &common))
-        {
+        if agent.global_config_prefix().is_some_and(|prefix| {
+            let prefix_path = home.join(prefix);
+            commons
+                .iter()
+                .any(|common| lexical_prefix_overlaps_path(&prefix_path, common))
+        }) {
             return Err(());
         }
         if cfg!(target_os = "macos") {
@@ -758,19 +704,11 @@ pub(super) fn validate_root_git_common_dir_policy(
     }
     let overlaps = writable.into_iter().any(|root| {
         let root = root.canonicalize().unwrap_or(root);
-        common.starts_with(&root) || root.starts_with(&common)
+        commons
+            .iter()
+            .any(|common| common.starts_with(&root) || root.starts_with(common))
     });
     (!overlaps).then_some(()).ok_or(())
-}
-
-/// Whether the lexical file family beginning at `prefix` intersects `path`'s
-/// subtree. Non-UTF-8 paths cannot be represented in the launcher argv and are
-/// therefore treated as an overlap (fail closed).
-pub(super) fn lexical_prefix_overlaps_path(prefix: &Path, path: &Path) -> bool {
-    let Some((prefix_text, path_text)) = prefix.to_str().zip(path.to_str()) else {
-        return true;
-    };
-    path_text.starts_with(prefix_text) || prefix.starts_with(path)
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=root_scope_keeps_checkout_and_git_common_dir_byte_identical

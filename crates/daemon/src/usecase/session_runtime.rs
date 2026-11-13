@@ -758,7 +758,7 @@ pub fn perform_removal_identity(
     git: &dyn GitRunner,
     name: &str,
 ) -> Result<(SessionId, Option<String>), SessionRuntimeError> {
-    let (session_id, repo_root) = {
+    let (session_id, repo_root, io) = {
         let guard = lock_runtime(runtime)?;
         let session_id = guard
             .state()?
@@ -767,25 +767,35 @@ pub fn perform_removal_identity(
             .find(|session| session.name == name)
             .map(|session| session.session_id)
             .ok_or(SessionRuntimeError::UnknownSession)?;
-        (session_id, guard.repo_root.clone())
+        (session_id, guard.repo_root.clone(), Arc::clone(&guard.io))
     };
-    resolve_removal_branch_head(git, &repo_root, session_id, name)
+    resolve_removal_branch_head(git, io.as_ref(), &repo_root, session_id, name)
 }
 
 fn resolve_removal_branch_head(
     git: &dyn GitRunner,
+    io: &dyn SessionWorktreeIo,
     repo_root: &Path,
     session_id: SessionId,
     name: &str,
 ) -> Result<(SessionId, Option<String>), SessionRuntimeError> {
     let branch = session_branch_ref(name);
-    let head = git
-        .run(repo_root, &["rev-parse", "--verify", &branch])
+    let repositories = io
+        .workspace_repositories(repo_root)
         .map_err(|_| SessionRuntimeError::Storage)?;
-    Ok((
-        session_id,
-        head.success.then(|| head.stdout.trim().to_owned()),
-    ))
+    let mut heads = Vec::new();
+    for relative in repositories {
+        let head = git
+            .run(
+                &join_relative(repo_root, &relative),
+                &["rev-parse", "--verify", &branch],
+            )
+            .map_err(|_| SessionRuntimeError::Storage)?;
+        if head.success {
+            heads.push(head.stdout.trim().to_owned());
+        }
+    }
+    Ok((session_id, (!heads.is_empty()).then(|| heads.join(","))))
 }
 
 fn perform_remove_as(
@@ -971,7 +981,9 @@ fn delete_teardown_branch(
             let branch_ref = format!("refs/heads/{branch}");
             let squash_merged = teardown.merged_head_oid.as_deref().is_some_and(|expected| {
                 git.run(&repo, &["rev-parse", "--verify", &branch_ref])
-                    .is_ok_and(|output| output.success && output.stdout.trim() == expected)
+                    .is_ok_and(|output| {
+                        output.success && expected.split(',').any(|oid| oid == output.stdout.trim())
+                    })
             });
             delete_branch(
                 git,
@@ -1481,7 +1493,13 @@ impl SessionRuntime {
             .find(|session| session.name == name)
             .map(|session| session.session_id)
             .ok_or(SessionRuntimeError::UnknownSession)?;
-        resolve_removal_branch_head(&self.git, &self.repo_root, session_id, name)
+        resolve_removal_branch_head(
+            &self.git,
+            self.io.as_ref(),
+            &self.repo_root,
+            session_id,
+            name,
+        )
     }
 
     /// Stable role assignment for a managed session incarnation.
@@ -2489,7 +2507,12 @@ fn inspect_orphan_with(
             linked_worktree: false,
         };
     }
-    if !io.is_linked_worktree(&path) {
+    let repositories = io.workspace_repositories(repo_root).unwrap_or_default();
+    if repositories.is_empty()
+        || !repositories
+            .iter()
+            .all(|relative| io.is_linked_worktree(&join_relative(&path, relative)))
+    {
         return OrphanDiagnosis {
             branch: None,
             dirty: None,
@@ -2498,29 +2521,45 @@ fn inspect_orphan_with(
             linked_worktree: false,
         };
     }
-    let branch = git
-        .run(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .ok()
-        .filter(|output| output.success)
-        .map(|output| output.stdout.trim().to_owned())
-        .filter(|branch| valid_orphan_branch(branch));
-    let dirty = git
-        .run(&path, &["status", "--porcelain"])
-        .ok()
-        .filter(|output| output.success)
-        .map(|output| !output.stdout.trim().is_empty());
-    let base = git
-        .run(repo_root, &["rev-parse", "HEAD"])
-        .ok()
-        .filter(|output| output.success)
-        .map(|output| output.stdout.trim().to_owned());
-    let unmerged_commits = base.and_then(|base| {
-        let range = format!("{base}..HEAD");
-        git.run(&path, &["rev-list", "--count", &range])
+    let mut branch = None;
+    let mut dirty = Some(false);
+    let mut unmerged_commits = Some(0u64);
+    for (index, relative) in repositories.iter().enumerate() {
+        let worktree = join_relative(&path, relative);
+        let repo = join_relative(repo_root, relative);
+        let current_branch = git
+            .run(&worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
             .ok()
             .filter(|output| output.success)
-            .and_then(|output| output.stdout.trim().parse().ok())
-    });
+            .map(|output| output.stdout.trim().to_owned())
+            .filter(|candidate| valid_orphan_branch(candidate));
+        if index == 0 {
+            branch = current_branch;
+        } else if branch != current_branch {
+            branch = None;
+        }
+        let current_dirty = git
+            .run(&worktree, &["status", "--porcelain"])
+            .ok()
+            .filter(|output| output.success)
+            .map(|output| !output.stdout.trim().is_empty());
+        dirty = dirty.zip(current_dirty).map(|(acc, item)| acc || item);
+        let base = git
+            .run(&repo, &["rev-parse", "HEAD"])
+            .ok()
+            .filter(|output| output.success)
+            .map(|output| output.stdout.trim().to_owned());
+        let current_unmerged = base.and_then(|base| {
+            let range = format!("{base}..HEAD");
+            git.run(&worktree, &["rev-list", "--count", &range])
+                .ok()
+                .filter(|output| output.success)
+                .and_then(|output| output.stdout.trim().parse::<u64>().ok())
+        });
+        unmerged_commits = unmerged_commits
+            .zip(current_unmerged)
+            .map(|(acc, item)| acc.saturating_add(item));
+    }
     OrphanDiagnosis {
         branch,
         dirty,
