@@ -407,13 +407,17 @@ fn git_arg_cannot_consume_next_token(token: &str) -> bool {
     token[1..].chars().all(|flag| {
         matches!(
             flag,
-            'p' | 'u' | 's' | 'q' | 'R' | 'b' | 'w' | 'W' | 'm' | 'c' | 'r' | 't' | 'd' | '0'..='9'
+            'p' | 'u' | 's' | 'q' | 'R' | 'b' | 'w' | 'W' | 'm' | 'c' | 'r' | 't' | 'd' | 'D' | '0'
+                ..='9'
         )
-    }) || (token.len() > 2
-        && matches!(
-            token.as_bytes()[1],
-            b'S' | b'G' | b'L' | b'U' | b'B' | b'M' | b'C' | b'D' | b'X' | b'n'
-        ))
+    }) || token
+        .strip_prefix("-n")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+        || (token.len() > 2
+            && matches!(
+                token.as_bytes()[1],
+                b'S' | b'G' | b'L' | b'U' | b'B' | b'M' | b'C' | b'X'
+            ))
 }
 
 /// Match the browser flag as gh parses it, including grouped short flags.
@@ -1043,12 +1047,15 @@ mod tests {
             "git diff HEAD~1 HEAD -- . --no-ext-diff --no-textconv",
             "git diff --dst-prefix --no-ext-diff --src-prefix --no-textconv HEAD",
             "git log -S --no-ext-diff --no-textconv main",
+            "git diff -DS --no-ext-diff -DS --no-textconv HEAD~1",
+            "git blame -nS --no-ext-diff -nL --no-textconv src/main.rs",
         ] {
             assert!(!root_command_is_read_only(command), "allowed {command}");
         }
         for command in [
             "git -P --literal-pathspecs --glob-pathspecs --noglob-pathspecs --icase-pathspecs status",
             "git log -U0 --no-ext-diff --no-textconv main",
+            "git log -n5 -p --no-ext-diff --no-textconv main",
             "git log --unified=0 -p --no-ext-diff --no-textconv main",
             "git log --remerge-diff --no-ext-diff --no-textconv main",
             "git diff HEAD --no-ext-diff --no-textconv",

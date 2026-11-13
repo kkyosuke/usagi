@@ -295,6 +295,12 @@ fn invalid_policy_reason(request: &SandboxRequest) -> Option<String> {
 fn valid_sandbox_path(path: &Path) -> bool {
     path.to_str()
         .is_some_and(|text| !text.chars().any(char::is_control))
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
 }
 
 fn effective_roots(platform: Platform, roots: &[PathBuf]) -> BTreeSet<PathBuf> {
@@ -939,7 +945,15 @@ mod tests {
 
     #[test]
     fn session_policy_rejects_root_relative_and_workspace_ancestor_write_roots() {
-        for root in ["/", "///", "relative", "/repo", "/repo/", "/bad\nroot"] {
+        for root in [
+            "/",
+            "///",
+            "relative",
+            "/repo",
+            "/repo/",
+            "/repo/sub/..",
+            "/bad\nroot",
+        ] {
             let mut request = request(Platform::Linux, Some("/usr/bin/bwrap"));
             request.launch_roots = vec![PathBuf::from(root)];
             assert!(
