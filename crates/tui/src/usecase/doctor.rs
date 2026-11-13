@@ -66,6 +66,9 @@ pub trait DoctorPort {
     ///
     /// daemon が不在か接続に失敗した場合は安全に表示できる理由を返す。
     fn daemon_health(&mut self) -> Result<String, String>;
+
+    /// プロセスを起動・停止せず、権限や孤立した locator などの非ライフサイクル項目を修復する。
+    fn repair(&mut self);
 }
 
 struct ToolSpec {
@@ -101,6 +104,15 @@ const TOOLS: [ToolSpec; 4] = [
 /// 必須ツール、任意の Agent CLI、設定ストレージ、daemon を診断する。
 #[must_use]
 pub fn diagnose(port: &mut dyn DoctorPort) -> DoctorReport {
+    diagnose_with_fix(port, false)
+}
+
+/// 必要に応じて非ライフサイクル修復を行ってから診断する。
+#[must_use]
+pub fn diagnose_with_fix(port: &mut dyn DoctorPort, fix: bool) -> DoctorReport {
+    if fix {
+        port.repair();
+    }
     let mut checks = TOOLS
         .iter()
         .map(|tool| {
@@ -162,6 +174,10 @@ mod tests {
         fn daemon_health(&mut self) -> Result<String, String> {
             self.calls.push("daemon".to_owned());
             self.daemon.pop_front().unwrap()
+        }
+
+        fn repair(&mut self) {
+            self.calls.push("repair".to_owned());
         }
     }
 
@@ -228,6 +244,27 @@ mod tests {
         assert_eq!(report.checks[0].detail, "git version 2.50");
         assert!(format!("{report:?}").contains("Settings"));
         assert_eq!(report.clone(), report);
+    }
+
+    #[test]
+    fn diagnose_with_fix_runs_repair_before_checks() {
+        let mut port = fake(
+            Ok("git version 2.50"),
+            Ok("claude 2.0"),
+            Ok("codex-cli 1.0"),
+            Ok("agy 1.2.0"),
+            Ok("settings.json is readable"),
+            Ok("daemon is reachable"),
+        );
+        let report = diagnose_with_fix(&mut port, true);
+
+        assert!(report.is_healthy());
+        assert_eq!(
+            port.calls,
+            [
+                "repair", "git", "claude", "codex", "agy", "settings", "daemon"
+            ]
+        );
     }
 
     #[test]

@@ -2332,10 +2332,16 @@ fn doctor_reports_real_diagnostics() {
     let home = short_home();
 
     // Doctor observes lifecycle state but never changes it. An absent daemon
-    // remains absent until the user explicitly starts it.
+    // remains absent until the user explicitly starts it, and unhealthy reports
+    // exit nonzero.
     let absent = run_with_home(&[OsStr::new("doctor")], &home);
-    assert!(absent.status.success());
+    assert_eq!(absent.status.code(), Some(1));
     assert!(stdout(&absent).contains("[error] Daemon:"));
+    assert!(daemon_pid(home.path()).is_none());
+
+    let absent_fix = run_with_home(&[OsStr::new("doctor"), OsStr::new("--fix")], &home);
+    assert_eq!(absent_fix.status.code(), Some(1));
+    assert!(stdout(&absent_fix).contains("[error] Daemon:"));
     assert!(daemon_pid(home.path()).is_none());
 
     let started = run_with_home(&[OsStr::new("daemon"), OsStr::new("start")], &home);

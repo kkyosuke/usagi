@@ -85,6 +85,18 @@ fn main() {
     if let Some(head) = git_output(&root, ["rev-parse", "--git-path", "HEAD"]) {
         println!("cargo:rerun-if-changed={head}");
     }
+    if let Some(symref) = git_output(&root, ["rev-parse", "--symbolic-full-name", "HEAD"])
+        && symref != "HEAD"
+        && let Some(ref_path) = git_output(&root, ["rev-parse", "--git-path", &symref])
+        && root.join(&ref_path).exists()
+    {
+        println!("cargo:rerun-if-changed={ref_path}");
+    }
+    if let Some(packed_refs) = git_output(&root, ["rev-parse", "--git-path", "packed-refs"])
+        && root.join(&packed_refs).exists()
+    {
+        println!("cargo:rerun-if-changed={packed_refs}");
+    }
 }
 
 fn git_output<const N: usize>(root: &Path, args: [&str; N]) -> Option<String> {
