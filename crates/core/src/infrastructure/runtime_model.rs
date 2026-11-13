@@ -141,13 +141,10 @@ impl WorkspaceAgentConfig {
     /// or explicitly empty configuration remains fail-closed.
     #[must_use]
     pub fn read(workspace: &Path) -> Self {
-        let text = match fs::read_to_string(workspace.join(CONFIG_PATH)) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+        let parsed = match read_workspace_config(workspace) {
+            Ok(Some(config)) => config,
+            Ok(None) => return Self::default(),
             Err(_) => return Self::empty(),
-        };
-        let Ok(parsed) = toml::from_str::<WorkspaceConfig>(&text) else {
-            return Self::empty();
         };
         let runtimes = parsed
             .agents
@@ -207,19 +204,9 @@ impl WorkspaceSessionConfig {
     ///
     /// Returns an error when an existing config cannot be read or parsed.
     pub fn load(workspace: &Path) -> anyhow::Result<Self> {
-        let path = workspace.join(CONFIG_PATH);
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(error) => {
-                return Err(anyhow::Error::new(error))
-                    .context(format!("failed to read {}", path.display()));
-            }
+        let Some(parsed) = read_workspace_config(workspace)? else {
+            return Ok(Self::default());
         };
-        let parsed = toml::from_str::<WorkspaceConfig>(&text)
-            .context(format!("failed to parse {}", path.display()))?;
         parsed
             .session
             .cache_cleanup
@@ -276,6 +263,21 @@ impl WorkspaceSessionConfig {
     pub const fn cache_cleanup(&self) -> &crate::domain::session_cache::SessionCachePolicy {
         &self.cache_cleanup
     }
+}
+
+fn read_workspace_config(workspace: &Path) -> anyhow::Result<Option<WorkspaceConfig>> {
+    let path = workspace.join(CONFIG_PATH);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::Error::new(error))
+                .context(format!("failed to read {}", path.display()));
+        }
+    };
+    toml::from_str::<WorkspaceConfig>(&text)
+        .map(Some)
+        .context(format!("failed to parse {}", path.display()))
 }
 
 fn normalize_setup_commands(commands: impl IntoIterator<Item = String>) -> Vec<String> {

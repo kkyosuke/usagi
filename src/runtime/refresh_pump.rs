@@ -134,6 +134,10 @@ pub struct RefreshState<T> {
     latest: Option<Result<T, String>>,
     /// A wake that has not been spent by ending a wait yet.
     woken: bool,
+    /// Whether a fetch round is currently in flight between `begin` and `complete`.
+    in_flight: bool,
+    /// Whether `wake` was called while the current fetch round was in flight.
+    woken_in_flight: bool,
     metrics: RefreshMetrics,
 }
 
@@ -154,6 +158,8 @@ impl<T> RefreshState<T> {
             failures: 0,
             latest: None,
             woken: false,
+            in_flight: false,
+            woken_in_flight: false,
             metrics: RefreshMetrics::default(),
         }
     }
@@ -176,6 +182,8 @@ impl<T> RefreshState<T> {
         if self.due.is_none_or(|due| now < due) {
             return false;
         }
+        self.in_flight = true;
+        self.woken_in_flight = false;
         self.metrics.fetches += 1;
         true
     }
@@ -184,6 +192,7 @@ impl<T> RefreshState<T> {
     /// replaces an undrained one is coalesced: the render thread only ever sees
     /// the newest observation of a lane.
     pub fn complete(&mut self, now: Duration, result: Result<T, String>) {
+        self.in_flight = false;
         if result.is_err() {
             self.metrics.failures += 1;
             self.failures = self.failures.saturating_add(1);
@@ -194,7 +203,11 @@ impl<T> RefreshState<T> {
             self.metrics.coalesced += 1;
         }
         self.latest = Some(result);
-        self.due = Some(now.saturating_add(self.cadence.delay(self.failures)));
+        self.due = if std::mem::take(&mut self.woken_in_flight) {
+            Some(Duration::ZERO)
+        } else {
+            Some(now.saturating_add(self.cadence.delay(self.failures)))
+        };
     }
 
     /// Activate the lane and make it due immediately. Wakes inside one cadence
@@ -204,6 +217,9 @@ impl<T> RefreshState<T> {
         self.metrics.wakes += 1;
         self.due = Some(Duration::ZERO);
         self.woken = true;
+        if self.in_flight {
+            self.woken_in_flight = true;
+        }
     }
 
     /// How long the worker should wait before re-checking, at `now`. A dormant
@@ -812,5 +828,21 @@ mod tests {
             fetched = pump.take();
         }
         assert_eq!(pump.metrics().fetches, 1);
+    }
+
+    #[test]
+    fn wake_during_in_flight_fetch_schedules_immediate_follow_up_round() {
+        let mut state = RefreshState::<u32>::new(cadence());
+        assert!(state.activate());
+        assert!(state.begin(Duration::ZERO));
+        state.wake();
+        state.complete(Duration::from_millis(20), Ok(1));
+        assert_eq!(state.wait_for(Duration::from_millis(20)), Duration::ZERO);
+        assert!(state.begin(Duration::from_millis(20)));
+        state.complete(Duration::from_millis(30), Ok(2));
+        assert_eq!(
+            state.wait_for(Duration::from_millis(30)),
+            Duration::from_millis(500)
+        );
     }
 }

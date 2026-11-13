@@ -1922,7 +1922,6 @@ pub(super) fn session_response_envelope(
                 | SessionAction::List
                 | SessionAction::Status
                 | SessionAction::Overview
-                | SessionAction::Setup
                 | SessionAction::Prompt
                 | SessionAction::Complete
                 | SessionAction::Pr

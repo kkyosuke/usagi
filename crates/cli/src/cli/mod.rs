@@ -454,10 +454,6 @@ pub enum SessionCommand {
     ResumeInventory {
         workspace_id: String,
     },
-    Setup {
-        name: String,
-        command: String,
-    },
     Prompt {
         name: String,
         prompt: String,
@@ -678,10 +674,6 @@ impl Run for Session {
                     caller_context: None,
                 }));
             }
-            SessionCommand::Setup { name, command } => (
-                SessionAction::Setup,
-                serde_json::json!({"name": name, "command": command}),
-            ),
             SessionCommand::Prompt { name, prompt } => (
                 SessionAction::Prompt,
                 serde_json::json!({"name": name, "prompt": prompt}),
@@ -1166,10 +1158,6 @@ mod tests {
             (
                 ["usagi", "session", "cache", "--status"].as_slice(),
                 usagi_core::infrastructure::ipc::SessionAction::Cache,
-            ),
-            (
-                ["usagi", "session", "setup", "a", "echo ok"].as_slice(),
-                usagi_core::infrastructure::ipc::SessionAction::Setup,
             ),
             (
                 ["usagi", "session", "prompt", "a", "hi"].as_slice(),

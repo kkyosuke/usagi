@@ -23,6 +23,8 @@ ruby -ryaml -e '
   build = jobs.fetch("build-and-release")
   abort "release must not wait for notes" if build.key?("needs")
   publish = build.fetch("steps").find { |step| step.fetch("uses", "").start_with?("softprops/action-gh-release@") }
+  verify_tag = build.fetch("steps").find { |step| step["name"] == "Verify release tag matches Cargo.toml version" }
+  abort "release must verify tag matches Cargo.toml version" unless verify_tag && verify_tag.fetch("run", "").include?("PACKAGE_VERSION")
   options = publish.fetch("with")
   abort "GitHub release notes must be enabled" unless options["generate_release_notes"] == true
   abort "AI notes must not be injected" if options.key?("body")

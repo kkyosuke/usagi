@@ -269,8 +269,16 @@ pub(super) fn home_frame_material_shared(
             .note_editor()
             .filter(|_| runtime.state().overlay() == Some(Overlay::Notes))
             .cloned(),
-        environment_editor: runtime.state().environment_editor().cloned(),
-        role_editor: runtime.state().role_editor().cloned(),
+        environment_editor: runtime
+            .state()
+            .environment_editor()
+            .filter(|_| runtime.state().overlay() == Some(Overlay::Environment))
+            .cloned(),
+        role_editor: runtime
+            .state()
+            .role_editor()
+            .filter(|_| runtime.state().overlay() == Some(Overlay::Roles))
+            .cloned(),
         // Garden canonicalization happens only after every composition-owned
         // source (notably Agent inventory and reduced motion) is attached.
         now: relative_time_clock(now),
@@ -1862,13 +1870,13 @@ pub(super) fn drive_workspace_controller(
                     workspace,
                     session,
                 } => {
-                    if path == deck.active_path() {
+                    if workspace_has_unsaved_surface(&runtime) {
+                        deck.set_notice("Save or cancel the current draft before switching.");
+                    } else if path == deck.active_path() {
                         deck.close_overlay();
                         if workspace == runtime.state().workspace() {
                             let _ = runtime.apply_event(AppEvent::VisitSession(session));
                         }
-                    } else if workspace_has_unsaved_surface(&runtime) {
-                        deck.set_notice("Save or cancel the current draft before switching.");
                     } else if let Some(prepared) =
                         prepare_deck_workspace(term, &mut loader, deck, &path, "Opening workspace…")
                         && prepare_activation_settings(

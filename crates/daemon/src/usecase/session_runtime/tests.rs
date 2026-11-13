@@ -1413,7 +1413,7 @@ fn rejects_invalid_requests_duplicates_missing_sessions_and_git_failures() {
     );
     assert_eq!(
         runtime
-            .handle(SessionAction::Setup, &operation(), &json!({}))
+            .handle(SessionAction::Prompt, &operation(), &json!({}))
             .unwrap_err(),
         SessionRuntimeError::InvalidRequest
     );

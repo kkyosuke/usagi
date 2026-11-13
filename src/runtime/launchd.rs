@@ -76,7 +76,39 @@ mod real_io {
     }
 
     fn write_file(path: &Path, contents: String) -> std::io::Result<()> {
-        std::fs::write(path, contents)
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        if let Ok(meta) = std::fs::symlink_metadata(path)
+            && meta.file_type().is_symlink()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "refusing to overwrite symlinked LaunchAgent plist",
+            ));
+        }
+        let temp = path.with_extension(format!("plist.tmp.{}", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&temp)?;
+        if let Err(error) = file.write_all(&contents.into_bytes()) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+        if let Err(error) = file.sync_all() {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+        drop(file);
+        if let Err(error) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn remove_file(path: &Path) -> std::io::Result<()> {
@@ -171,43 +203,25 @@ fn render_with_trust_root(
     workspace: &Path,
     trust_root: Option<&Path>,
 ) -> std::io::Result<String> {
-    let executable = executable.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "non-UTF-8 executable path",
-        )
-    })?;
-    let stderr_log = stderr_log.to_str().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 log path")
-    })?;
+    let executable = utf8(executable, "non-UTF-8 executable path")?;
+    let stderr_log = utf8(stderr_log, "non-UTF-8 log path")?;
     // A base that cannot be spelled as UTF-8 is refused rather than lossily
     // converted: a plist holding a corrupted base would send the supervised
     // daemon to a directory nobody chose.
-    let base = data_home.base().to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "non-UTF-8 data home base path",
-        )
-    })?;
+    let base = utf8(data_home.base(), "non-UTF-8 data home base path")?;
     // launchd starts the agent from `/`, which is not a workspace anyone chose.
     // The daemon binds the workspace its startup directory names, so the
     // directory is pinned here rather than left to the supervisor.
-    let workspace = workspace.to_str().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 workspace root")
-    })?;
+    let workspace = utf8(workspace, "non-UTF-8 workspace root")?;
     let trust_environment = trust_root
         .map(|root| {
-            root.to_str()
-                .ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "non-UTF-8 trust root")
-                })
-                .map(|root| {
-                    format!(
-                        "<key>{}</key><string>{}</string>",
-                        usagi_core::infrastructure::paths::TRUST_ROOT_ENV,
-                        xml_escape(root)
-                    )
-                })
+            utf8(root, "non-UTF-8 trust root").map(|root| {
+                format!(
+                    "<key>{}</key><string>{}</string>",
+                    usagi_core::infrastructure::paths::TRUST_ROOT_ENV,
+                    xml_escape(root)
+                )
+            })
         })
         .transpose()?
         .unwrap_or_default();
@@ -221,11 +235,26 @@ fn render_with_trust_root(
     ))
 }
 
+fn utf8<'a>(path: &'a Path, message: &str) -> std::io::Result<&'a str> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, message.to_owned()))?;
+    if text.chars().any(char::is_control) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            message.to_owned(),
+        ));
+    }
+    Ok(text)
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]
@@ -511,5 +540,28 @@ mod tests {
             calls.into_inner(),
             [("bootout".into(), path.clone()), ("remove".into(), path)]
         );
+    }
+
+    #[test]
+    fn rendered_agent_rejects_control_characters_and_escapes_quotes() {
+        assert_eq!(
+            render(
+                Path::new("/opt/usagi\n<key>Injected</key>"),
+                Path::new("/tmp/log"),
+                &home(),
+                Path::new(WORKSPACE),
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let plist = render(
+            Path::new("/opt/usagi\"'bin"),
+            Path::new("/tmp/log"),
+            &home(),
+            Path::new(WORKSPACE),
+        )
+        .unwrap();
+        assert!(plist.contains("<string>/opt/usagi&quot;&apos;bin</string>"));
     }
 }

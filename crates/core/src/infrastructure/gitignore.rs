@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::paths::STATE_DIR;
+use super::persistence::json_file::write_text_atomic;
+use super::persistence::markdown_store::ensure_not_symlink;
 
 /// Rules owned by `<repository>/.usagi/.gitignore`.
 ///
@@ -25,17 +27,19 @@ pub const USAGI_GITIGNORE: &str =
 /// or written.
 pub fn migrate_usagi_ignore_rules(repo: &Path) -> Result<()> {
     let dir = repo.join(STATE_DIR);
+    ensure_not_symlink(&dir)?;
     fs::create_dir_all(&dir).context(format!("failed to create {}", dir.display()))?;
     let gitignore = dir.join(".gitignore");
+    ensure_not_symlink(&gitignore)?;
     if !fs::read_to_string(&gitignore).is_ok_and(|contents| contents == USAGI_GITIGNORE) {
-        fs::write(&gitignore, USAGI_GITIGNORE)
-            .context(format!("failed to write {}", gitignore.display()))?;
+        write_text_atomic(&gitignore, USAGI_GITIGNORE)?;
     }
     strip_legacy_root_entries(repo)
 }
 
 fn strip_legacy_root_entries(repo: &Path) -> Result<()> {
     let gitignore = repo.join(".gitignore");
+    ensure_not_symlink(&gitignore)?;
     let existing = match fs::read_to_string(&gitignore) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -56,7 +60,7 @@ fn strip_legacy_root_entries(repo: &Path) -> Result<()> {
         output.push_str(line);
         output.push('\n');
     }
-    fs::write(&gitignore, output).context(format!("failed to write {}", gitignore.display()))
+    write_text_atomic(&gitignore, &output)
 }
 
 /// Root rules written by older releases. The `.usagi/issues` entries belong to
@@ -142,5 +146,28 @@ mod tests {
         fs::create_dir(tmp.path().join(".gitignore")).unwrap();
 
         assert!(migrate_usagi_ignore_rules(tmp.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ignore_writers_refuse_symlinked_state_dir_and_gitignore_files() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        symlink(outside_dir.path(), tmp.path().join(".usagi")).unwrap();
+        assert!(migrate_usagi_ignore_rules(tmp.path()).is_err());
+        fs::remove_file(tmp.path().join(".usagi")).unwrap();
+
+        let outside = tmp.path().join("outside");
+        fs::write(&outside, "keep\n").unwrap();
+        symlink(&outside, tmp.path().join(".gitignore")).unwrap();
+        assert!(migrate_usagi_ignore_rules(tmp.path()).is_err());
+        fs::remove_file(tmp.path().join(".gitignore")).unwrap();
+
+        fs::remove_file(tmp.path().join(".usagi/.gitignore")).unwrap();
+        symlink(&outside, tmp.path().join(".usagi/.gitignore")).unwrap();
+        assert!(migrate_usagi_ignore_rules(tmp.path()).is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep\n");
     }
 }

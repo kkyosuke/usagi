@@ -1267,14 +1267,14 @@ fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have
     .unwrap();
     let store = UserDecisionStore::new(mcp.data_dir().join("daemon"));
     let options: Vec<_> = (0..32).map(|index| json!({"id":format!("option-{index}"), "label":"Option",
-        "description":"\u{1}".repeat(2048), "pros":vec!["\\".repeat(512);4], "cons":vec!["\\".repeat(512);4]})).collect();
+        "description":"\\".repeat(2048), "pros":vec!["\\".repeat(512);4], "cons":vec!["\\".repeat(512);4]})).collect();
     let table = json!({"kind":"table", "title":"Data", "columns":vec!["\\".repeat(512);6],
         "rows":vec![vec!["\\".repeat(512);6];16]});
     let before = fs::read(store.path()).unwrap();
     let rejected = mcp.tool(
         "user_decision_request",
         &json!({"title":"Too large", "prompt":"Choose",
-        "options":options, "context":[table]}),
+        "options":options, "context":vec![table.clone(); 4]}),
     );
     assert!(rejected.get("error").is_some(), "{rejected}");
     assert_eq!(fs::read(store.path()).unwrap(), before);
@@ -1285,7 +1285,7 @@ fn production_large_legacy_decisions_are_chunked_and_new_oversized_requests_have
     legacy.validate_request().unwrap();
     assert!(
         serde_json::to_vec(&legacy).unwrap().len()
-            > usagi_core::infrastructure::ipc::DEFAULT_MAX_FRAME_BYTES
+            > usagi_core::infrastructure::store::user_decision::wire::MAX_RECORD_BYTES
     );
     // Seed the exact prior-version format; the current admission rejects it.
     let state = json!({"decisions":[initial, legacy],"events":[],"expired_idempotency":{}});

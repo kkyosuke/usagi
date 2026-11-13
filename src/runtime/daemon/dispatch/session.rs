@@ -559,14 +559,6 @@ pub(super) fn dispatch_session_action(
                 target.as_ref(),
             )?)
         }
-        SessionAction::Setup => {
-            target_session(string("name")?)?;
-            bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .handle(action, operation_id, payload)
-        }
     }
 }
 

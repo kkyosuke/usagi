@@ -783,49 +783,139 @@ pub fn encode_key(key: &KeyEvent) -> Vec<u8> {
     if !key.raw_bytes.is_empty() {
         return key.raw_bytes.clone();
     }
-    let mut bytes = match key.code {
+    let modifier_param = xterm_modifier_parameter(key.modifiers);
+    match key.code {
         KeyCode::Char(character) if key.modifiers.control && character.is_ascii() => {
-            vec![(character.to_ascii_uppercase() as u8) & 0x1f]
+            if let Some(control_byte) = ascii_control_byte(character) {
+                let mut bytes = vec![control_byte];
+                if key.modifiers.alt {
+                    bytes.insert(0, 0x1b);
+                }
+                bytes
+            } else {
+                format!(
+                    "\x1b[{};{}u",
+                    u32::from(character.to_ascii_lowercase()),
+                    modifier_param.unwrap_or(5)
+                )
+                .into_bytes()
+            }
         }
-        KeyCode::Char(character) => character.to_string().into_bytes(),
-        KeyCode::Enter => vec![b'\r'],
-        KeyCode::Backspace => vec![0x7f],
-        KeyCode::Tab => vec![b'\t'],
-        KeyCode::BackTab => b"\x1b[Z".to_vec(),
-        KeyCode::Escape => vec![0x1b],
-        KeyCode::Up => b"\x1b[A".to_vec(),
-        KeyCode::Down => b"\x1b[B".to_vec(),
-        KeyCode::Left => b"\x1b[D".to_vec(),
-        KeyCode::Right => b"\x1b[C".to_vec(),
-        KeyCode::Home => b"\x1b[H".to_vec(),
-        KeyCode::End => b"\x1b[F".to_vec(),
-        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-        KeyCode::Insert => b"\x1b[2~".to_vec(),
-        KeyCode::Delete => b"\x1b[3~".to_vec(),
-        KeyCode::Function(number) => function_key_bytes(number),
+        KeyCode::Char(character) => {
+            let mut bytes = character.to_string().into_bytes();
+            if key.modifiers.alt {
+                bytes.insert(0, 0x1b);
+            }
+            bytes
+        }
+        KeyCode::Enter => match modifier_param {
+            None => vec![b'\r'],
+            Some(3) => b"\x1b\r".to_vec(),
+            Some(param) => format!("\x1b[13;{param}u").into_bytes(),
+        },
+        KeyCode::Backspace => {
+            let mut bytes = vec![0x7f];
+            if key.modifiers.alt {
+                bytes.insert(0, 0x1b);
+            }
+            bytes
+        }
+        KeyCode::Tab => {
+            if let Some(param) = modifier_param.filter(|_| key.modifiers.control) {
+                format!("\x1b[9;{param}u").into_bytes()
+            } else {
+                let mut bytes = if key.modifiers.shift {
+                    b"\x1b[Z".to_vec()
+                } else {
+                    vec![b'\t']
+                };
+                if key.modifiers.alt {
+                    bytes.insert(0, 0x1b);
+                }
+                bytes
+            }
+        }
+        KeyCode::BackTab => {
+            let mut bytes = b"\x1b[Z".to_vec();
+            if key.modifiers.alt {
+                bytes.insert(0, 0x1b);
+            }
+            bytes
+        }
+        KeyCode::Escape => {
+            let mut bytes = vec![0x1b];
+            if key.modifiers.alt {
+                bytes.insert(0, 0x1b);
+            }
+            bytes
+        }
+        KeyCode::Up => encode_csi_cursor_key('A', modifier_param),
+        KeyCode::Down => encode_csi_cursor_key('B', modifier_param),
+        KeyCode::Right => encode_csi_cursor_key('C', modifier_param),
+        KeyCode::Left => encode_csi_cursor_key('D', modifier_param),
+        KeyCode::Home => encode_csi_cursor_key('H', modifier_param),
+        KeyCode::End => encode_csi_cursor_key('F', modifier_param),
+        KeyCode::Insert => encode_csi_tilde_key(2, modifier_param),
+        KeyCode::Delete => encode_csi_tilde_key(3, modifier_param),
+        KeyCode::PageUp => encode_csi_tilde_key(5, modifier_param),
+        KeyCode::PageDown => encode_csi_tilde_key(6, modifier_param),
+        KeyCode::Function(number) => function_key_bytes(number, modifier_param),
         KeyCode::Unknown => Vec::new(),
-    };
-    if key.modifiers.alt && !bytes.is_empty() {
-        bytes.insert(0, 0x1b);
     }
-    bytes
 }
 
-fn function_key_bytes(number: u8) -> Vec<u8> {
+fn xterm_modifier_parameter(modifiers: Modifiers) -> Option<u8> {
+    let mask = u8::from(modifiers.shift)
+        | (u8::from(modifiers.alt) << 1)
+        | (u8::from(modifiers.control) << 2);
+    (mask != 0).then_some(1 + mask)
+}
+
+fn ascii_control_byte(character: char) -> Option<u8> {
+    match character {
+        ' ' | '@' | '2' => Some(0x00),
+        'a'..='z' | 'A'..='Z' => Some((character.to_ascii_uppercase() as u8) & 0x1f),
+        '[' | '3' => Some(0x1b),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '~' | '6' => Some(0x1e),
+        '_' | '/' | '?' | '7' => Some(0x1f),
+        '8' => Some(0x7f),
+        _ => None,
+    }
+}
+
+fn encode_csi_cursor_key(final_char: char, modifier_param: Option<u8>) -> Vec<u8> {
+    match modifier_param {
+        Some(param) => format!("\x1b[1;{param}{final_char}").into_bytes(),
+        None => format!("\x1b[{final_char}").into_bytes(),
+    }
+}
+
+fn encode_csi_tilde_key(code: u8, modifier_param: Option<u8>) -> Vec<u8> {
+    match modifier_param {
+        Some(param) => format!("\x1b[{code};{param}~").into_bytes(),
+        None => format!("\x1b[{code}~").into_bytes(),
+    }
+}
+
+fn function_key_bytes(number: u8, modifier_param: Option<u8>) -> Vec<u8> {
     match number {
-        1 => b"\x1bOP".to_vec(),
-        2 => b"\x1bOQ".to_vec(),
-        3 => b"\x1bOR".to_vec(),
-        4 => b"\x1bOS".to_vec(),
-        5 => b"\x1b[15~".to_vec(),
-        6 => b"\x1b[17~".to_vec(),
-        7 => b"\x1b[18~".to_vec(),
-        8 => b"\x1b[19~".to_vec(),
-        9 => b"\x1b[20~".to_vec(),
-        10 => b"\x1b[21~".to_vec(),
-        11 => b"\x1b[23~".to_vec(),
-        12 => b"\x1b[24~".to_vec(),
+        1..=4 => {
+            let final_char = char::from(b'P' + (number - 1));
+            match modifier_param {
+                Some(param) => format!("\x1b[1;{param}{final_char}").into_bytes(),
+                None => format!("\x1bO{final_char}").into_bytes(),
+            }
+        }
+        5 => encode_csi_tilde_key(15, modifier_param),
+        6 => encode_csi_tilde_key(17, modifier_param),
+        7 => encode_csi_tilde_key(18, modifier_param),
+        8 => encode_csi_tilde_key(19, modifier_param),
+        9 => encode_csi_tilde_key(20, modifier_param),
+        10 => encode_csi_tilde_key(21, modifier_param),
+        11 => encode_csi_tilde_key(23, modifier_param),
+        12 => encode_csi_tilde_key(24, modifier_param),
         _ => Vec::new(),
     }
 }
@@ -2001,6 +2091,7 @@ mod tests {
     #[test]
     fn encoder_covers_remaining_portable_key_variants() {
         let cases = [
+            (KeyCode::Enter, vec![b'\r']),
             (KeyCode::Backspace, vec![0x7f]),
             (KeyCode::Tab, vec![b'\t']),
             (KeyCode::BackTab, b"\x1b[Z".to_vec()),
@@ -2034,6 +2125,10 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn encoder_covers_modified_navigation_and_function_keys() {
         let alt_enter = KeyEvent::new(
             KeyCode::Enter,
             Modifiers {
@@ -2043,6 +2138,150 @@ mod tests {
             KeyEventKind::Press,
         );
         assert_eq!(encode_key(&alt_enter), b"\x1b\r".to_vec());
+        let shift_enter = KeyEvent::new(
+            KeyCode::Enter,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&shift_enter), b"\x1b[13;2u".to_vec());
+        let ctrl_left = KeyEvent::new(
+            KeyCode::Left,
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&ctrl_left), b"\x1b[1;5D".to_vec());
+        let shift_delete = KeyEvent::new(
+            KeyCode::Delete,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&shift_delete), b"\x1b[3;2~".to_vec());
+        let ctrl_f1 = KeyEvent::new(
+            KeyCode::Function(1),
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&ctrl_f1), b"\x1b[1;5P".to_vec());
+        let shift_tab = KeyEvent::new(
+            KeyCode::Tab,
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&shift_tab), b"\x1b[Z".to_vec());
+        let alt_tab = KeyEvent::new(
+            KeyCode::Tab,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_tab), b"\x1b\t".to_vec());
+        let alt_backspace = KeyEvent::new(
+            KeyCode::Backspace,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_backspace), b"\x1b\x7f".to_vec());
+        let alt_escape = KeyEvent::new(
+            KeyCode::Escape,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_escape), b"\x1b\x1b".to_vec());
+    }
+
+    #[test]
+    fn encoder_covers_modified_control_and_fallback_keys() {
+        for (ch, expected) in [
+            (' ', vec![0x00]),
+            ('[', vec![0x1b]),
+            ('\\', vec![0x1c]),
+            (']', vec![0x1d]),
+            ('^', vec![0x1e]),
+            ('_', vec![0x1f]),
+            ('8', vec![0x7f]),
+            ('-', b"\x1b[45;5u".to_vec()),
+            (';', b"\x1b[59;5u".to_vec()),
+        ] {
+            let key = KeyEvent::new(
+                KeyCode::Char(ch),
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                KeyEventKind::Press,
+            );
+            assert_eq!(encode_key(&key), expected);
+        }
+        let ctrl_tab = KeyEvent::new(
+            KeyCode::Tab,
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&ctrl_tab), b"\x1b[9;5u".to_vec());
+        let shift_alt_tab = KeyEvent::new(
+            KeyCode::Tab,
+            Modifiers {
+                shift: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&shift_alt_tab), b"\x1b\x1b[Z".to_vec());
+        let alt_backtab = KeyEvent::new(
+            KeyCode::BackTab,
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_backtab), b"\x1b\x1b[Z".to_vec());
+        let alt_a = KeyEvent::new(
+            KeyCode::Char('a'),
+            Modifiers {
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&alt_a), b"\x1ba".to_vec());
+        let ctrl_alt_a = KeyEvent::new(
+            KeyCode::Char('a'),
+            Modifiers {
+                control: true,
+                alt: true,
+                ..Modifiers::default()
+            },
+            KeyEventKind::Press,
+        );
+        assert_eq!(encode_key(&ctrl_alt_a), vec![0x1b, 0x01]);
         let alt_unknown = KeyEvent::new(
             KeyCode::Unknown,
             Modifiers {

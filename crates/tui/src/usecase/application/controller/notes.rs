@@ -180,11 +180,13 @@ pub(super) fn loaded(
     if let Some(editor) = state.note_editor.as_mut().filter(|e| {
         e.target == target && e.request_id == request_id && e.phase == NotePhase::Loading
     }) {
+        let mut normalized = pad.clone();
+        normalized.note = normalized.note.as_deref().map(safe_text);
         editor
             .source
-            .replace(safe_text(pad.note.as_deref().unwrap_or("")));
-        editor.scratchpad.clone_from(pad);
-        editor.baseline.clone_from(pad);
+            .replace(normalized.note.as_deref().unwrap_or(""));
+        editor.scratchpad.clone_from(&normalized);
+        editor.baseline = normalized;
         editor.phase = NotePhase::Ready;
         editor.error = None;
     }
@@ -351,9 +353,9 @@ fn apply_edit(editor: &mut NoteEditor, key: &AppKey) -> bool {
         AppKey::SelectNoteSection(section) => {
             editor.section = *section;
             editor.source.replace(if *section == NoteSection::Note {
-                editor.scratchpad.note.as_deref().unwrap_or("")
+                safe_text(editor.scratchpad.note.as_deref().unwrap_or(""))
             } else {
-                ""
+                String::new()
             });
             editor.committed = false;
         }
