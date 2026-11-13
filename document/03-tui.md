@@ -158,6 +158,11 @@ Home の最上段には project tab bar を常時 1 行表示する。deck が 1
 `… +N` として示す。描画と click hit-test は同じ canonical path 付き projection を使う。`+ Open` は左右 1 cell の padding を
 含む inline button で、`+`、label、左右の padding のどこを押しても同じ Add workspace overlay を開く。
 
+各 tab は `1 usagi (3)` のように名前の後ろへ session 件数を表示し、0 件も `(0)` と示す。
+件数は project に保持する session 一覧の全件で、root scope や Agent / terminal の数を含めず、lifecycle では絞らない。
+active project は一覧更新に追従し、inactive project は最後に取得した一覧の件数を保持して再選択時に更新する。
+件数部分も同じ project のクリック領域に含め、狭幅では tab 全体と一緒に省略する。
+
 | 入力 | 動作 |
 |---|---|
 | OpenWorkspace / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する。`Tab` で Directory 入力へ切り替えると、未登録の既存ディレクトリを同じ open 経路で canonicalize・登録・追加する。表示中の open workspace は `Ctrl-X` で閉じる |
