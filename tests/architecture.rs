@@ -443,6 +443,7 @@ fn shipping_cli_integration_tests_enter_the_shared_e2e_lane_first() {
         "tests/cli_tui.rs",
         "tests/cli_tui_pty.rs",
         "tests/agent_ipc_e2e.rs",
+        "tests/claude_sandbox_e2e.rs",
     ] {
         let source = fs::read_to_string(workspace_root().join(suite))
             .expect("shipping CLI integration source is readable");

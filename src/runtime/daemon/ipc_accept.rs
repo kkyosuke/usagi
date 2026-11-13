@@ -716,13 +716,25 @@ pub(super) fn start_ipc_accept_loop(
                         // ordinary same-UID client (including an orphaned
                         // bootstrap broker reparented to PID 1) needs only its
                         // kernel-authenticated peer PID to complete hello.
+                        let mut peer_ancestors = Vec::new();
+                        let mut ancestor_cursor = peer_pid;
+                        for _ in 0..64 {
+                            let Ok(parent) = parent_pid(ancestor_cursor) else {
+                                break;
+                            };
+                            let Ok(pgid) = process_group(ancestor_cursor) else {
+                                break;
+                            };
+                            peer_ancestors.push((parent, pgid));
+                            if parent <= 1 || parent == ancestor_cursor {
+                                break;
+                            }
+                            ancestor_cursor = parent;
+                        }
                         let peer_process = PeerProcess {
                             pid: peer_pid,
                             process_start_identity: process_start_identity(peer_pid).ok(),
-                            lineage: parent_pid(peer_pid).and_then(|parent| {
-                                process_group(peer_pid)
-                                    .map(|process_group| (parent, process_group))
-                            }).ok(),
+                            lineage: peer_ancestors.first().copied(),
                         };
                         let Some(pre_handshake_permit) = pre_handshake.try_admit() else {
                             // No hello has been read, so sending a framed protocol
@@ -814,6 +826,8 @@ pub(super) fn start_ipc_accept_loop(
                                     inner: connection_fence.as_ref(),
                                     cleanup: connection_cleanup,
                                     peer_pid: peer_process.pid,
+                                    peer_ancestors: &peer_ancestors,
+                                    agent: Some(&agent_launch),
                                 };
                                 let admitted =
                                     usagi_daemon::presentation::ipc::handshake_admitted_with_fence(

@@ -86,10 +86,7 @@ pub(in crate::runtime::daemon) fn publish_agy_workspace_alias(
     let staging = metadata.join(format!(
         ".{name}.{}.{}.tmp",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| ())?
-            .as_nanos()
+        usagi_core::domain::id::OperationId::new()
     ));
     std::os::unix::fs::symlink(integration, &staging).map_err(|_| ())?;
     if std::fs::rename(&staging, &alias).is_err() {
