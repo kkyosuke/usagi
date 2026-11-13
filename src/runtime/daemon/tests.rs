@@ -12517,6 +12517,16 @@ fn sandbox_tmpdir_and_multi_repo_git_policy_cover_nested_repositories_and_sticky
         )
         .is_err()
     );
+    assert!(
+        agent_provisioning::validate_root_git_common_dir_policy(
+            &multi_session_dir.join("repo-a/.git"),
+            DefaultModel::Claude,
+            None,
+            None,
+            None,
+        )
+        .is_err()
+    );
 }
 
 #[test]
