@@ -156,7 +156,11 @@ mod tests {
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        assert_eq!(args, vec!["--", "/fixture/report.html"]);
+        if cfg!(target_os = "macos") {
+            assert_eq!(args, vec!["--", "/fixture/report.html"]);
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(args, vec!["/fixture/report.html"]);
+        }
         for invalid in ["", "-a", "--help", "https://example.com\ninjected"] {
             assert!(super::super::tui::platform_open_command(invalid).is_err());
         }

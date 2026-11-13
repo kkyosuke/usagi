@@ -763,6 +763,7 @@ pub(super) fn drive_workspace_controller(
     let session_lifecycles = snapshot.session_lifecycles.clone();
     let garden_reduced_motion = backend_factory.garden_reduced_motion();
     let (host, host_rx) = ControllerHost::channel();
+    let composition = backend_factory.create(&snapshot, host);
     let mut unified_port = Some(backend_factory.unified_search(&root_cwd));
     let (unified_sender, unified_completions) =
         mpsc::channel::<super::unified_search::Completion>();
@@ -771,7 +772,6 @@ pub(super) fn drive_workspace_controller(
     let (knowledge_sender, knowledge_completions) =
         mpsc::channel::<super::knowledge_search::Completion>();
     let mut knowledge_job: Option<super::knowledge_search::Job> = None;
-    let composition = backend_factory.create(&snapshot, host);
     let session_catalogs = composition.session_catalogs;
     let mut backend = composition.backend;
     let mut browser = composition.browser;
@@ -1294,7 +1294,7 @@ pub(super) fn drive_workspace_controller(
             director_terminal_material_key = Some(next_director_terminal_key);
             director_terminal_generation = director_terminal_generation.saturating_add(1);
         }
-        let root_rows = super::views::root_terminal_drawer::terminal_viewport_for(
+        let root_rows = super::views::root_terminal_drawer::terminal_viewport_for_mode(
             height,
             width,
             super::views::workspace::root_terminal_available_width(
@@ -1302,6 +1302,7 @@ pub(super) fn drive_workspace_controller(
                 width,
                 runtime.state().director_drawer_open(),
             ),
+            runtime.state().root_terminal_full_height(),
         )
         .rows;
         let root_revision = root_terminal

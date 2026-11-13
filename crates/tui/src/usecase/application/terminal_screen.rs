@@ -443,6 +443,9 @@ fn row_connects(upper: &[Cell], lower: &[Cell]) -> bool {
     if upper.iter().any(Cell::wrapped) {
         return true;
     }
+    if super::terminal_link::table_rows_connect(&unstyled_row(upper), &unstyled_row(lower)) {
+        return true;
+    }
     let last = upper
         .iter()
         .rposition(|cell| !cell.continuation() && cell.ch() != ' ');
@@ -890,6 +893,17 @@ mod tests {
         assert!(
             row_zero[0].contains("\u{1b}[4mhttps://example\u{1b}[0m"),
             "windowed row 0 must underline the head: {row_zero:?}"
+        );
+
+        // A bordered table narrower than the terminal width does not reach the
+        // right edge of the viewport; windowed rendering must still connect
+        // matching table rows so wrapped URLs stay underlined across the window.
+        let mut table_screen = TerminalScreen::new(2, 40);
+        table_screen.advance("│ https://example.com/a │\r\n│ /b                    │".as_bytes());
+        let table_row_one = table_screen.rows_with_scrollback_window(1, 2, false);
+        assert!(
+            table_row_one[0].contains("\u{1b}[4m/b\u{1b}[0m"),
+            "windowed table row 1 must underline the continuation: {table_row_one:?}"
         );
     }
 }

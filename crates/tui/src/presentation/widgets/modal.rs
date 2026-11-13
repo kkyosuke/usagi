@@ -726,6 +726,21 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
             }
             continue;
         }
+        if matches!(
+            ch,
+            crate::presentation::frame::INPUT_CURSOR_MARKER
+                | crate::presentation::frame::TERMINAL_CURSOR_MARKER
+        ) {
+            if column >= start && column < end {
+                if !selected {
+                    out.push_str(&escapes_before);
+                    carries_style = !escapes_before.is_empty();
+                    selected = true;
+                }
+                out.push(ch);
+            }
+            continue;
+        }
         let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if char_width == 0 {
             if last_glyph_emitted && column <= end {
@@ -1287,11 +1302,25 @@ mod tests {
 
     #[test]
     fn column_slice_keeps_zero_width_combining_characters() {
+        use crate::presentation::frame::{INPUT_CURSOR_MARKER, TERMINAL_CURSOR_MARKER};
         let sliced = columns("a\u{301}b", 0, 2);
         assert_eq!(display_width(&sliced), 2);
         assert!(sliced.contains('\u{301}'));
 
         let clipped_wide = columns("か\u{3099}b", 1, 2);
         assert_eq!(clipped_wide, " b");
+
+        // Cell-leading cursor markers belong to the cell that follows them, not
+        // the preceding cell, and preserve leading SGR state on the suffix.
+        let with_markers = format!(
+            "\u{1b}[32m{INPUT_CURSOR_MARKER}a{TERMINAL_CURSOR_MARKER}b{INPUT_CURSOR_MARKER}c\u{1b}[0m"
+        );
+        let prefix = columns(&with_markers, 0, 1);
+        assert!(prefix.contains(INPUT_CURSOR_MARKER));
+        assert!(!prefix.contains(TERMINAL_CURSOR_MARKER));
+        let middle = columns(&with_markers, 1, 1);
+        assert!(!middle.contains(INPUT_CURSOR_MARKER));
+        assert!(middle.contains(TERMINAL_CURSOR_MARKER));
+        assert!(middle.starts_with("\u{1b}[32m"));
     }
 }
