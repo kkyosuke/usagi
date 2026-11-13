@@ -5669,7 +5669,7 @@ fn perform_removal_identity_and_orphan_diagnosis_release_the_session_lock_before
     // Occupied orphan path during perform_create inspects git outside runtime.lock().
     let orphan_path = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("orphan");
     std::fs::create_dir_all(&orphan_path).unwrap();
-    std::fs::write(orphan_path.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &orphan_path);
     observed_unlocked.store(false, std::sync::atomic::Ordering::SeqCst);
     let err =
         perform_create(&runtime, &probe, &operation(), &json!({"name":"orphan"})).unwrap_err();

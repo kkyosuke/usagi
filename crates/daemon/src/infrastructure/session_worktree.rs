@@ -1067,8 +1067,22 @@ mod bounded_git_tests {
         std::fs::create_dir_all(multi.join(".usagi/sessions/ignored/.git")).unwrap();
         std::fs::create_dir_all(multi.join("group/repo-a/.git")).unwrap();
         std::fs::create_dir_all(multi.join("repo-b/.git")).unwrap();
-        std::fs::create_dir_all(multi.join("linked")).unwrap();
-        std::fs::write(multi.join("linked/.git"), "gitdir: /fixture\n").unwrap();
+        let linked = multi.join("linked");
+        let linked_git_dir = multi.join("repo-b/.git/worktrees/linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::create_dir_all(&linked_git_dir).unwrap();
+        let linked_marker = linked.join(".git");
+        std::fs::write(
+            &linked_marker,
+            format!("gitdir: {}\n", linked_git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(linked_git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            linked_git_dir.join("gitdir"),
+            format!("{}\n", linked_marker.display()),
+        )
+        .unwrap();
         std::fs::write(multi.join("note.txt"), "text").unwrap();
         assert_eq!(
             SystemSessionWorktreeIo
