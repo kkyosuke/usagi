@@ -309,7 +309,7 @@ fn execute_command_output_until(
     };
     let status = match status {
         Ok(()) => {
-            close_descendant_resources(pid, &stdout, &stderr, None, terminate_grace);
+            close_descendant_resources(pid, &stdout, &stderr, None, terminate_grace, false);
             child.wait().or(Err(ChildOutputError::ObservationFailed))
         }
         Err(error) => Err(error),
@@ -335,7 +335,10 @@ fn execute_command_output_until(
 }
 
 /// Runs a non-interactive command with bounded input, output, lifetime, and
-/// complete process-group cleanup.
+/// complete process-group cleanup. When `preserve_closed_pipe_descendants` is
+/// `true`, descendants that have closed stdin, stdout, and stderr before the
+/// leader exits cleanly are left alive so daemonizing clipboard helpers (`xclip`,
+/// `xsel`, `wl-copy`) can keep serving the selection.
 #[must_use]
 #[coverage(off)] // coverage: reason=real_io owner=core expires=2027-01-31 tests=bounded_input_execution_writes_and_times_out_safely
 pub fn write_stdin_bounded(
@@ -344,6 +347,7 @@ pub fn write_stdin_bounded(
     input: &[u8],
     input_limit: usize,
     policy: ChildPolicy,
+    preserve_closed_pipe_descendants: bool,
 ) -> ChildInputExecution {
     if input.len() > input_limit {
         return ChildInputExecution::InputTooLarge;
@@ -378,28 +382,14 @@ pub fn write_stdin_bounded(
     let input = input.to_vec();
     let writer = thread::spawn(move || write_input(&mut stdin, &input, &writer_cancelled));
     let output_exceeded = Arc::new(AtomicBool::new(false));
-    let stdout_exceeded = Arc::clone(&output_exceeded);
-    let stdout_cancelled = Arc::clone(&cancelled);
-    let stdout = thread::spawn(move || {
-        let mut stdout = stdout;
-        capture(
-            &mut stdout,
-            policy.output_limit,
-            &stdout_exceeded,
-            &stdout_cancelled,
-        )
-    });
-    let stderr_exceeded = Arc::clone(&output_exceeded);
-    let stderr_cancelled = Arc::clone(&cancelled);
-    let stderr = thread::spawn(move || {
-        let mut stderr = stderr;
-        capture(
-            &mut stderr,
-            policy.output_limit,
-            &stderr_exceeded,
-            &stderr_cancelled,
-        )
-    });
+    let spawn_capture = |mut pipe: Box<dyn Read + Send>| {
+        let exceeded = Arc::clone(&output_exceeded);
+        let stop = Arc::clone(&cancelled);
+        let limit = policy.output_limit;
+        thread::spawn(move || capture(&mut pipe, limit, &exceeded, &stop))
+    };
+    let stdout = spawn_capture(Box::new(stdout));
+    let stderr = spawn_capture(Box::new(stderr));
     let deadline = Instant::now() + policy.timeout;
     let status = loop {
         match child_exited(&child) {
@@ -421,30 +411,40 @@ pub fn write_stdin_bounded(
             }
         }
     };
-    let status = match status {
-        Ok(()) => {
-            close_descendant_resources(
-                pid,
-                &stdout,
-                &stderr,
-                Some(&writer),
-                policy.terminate_grace,
-            );
-            child.wait().or(Err(ChildInputExecution::ObservationFailed))
-        }
-        Err(error) => Err(error),
-    };
+    if status.is_ok() {
+        close_descendant_resources(
+            pid,
+            &stdout,
+            &stderr,
+            Some(&writer),
+            policy.terminate_grace,
+            preserve_closed_pipe_descendants && !output_exceeded.load(Ordering::Acquire),
+        );
+    }
     cancelled.store(true, Ordering::Release);
-    let stdout = stdout.join();
-    let stderr = stderr.join();
-    let writer = writer.join();
-    let Ok(status) = status else {
-        return status.unwrap_err();
-    };
+    let (stdout, stderr, writer) = (stdout.join(), stderr.join(), writer.join());
+    if let Err(failure) = status {
+        return failure;
+    }
     let (Ok(stdout), Ok(stderr), Ok(writer)) = (stdout, stderr, writer) else {
+        terminate_and_reap(&mut child, policy.terminate_grace);
         return ChildInputExecution::ObservationFailed;
     };
-    normalize_input_completion(status.success(), &stdout, &stderr, writer)
+    let pipe_outcome = normalize_input_completion(true, &stdout, &stderr, writer);
+    if pipe_outcome != ChildInputExecution::Success {
+        terminate_and_reap(&mut child, policy.terminate_grace);
+        return pipe_outcome;
+    }
+    let Ok(exit_status) = child.wait() else {
+        terminate_and_reap(&mut child, policy.terminate_grace);
+        return ChildInputExecution::ObservationFailed;
+    };
+    let outcome = normalize_input_completion(exit_status.success(), &stdout, &stderr, writer);
+    if preserve_closed_pipe_descendants && outcome != ChildInputExecution::Success {
+        signal_group(pid, libc::SIGTERM);
+        signal_group(pid, libc::SIGKILL);
+    }
+    outcome
 }
 
 fn normalize_input_completion(
@@ -476,6 +476,7 @@ pub(crate) fn close_descendant_resources<T>(
     stderr: &thread::JoinHandle<T>,
     writer: Option<&thread::JoinHandle<Option<bool>>>,
     grace: Duration,
+    preserve_closed_pipe_descendants: bool,
 ) -> bool {
     let finished = || {
         stdout.is_finished()
@@ -492,6 +493,9 @@ pub(crate) fn close_descendant_resources<T>(
         );
     }
     let forced_capture_cleanup = !finished();
+    if preserve_closed_pipe_descendants && !forced_capture_cleanup {
+        return false;
+    }
     // A probe must not daemonize even after descendants close their pipes.
     // Always send KILL before reaping the leader, including when TERM closed
     // every stream but another descendant ignored it.
@@ -1016,6 +1020,7 @@ mod tests {
                     &input,
                     input.len(),
                     bounded,
+                    false,
                 );
                 assert_eq!(result, ChildInputExecution::TimedOut);
             } else {
@@ -1079,6 +1084,8 @@ while not os.path.exists(path):
     time.sleep(0.001)
 if mode == 'exit':
     print('done', flush=True)
+elif mode == 'fail':
+    raise SystemExit(7)
 elif mode == 'overflow':
     os.write(1, b'x' * 8192)
     time.sleep(30)
@@ -1128,6 +1135,7 @@ else:
                         b"",
                         0,
                         bounded,
+                        false,
                     );
                     assert_eq!(
                         result,
@@ -1189,6 +1197,73 @@ else:
                 }
                 std::fs::remove_file(path).unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn preserved_closed_pipe_descendants_survive_clean_exit_and_die_on_failure() {
+        let script = CLOSED_PIPE_CHILD;
+        let temporary = tempfile::tempdir().unwrap();
+        let preserved_path = temporary.path().join("preserved-exit.pid");
+        let _cleanup = KillEscaped(preserved_path.clone());
+        assert_eq!(
+            write_stdin_bounded(
+                "python3",
+                &["-c", script, preserved_path.to_str().unwrap(), "exit"],
+                b"",
+                0,
+                policy(),
+                true,
+            ),
+            ChildInputExecution::Success
+        );
+        let preserved_pid: libc::pid_t = std::fs::read_to_string(&preserved_path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        // SAFETY: signal zero only observes the fixture's exact PID.
+        assert!(unsafe { libc::kill(preserved_pid, 0) == 0 });
+
+        let failed_path = temporary.path().join("preserved-fail.pid");
+        let _cleanup_failed = KillEscaped(failed_path.clone());
+        assert_eq!(
+            write_stdin_bounded(
+                "python3",
+                &["-c", script, failed_path.to_str().unwrap(), "fail"],
+                b"",
+                0,
+                policy(),
+                true,
+            ),
+            ChildInputExecution::ExitFailure
+        );
+        let failed_pid: libc::pid_t = std::fs::read_to_string(&failed_path)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            // SAFETY: signal zero only observes the fixture's exact PID.
+            let running = unsafe { libc::kill(failed_pid, 0) == 0 };
+            #[cfg(target_os = "linux")]
+            let running = if running {
+                let state = std::fs::read_to_string(format!("/proc/{failed_pid}/stat"));
+                state.is_ok_and(|stat| {
+                    !stat
+                        .rsplit_once(')')
+                        .unwrap()
+                        .1
+                        .trim_start()
+                        .starts_with('Z')
+                })
+            } else {
+                false
+            };
+            if !running {
+                break;
+            }
+            assert!(Instant::now() < deadline, "failed descendant survived");
+            thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -1409,12 +1484,20 @@ else:
                 &["-c", "test \"$(cat)\" = payload"],
                 b"payload",
                 16,
-                policy()
+                policy(),
+                false,
             ),
             ChildInputExecution::Success
         );
         assert_eq!(
-            write_stdin_bounded("sh", &["-c", "cat >/dev/null"], b"too large", 4, policy()),
+            write_stdin_bounded(
+                "sh",
+                &["-c", "cat >/dev/null"],
+                b"too large",
+                4,
+                policy(),
+                false,
+            ),
             ChildInputExecution::InputTooLarge
         );
         let started = Instant::now();
@@ -1428,6 +1511,7 @@ else:
                     timeout: Duration::from_millis(30),
                     ..policy()
                 },
+                false,
             ),
             ChildInputExecution::TimedOut
         );
@@ -1444,6 +1528,7 @@ else:
                     timeout: Duration::from_secs(5),
                     ..policy()
                 },
+                false,
             ),
             ChildInputExecution::OutputTooLarge
         );
@@ -1458,7 +1543,8 @@ else:
                 &["-c", "cat >/dev/null; exit 7"],
                 b"payload",
                 16,
-                policy()
+                policy(),
+                false,
             ),
             ChildInputExecution::ExitFailure
         );
@@ -1471,6 +1557,7 @@ else:
                 &oversized_pipe_write,
                 oversized_pipe_write.len(),
                 policy(),
+                false,
             ),
             ChildInputExecution::ObservationFailed
         );
@@ -1483,6 +1570,7 @@ else:
                 b"payload",
                 16,
                 policy(),
+                true,
             ),
             ChildInputExecution::Success
         );
