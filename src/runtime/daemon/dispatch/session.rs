@@ -463,11 +463,12 @@ pub(super) fn dispatch_session_action(
         // multi-gigabyte `target/`.
         SessionAction::Remove => {
             let name = string("name")?;
-            let (id, branch_head) = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .removal_identity(name)?;
+            let (id, branch_head) =
+                usagi_daemon::usecase::session_runtime::perform_removal_identity(
+                    bound.sessions(),
+                    &SystemGit,
+                    name,
+                )?;
             if let Some(caller) = caller {
                 let target = bound
                     .sessions()

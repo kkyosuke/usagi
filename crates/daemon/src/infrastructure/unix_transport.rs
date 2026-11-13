@@ -2566,6 +2566,26 @@ fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
     ))
 }
 
+/// Verifies that an established Unix-stream peer belongs to the current
+/// effective user.
+///
+/// # Errors
+///
+/// Returns `PermissionDenied` when the peer UID does not match `effective_uid`.
+pub fn verify_same_user_peer(stream: &UnixStream) -> io::Result<()> {
+    check_same_user_peer_uid(peer_uid(stream)?, effective_uid())
+}
+
+fn check_same_user_peer_uid(actual: u32, expected: u32) -> io::Result<()> {
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("socket peer uid {actual} does not match expected uid {expected}"),
+        ));
+    }
+    Ok(())
+}
+
 /// Returns the OS-authenticated PID of an established Unix-stream peer.
 ///
 /// # Errors
@@ -5027,5 +5047,18 @@ mod tests {
         fs::set_permissions(&socket_parent, fs::Permissions::from_mode(DIR_MODE)).unwrap();
         drop(protected_listener);
         fs::remove_file(protected_socket).unwrap();
+    }
+
+    #[test]
+    fn verify_same_user_peer_accepts_same_uid_and_rejects_mismatch() {
+        let (left, _right) = UnixStream::pair().unwrap();
+        verify_same_user_peer(&left).unwrap();
+        check_same_user_peer_uid(effective_uid(), effective_uid()).unwrap();
+        assert_eq!(
+            check_same_user_peer_uid(effective_uid().wrapping_add(1), effective_uid())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

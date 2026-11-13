@@ -959,6 +959,8 @@ impl StandbyProbe for UnixStandbyProbe<'_> {
                 endpoint: endpoint.to_owned(),
             },
         )?;
+        stream.set_read_timeout(Some(PRE_HANDSHAKE_DEADLINE))?;
+        stream.set_write_timeout(Some(PRE_HANDSHAKE_DEADLINE))?;
         // One bootstrap frame out, one in, then the connection is dropped. There
         // is deliberately no request path here: a readiness probe that could
         // mutate its peer would not be a proof of readiness.

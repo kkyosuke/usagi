@@ -1116,6 +1116,8 @@ pub(super) fn start_daemon_agent_restart_recovery(
     std::thread::Builder::new()
         .name("usagi-agent-restart-recovery".to_owned())
         .spawn(move || {
+            let worker_health =
+                shutdown.monitor_background_worker(BackgroundWorker::AgentRestartRecovery);
             let mut failures = FailureTransitionLog::default();
             while !shutdown.is_requested() {
                 match recover_pending_daemon_agents_once(
@@ -1147,6 +1149,7 @@ pub(super) fn start_daemon_agent_restart_recovery(
                     break;
                 }
             }
+            worker_health.finish_planned();
         })
 }
 
