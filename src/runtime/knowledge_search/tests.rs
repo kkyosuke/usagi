@@ -124,3 +124,37 @@ fn knowledge_search_cancels_a_held_store_lock() {
     // A cancelled empty-query listing must not rebuild the missing index.
     assert!(!tmp.path().join(".usagi/memory/index.json").exists());
 }
+
+#[test]
+fn knowledge_search_with_fallback_prefers_primary_store_when_provisioned() {
+    let primary = tempfile::tempdir().unwrap();
+    let fallback = tempfile::tempdir().unwrap();
+    let mut reader = KnowledgeSearch::with_fallback(primary.path(), fallback.path());
+    assert_eq!(reader.search("", Arc::default()), Results::default());
+
+    memory(fallback.path(), "legacy.md", "legacy-note", "from-fallback");
+    let results = reader.search("from-fallback", Arc::default());
+    assert_eq!(results.documents.len(), 1);
+    assert!(
+        reader
+            .read(&results.documents[0].path)
+            .unwrap()
+            .join("\n")
+            .contains("from-fallback")
+    );
+
+    memory(primary.path(), "managed.md", "managed-note", "from-primary");
+    assert_eq!(
+        reader.search("from-fallback", Arc::default()).documents,
+        [] as [usagi_tui::usecase::application::knowledge_search::Document; 0]
+    );
+    let results = reader.search("from-primary", Arc::default());
+    assert_eq!(results.documents.len(), 1);
+    assert!(
+        reader
+            .read(&results.documents[0].path)
+            .unwrap()
+            .join("\n")
+            .contains("from-primary")
+    );
+}

@@ -299,7 +299,7 @@ Current session は対象 project / session を絞ってから上限を適用す
 
 ## Memory の検索
 
-`Ctrl-O m` で現在の workspace の `.usagi/memory/` を検索する。
+`Ctrl-O m` で現在の workspace の Memory ストア（daemon data home の `agent-memory/<workspace-id>/.usagi/memory/`、未作成時は workspace の `.usagi/memory/`）を検索する。
 既存の Memory 検索と同じ大文字小文字を区別しない部分一致で、名前・タイトル・本文を対象にする。空の検索語では一覧を表示し、検索語は最大 256 文字。
 選択中 session の worktree や他の project のストアは含めない。検索画面で再度 `Ctrl-O m` を押すと検索語を保って再取得する。
 検索語の変更・画面を閉じる操作・project 切り替えでは、古い検索のストアロック待ちを取り消し、遅れて届いた結果を表示しない。

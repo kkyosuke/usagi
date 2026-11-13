@@ -204,7 +204,7 @@ impl Config {
             match port.read_workspace_setup_commands() {
                 Ok(commands) => commands,
                 Err(setup_error) => {
-                    error = Some(format!("Load failed: {setup_error}"));
+                    error = Some(safe_error_notice("Load failed", &setup_error));
                     Vec::new()
                 }
             }
@@ -552,7 +552,7 @@ impl Config {
                 self.environment_error = None;
                 self.notice = None;
             }
-            Err(error) => self.notice = Some(format!("Load failed: {error}")),
+            Err(error) => self.notice = Some(safe_error_notice("Load failed", &error)),
         }
         true
     }
@@ -594,7 +594,8 @@ impl Config {
         let bindings = match editor.parse() {
             Ok(bindings) => bindings,
             Err(error) => {
-                self.environment_error = Some(error);
+                self.environment_error =
+                    Some(usagi_core::domain::presentation_text::sanitize_presentation_line(&error));
                 return None;
             }
         };
@@ -616,7 +617,7 @@ impl Config {
                 true
             }
             Err(error) => {
-                self.environment_error = Some(format!("Save failed: {error}"));
+                self.environment_error = Some(safe_error_notice("Save failed", &error));
                 false
             }
         }
@@ -657,7 +658,7 @@ impl Config {
                         .to_owned(),
                 );
             }
-            Err(error) => self.notice = Some(format!("Load failed: {error}")),
+            Err(error) => self.notice = Some(safe_error_notice("Load failed", &error)),
         }
         true
     }
@@ -715,7 +716,7 @@ impl Config {
                 true
             }
             Err(error) => {
-                self.setup_commands_error = Some(format!("Save failed: {error}"));
+                self.setup_commands_error = Some(safe_error_notice("Save failed", &error));
                 false
             }
         }
@@ -785,7 +786,7 @@ impl Config {
             }
             Err(error) => {
                 self.save_phase = SavePhase::Idle;
-                self.notice = Some(format!("Save failed: {error}"));
+                self.notice = Some(safe_error_notice("Save failed", &error));
                 false
             }
         }
@@ -867,10 +868,17 @@ fn parse_setup_commands_source(source: &str) -> Result<Vec<String>, String> {
     Ok(commands)
 }
 
+fn safe_error_notice(prefix: &str, error: &impl std::fmt::Display) -> String {
+    usagi_core::domain::presentation_text::sanitize_presentation_line(&format!("{prefix}: {error}"))
+}
+
 fn read_scope(port: &mut dyn SettingsPort, scope: SettingsScope) -> (Settings, Option<String>) {
     match port.read(scope) {
         Ok(settings) => (settings, None),
-        Err(error) => (Settings::default(), Some(format!("Load failed: {error}"))),
+        Err(error) => (
+            Settings::default(),
+            Some(safe_error_notice("Load failed", &error)),
+        ),
     }
 }
 
