@@ -597,6 +597,24 @@ pub(super) fn session_git_common_dir(workspace_root: &Path) -> Result<Option<Pat
     }
 }
 
+fn workspace_repository_relatives(workspace_root: &Path) -> Result<Vec<PathBuf>, ()> {
+    use super::SystemSessionWorktreeIo;
+    use usagi_daemon::usecase::session_runtime::SessionWorktreeIo as _;
+    match std::fs::symlink_metadata(workspace_root.join(".git")) {
+        Ok(_) => Ok(vec![PathBuf::new()]),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SystemSessionWorktreeIo
+            .workspace_repositories(workspace_root)
+            .map(|relatives| {
+                relatives
+                    .into_iter()
+                    .filter(|relative| !relative.as_os_str().is_empty())
+                    .collect()
+            })
+            .map_err(|_| ()),
+        Err(_) => Err(()),
+    }
+}
+
 /// Git authority granted to one linked session worktree.
 pub(super) struct SessionGitPolicy {
     pub(super) writable_roots: Vec<PathBuf>,
@@ -607,6 +625,36 @@ pub(super) struct SessionGitPolicy {
 /// normal `git add` / `git commit` transaction, keeping its `.git` file and
 /// worktree-admin indirection pointers read-only.
 pub(super) fn session_git_policy(
+    workspace_root: &Path,
+    worktree: &Path,
+) -> Result<Option<SessionGitPolicy>, ()> {
+    if std::fs::symlink_metadata(worktree.join(".git")).is_ok()
+        || std::fs::symlink_metadata(workspace_root.join(".git")).is_ok()
+    {
+        return single_repo_session_git_policy(workspace_root, worktree);
+    }
+    let relatives = workspace_repository_relatives(workspace_root)?;
+    if relatives.is_empty() {
+        return single_repo_session_git_policy(workspace_root, worktree);
+    }
+    let mut writable_roots = Vec::new();
+    let mut read_only_roots = Vec::new();
+    for relative in relatives {
+        if let Some(policy) = single_repo_session_git_policy(
+            &workspace_root.join(&relative),
+            &worktree.join(&relative),
+        )? {
+            writable_roots.extend(policy.writable_roots);
+            read_only_roots.extend(policy.read_only_roots);
+        }
+    }
+    Ok((!writable_roots.is_empty()).then_some(SessionGitPolicy {
+        writable_roots,
+        read_only_roots,
+    }))
+}
+
+fn single_repo_session_git_policy(
     workspace_root: &Path,
     worktree: &Path,
 ) -> Result<Option<SessionGitPolicy>, ()> {
@@ -734,15 +782,23 @@ pub(super) fn validate_root_git_common_dir_policy(
     home: Option<&Path>,
     cache_dir: Option<&Path>,
 ) -> Result<(), ()> {
-    let common = git_common_dir(workspace_root)?;
+    let commons = workspace_repository_relatives(workspace_root)?
+        .into_iter()
+        .map(|relative| git_common_dir(&workspace_root.join(relative)))
+        .collect::<Result<Vec<_>, ()>>()?;
+    if commons.is_empty() {
+        return Ok(());
+    }
     let mut writable = vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")];
     writable.extend(tmpdir.map(Path::to_path_buf));
     if let Some(home) = home {
         writable.push(home.join(agent.state_directory()));
-        if agent
-            .global_config_prefix()
-            .is_some_and(|prefix| lexical_prefix_overlaps_path(&home.join(prefix), &common))
-        {
+        if agent.global_config_prefix().is_some_and(|prefix| {
+            let prefix_path = home.join(prefix);
+            commons
+                .iter()
+                .any(|common| lexical_prefix_overlaps_path(&prefix_path, common))
+        }) {
             return Err(());
         }
         if cfg!(target_os = "macos") {
@@ -758,7 +814,9 @@ pub(super) fn validate_root_git_common_dir_policy(
     }
     let overlaps = writable.into_iter().any(|root| {
         let root = root.canonicalize().unwrap_or(root);
-        common.starts_with(&root) || root.starts_with(&common)
+        commons
+            .iter()
+            .any(|common| common.starts_with(&root) || root.starts_with(common))
     });
     (!overlaps).then_some(()).ok_or(())
 }
@@ -1053,6 +1111,23 @@ pub(super) fn resolve_sandbox_cache_dir() -> Option<PathBuf> {
     {
         None
     }
+}
+
+/// Bootstrap `$TMPDIR` resolution for the outer agent sandbox.
+///
+/// A sticky system temp directory (`/tmp`, `/var/tmp`, or macOS `/private/tmp`,
+/// `/private/var/tmp`) or a directory not owned by the current user is not a
+/// private per-user temp directory; ignore it so the launcher falls back to the
+/// standard `/tmp` + `/var/tmp` grant instead of failing the policy gate.
+pub(super) fn resolve_sandbox_tmpdir(raw: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let path = PathBuf::from(raw?).canonicalize().ok()?;
+    if matches!(
+        path.to_str(),
+        Some("/tmp" | "/var/tmp" | "/private/tmp" | "/private/var/tmp")
+    ) {
+        return None;
+    }
+    validate_owned_directory(&path).ok().map(|()| path)
 }
 
 /// The policy paths the daemon bootstrap resolved once from its trusted

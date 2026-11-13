@@ -3697,45 +3697,100 @@ pub(crate) fn repair_non_lifecycle_doctor_state(data_dir: &Path) {
         let store = DaemonRecordStore::new(FsRecordFile {
             path: daemon_dir.join("daemon.json"),
         });
-        if absence.acquire().unwrap_or(false) && store.load().ok().flatten().is_none() {
-            let _ = usagi_daemon::infrastructure::unix_transport::remove_current_locator(data_dir);
+        if absence.acquire().unwrap_or(false) {
+            let record = store.load().ok().flatten();
+            let alive = record.as_ref().is_some_and(|expected| {
+                matches!(
+                    usagi_core::domain::daemon::classify(
+                        Some(expected),
+                        ExactProcessControl.observe(expected),
+                    ),
+                    usagi_core::domain::daemon::DaemonState::Alive
+                )
+            });
+            if !alive {
+                if read_locator(&daemon_dir).is_err() {
+                    let _ = usagi_daemon::infrastructure::unix_transport::remove_current_locator(
+                        data_dir,
+                    );
+                }
+                let live = live_generation_endpoints(data_dir);
+                let _ = retire_stale_current_preserving(data_dir, &|generation| {
+                    live.contains(generation)
+                });
+                let record_path = daemon_dir.join("daemon.json");
+                if std::fs::symlink_metadata(&record_path)
+                    .is_ok_and(|meta| meta.file_type().is_file())
+                {
+                    let _ = std::fs::remove_file(&record_path);
+                }
+            }
         }
     }
 }
 
+#[cfg(unix)]
+fn repair_owned_node_permissions(path: &Path, is_dir: bool, mode: u32) {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    let euid = unsafe { libc::geteuid() };
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    let valid_kind = if is_dir {
+        meta.is_dir()
+    } else {
+        meta.is_file() && meta.nlink() == 1
+    };
+    if meta.file_type().is_symlink() || meta.uid() != euid || !valid_kind {
+        return;
+    }
+    let flags = libc::O_NOFOLLOW
+        | libc::O_CLOEXEC
+        | if is_dir {
+            libc::O_DIRECTORY
+        } else {
+            libc::O_NONBLOCK
+        };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .or_else(|_| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(flags)
+                .open(path)
+        });
+    if let Ok(file) = file
+        && file.metadata().is_ok_and(|opened| {
+            opened.dev() == meta.dev()
+                && opened.ino() == meta.ino()
+                && opened.uid() == euid
+                && (is_dir || opened.nlink() == 1)
+        })
+    {
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+    }
+}
+
 pub(crate) fn repair_doctor_data_dir(data_dir: &Path) {
+    let daemon_dir = data_dir.join("daemon");
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
-        let euid = unsafe { libc::geteuid() };
-        for dir in [data_dir, &data_dir.join("daemon")] {
-            if let Ok(file) = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
-                .open(dir)
-                && file
-                    .metadata()
-                    .is_ok_and(|meta| meta.is_dir() && meta.uid() == euid)
-            {
-                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o700));
-            }
+        for dir in [data_dir, daemon_dir.as_path()] {
+            repair_owned_node_permissions(dir, true, 0o700);
         }
-        let settings_path = data_dir.join("settings.json");
-        if let Ok(file) = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open(&settings_path)
-            && file
-                .metadata()
-                .is_ok_and(|meta| meta.is_file() && meta.uid() == euid && meta.nlink() == 1)
-        {
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        for file in [
+            data_dir.join("settings.json"),
+            daemon_dir.join("current.json"),
+        ] {
+            repair_owned_node_permissions(&file, false, 0o600);
         }
     }
     if data_dir.is_dir() {
         let _ = ensure_private_dir(data_dir);
     }
-    let daemon_dir = data_dir.join("daemon");
     if daemon_dir.is_dir() {
         let _ = ensure_private_dir(&daemon_dir);
     }

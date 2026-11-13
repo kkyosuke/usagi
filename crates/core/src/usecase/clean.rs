@@ -266,7 +266,12 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
     let mut repositories = inventory.repositories.iter().collect::<Vec<_>>();
     repositories.sort_by(|left, right| left.root.cmp(&right.root));
     for repository in repositories {
-        let Some(sessions) = lifecycle.get(&repository.root) else {
+        let Some((workspace_root, relative, sessions)) =
+            lifecycle.iter().find_map(|(ws_root, sessions)| {
+                let relative = repository.root.strip_prefix(ws_root).ok()?;
+                (relative.components().count() <= 1).then_some((ws_root, relative, sessions))
+            })
+        else {
             continue;
         };
         // An empty session list is absence of evidence, not evidence of absence.
@@ -278,11 +283,11 @@ pub fn plan(inventory: &CleanInventory) -> Vec<CleanCandidate> {
         // still authorises removal, because a workspace whose sessions really
         // are all gone can leak worktrees, but only as a deliberate act.
         let unproven = sessions.is_empty();
-        let expected_parent = repository.root.join(STATE_DIR).join(SESSIONS_DIR);
+        let expected_parent = workspace_root.join(STATE_DIR).join(SESSIONS_DIR);
         let mut worktrees = repository.worktrees.iter().collect::<Vec<_>>();
         worktrees.sort_by(|left, right| left.path.cmp(&right.path));
         for worktree in worktrees {
-            let Some(name) = managed_worktree_name(&expected_parent, worktree) else {
+            let Some(name) = managed_worktree_name(&expected_parent, relative, worktree) else {
                 continue;
             };
             if !sessions.contains(name) {
@@ -355,12 +360,20 @@ fn residue(process: &ObservedProcess) -> bool {
 
 fn managed_worktree_name<'a>(
     expected_parent: &Path,
+    relative: &Path,
     worktree: &'a ObservedWorktree,
 ) -> Option<&'a str> {
-    if worktree.path.parent()? != expected_parent {
+    let session_dir = if relative.as_os_str().is_empty() {
+        worktree.path.as_path()
+    } else if worktree.path.file_name() == relative.file_name() {
+        worktree.path.parent()?
+    } else {
+        return None;
+    };
+    if session_dir.parent()? != expected_parent {
         return None;
     }
-    let name = worktree.path.file_name()?.to_str()?;
+    let name = session_dir.file_name()?.to_str()?;
     match worktree.branch.as_deref() {
         Some(branch) if branch == format!("usagi/{name}") => Some(name),
         // A detached worktree at the exact managed path is still owned by the
@@ -971,6 +984,63 @@ mod tests {
                 requires_force: true
             }
             .requires_force()
+        );
+    }
+
+    #[test]
+    fn multi_repo_workspace_matches_child_repository_worktrees_and_branches() {
+        let inventory = CleanInventory {
+            daemon_data: vec![DaemonWorkspaceData {
+                root: "/ws".into(),
+                dir: "/data/ws".into(),
+                root_exists: true,
+                sessions: Some(BTreeSet::from(["active".to_owned()])),
+            }],
+            repositories: vec![RepositoryInventory {
+                root: "/ws/repo-a".into(),
+                worktrees: vec![
+                    ObservedWorktree {
+                        path: "/ws/repo-a".into(),
+                        branch: Some("main".into()),
+                        dirty: false,
+                    },
+                    ObservedWorktree {
+                        path: "/ws/.usagi/sessions/active/repo-a".into(),
+                        branch: Some("usagi/active".into()),
+                        dirty: false,
+                    },
+                    ObservedWorktree {
+                        path: "/ws/.usagi/sessions/orphan/repo-a".into(),
+                        branch: Some("usagi/orphan".into()),
+                        dirty: false,
+                    },
+                    ObservedWorktree {
+                        path: "/tmp/unrelated".into(),
+                        branch: Some("usagi/orphan".into()),
+                        dirty: false,
+                    },
+                ],
+                branches: vec![
+                    ObservedBranch {
+                        name: "usagi/active".into(),
+                        merged: true,
+                    },
+                    ObservedBranch {
+                        name: "usagi/orphan".into(),
+                        merged: true,
+                    },
+                ],
+            }],
+            ..CleanInventory::default()
+        };
+
+        assert_eq!(
+            plan(&inventory),
+            vec![CleanCandidate::Worktree {
+                root: "/ws/repo-a".into(),
+                path: "/ws/.usagi/sessions/orphan/repo-a".into(),
+                requires_force: false,
+            }]
         );
     }
 }

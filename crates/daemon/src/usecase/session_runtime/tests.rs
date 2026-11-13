@@ -5735,6 +5735,73 @@ impl SessionWorktreeIo for MultiRepoIo {
     }
 }
 
+struct OccupiedMultiRepoIo {
+    fail_repos: bool,
+}
+
+impl SessionWorktreeIo for OccupiedMultiRepoIo {
+    fn remove_file_best_effort(&self, _: &Path) {}
+    fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+        Some(path.to_path_buf())
+    }
+    fn path_occupied(&self, _: &Path) -> bool {
+        true
+    }
+    fn is_repo_root(&self, _: &Path) -> bool {
+        false
+    }
+    fn is_linked_worktree(&self, _: &Path) -> bool {
+        true
+    }
+    fn workspace_repositories(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        if self.fail_repos {
+            anyhow::bail!("cannot list workspace repositories");
+        }
+        Ok(vec![PathBuf::from("svc-a"), PathBuf::from("svc-b")])
+    }
+    fn build_session_tree(
+        &self,
+        _: &dyn GitRunner,
+        _: &Path,
+        _: &Path,
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+struct MismatchedBranchGit;
+
+impl GitRunner for MismatchedBranchGit {
+    fn run(&self, cwd: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        let stdout = if args.first() == Some(&"symbolic-ref") {
+            if cwd.ends_with("svc-a") {
+                "usagi/orphan\n".to_owned()
+            } else {
+                "usagi/other\n".to_owned()
+            }
+        } else if args.first() == Some(&"status") {
+            String::new()
+        } else if args.first() == Some(&"rev-list") {
+            "0\n".to_owned()
+        } else {
+            "abc123\n".to_owned()
+        };
+        Ok(GitOutput {
+            success: true,
+            stdout,
+            stderr: String::new(),
+        })
+    }
+}
+
 #[test]
 fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
     let tmp = tempfile::tempdir().unwrap();
@@ -5805,6 +5872,28 @@ fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn multi_repo_removal_identity_and_orphan_inspection_aggregate_across_repositories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().join("daemon");
+    let rt = SessionRuntime::open(
+        tmp.path().to_path_buf(),
+        &state_dir,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        MultiRepoIo { fail_repos: false },
+    )
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(rt));
+    perform_create(
+        &runtime,
+        &FakeSessionGit::ok(),
+        &operation(),
+        &json!({"name":"one"}),
+    )
+    .unwrap();
 
     let failing_rt = SessionRuntime::open(
         tmp.path().to_path_buf(),
@@ -5819,6 +5908,33 @@ fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
         perform_status(&failing_runtime, &FakeSessionGit::ok(), &operation()),
         Err(SessionRuntimeError::Storage)
     );
+
+    let (_, heads) = perform_removal_identity(&runtime, &MismatchedBranchGit, "one").unwrap();
+    assert_eq!(heads.as_deref(), Some("abc123,abc123"));
+    assert_eq!(
+        perform_removal_identity(&failing_runtime, &MismatchedBranchGit, "one"),
+        Err(SessionRuntimeError::Storage)
+    );
+    let mismatched = inspect_orphan_with(
+        &MismatchedBranchGit,
+        &OccupiedMultiRepoIo { fail_repos: false },
+        Path::new("/repo"),
+        "orphan",
+    );
+    assert!(mismatched.linked_worktree);
+    assert_eq!(mismatched.branch, None);
+    assert_eq!(mismatched.dirty, Some(false));
+    assert_eq!(mismatched.unmerged_commits, Some(0));
+
+    let failed_io = inspect_orphan_with(
+        &MismatchedBranchGit,
+        &OccupiedMultiRepoIo { fail_repos: true },
+        Path::new("/repo"),
+        "orphan",
+    );
+    assert!(!failed_io.linked_worktree);
+    assert!(failed_io.path_present);
+
     assert_eq!(
         perform_create(
             &runtime,
