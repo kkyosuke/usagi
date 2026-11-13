@@ -46,6 +46,27 @@ impl AgentRuntime {
         self.readiness_ticket(profile).map(Some)
     }
 
+    /// Refuses a launch admitted with a signed-out CLI when a prompt is queued
+    /// for its scope. Such a launch would type the prompt into the provider's
+    /// login screen and consume it. Call it under the same owner lock as the
+    /// admission, so a prompt queued while the probe ran is still observed.
+    pub fn refuse_queued_prompt_for_signed_out_launch(
+        &self,
+        intent: &AgentLaunchIntent,
+    ) -> Result<(), ProtocolError> {
+        let queued = self
+            .dispatch
+            .queued_prompt(intent.workspace, intent.session)
+            .map_err(map_dispatch_storage_error)?;
+        if queued.is_some() {
+            return Err(ProtocolError::new(
+                ErrorCode::Unavailable,
+                super::AGENT_CLI_SIGNED_OUT,
+            ));
+        }
+        Ok(())
+    }
+
     /// Captures the provider and owner generation for one exact resume without
     /// invoking an adapter or mutating durable state.
     pub fn prepare_resume_readiness(

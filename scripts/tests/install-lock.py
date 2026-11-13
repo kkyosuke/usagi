@@ -10,6 +10,8 @@ import sys
 import tempfile
 import time
 
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
+
 
 def definition(source, name):
     match = re.search(r"^" + name + r"\(\) \{\n.*?^\}", source, re.M | re.S)

@@ -35,12 +35,22 @@ jobs:
           set -euo pipefail
 
           read_version() {
-            # Cargo.toml の [package] 直下 version を取り出す
-            grep -m1 '^version[[:space:]]*=' "$1" \
-              | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/'
+            # Cargo.toml の [package] セクション直下 version を取り出す
+            awk '
+              /^\[package\][[:space:]]*$/ { in_pkg = 1; next }
+              /^\[/ { in_pkg = 0 }
+              in_pkg && /^version[[:space:]]*=/ {
+                line = $0
+                sub(/^version[[:space:]]*=[[:space:]]*"/, "", line)
+                sub(/".*$/, "", line)
+                print line
+                exit
+              }
+            ' "$1"
           }
 
           CURRENT="$(read_version Cargo.toml)"
+          ./scripts/ci/release-version.sh "$CURRENT"
           echo "current version: ${CURRENT}"
 
           # 直前コミットのルート Cargo.toml の version
