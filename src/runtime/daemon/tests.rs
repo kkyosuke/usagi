@@ -12465,7 +12465,8 @@ fn sandbox_tmpdir_and_multi_repo_git_policy_cover_nested_repositories_and_sticky
     );
 
     // Multi-Repo workspace with two child repositories grants writable Git dirs for both.
-    let multi_ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all("target").unwrap();
+    let multi_ws = tempfile::tempdir_in("target").unwrap();
     let multi_session_dir = multi_ws.path().join(".usagi/sessions/s1");
     for child in ["repo-a", "repo-b"] {
         let repo = multi_ws.path().join(child);
@@ -12505,6 +12506,16 @@ fn sandbox_tmpdir_and_multi_repo_git_policy_cover_nested_repositories_and_sticky
             None,
         )
         .is_ok()
+    );
+    assert!(
+        agent_provisioning::validate_root_git_common_dir_policy(
+            multi_ws.path(),
+            DefaultModel::Claude,
+            Some(multi_ws.path()),
+            None,
+            None,
+        )
+        .is_err()
     );
 }
 
