@@ -1832,7 +1832,7 @@ pub(super) fn dispatch_mcp_child_claim(
             let session_id = runtime.caller_session(&credential);
             (credential, session_id)
         };
-        let store_root = if let Some(session_id) = session_id {
+        if let Some(session_id) = session_id {
             bound
                 .sessions()
                 .lock()
@@ -1848,11 +1848,9 @@ pub(super) fn dispatch_mcp_child_claim(
                         ErrorCode::Unavailable,
                         "MCP caller session scope is unavailable",
                     )
-                })?
-                .path
-        } else {
-            bound.tenant.root().to_path_buf()
-        };
+                })?;
+        }
+        let store_root = bound.tenant.root().to_path_buf();
         let memory_root = data_dir
             .join("agent-memory")
             .join(bound.tenant.workspace_id().to_string())
