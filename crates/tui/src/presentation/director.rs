@@ -309,7 +309,10 @@ pub(super) fn director_organization(
         );
         let row = DirectorOrganizationRow {
             depth: 0,
-            label: format!("{role_identity} · {}", session.name),
+            label: format!(
+                "{role_identity} · {}",
+                usagi_core::domain::presentation_text::sanitize_presentation_line(&session.name)
+            ),
             status: status.to_owned(),
         };
         members.push((
