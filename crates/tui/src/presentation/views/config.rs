@@ -853,6 +853,15 @@ fn parse_setup_commands_source(source: &str) -> Result<Vec<String>, String> {
         if command.contains('\0') {
             return Err(format!("line {}: commands cannot contain NUL", index + 1));
         }
+        if !command.chars().all(|character| {
+            character == '\t'
+                || usagi_core::domain::presentation_text::presentation_character_is_safe(character)
+        }) {
+            return Err(format!(
+                "line {}: commands cannot contain control characters",
+                index + 1
+            ));
+        }
         commands.push(command.to_owned());
     }
     Ok(commands)
@@ -1316,27 +1325,33 @@ fn environment_textarea(value: &str, cursor: usize, save_focused: bool) -> Vec<S
     let viewport_end = (viewport_start + ENVIRONMENT_MAX_ROWS).min(source.len());
     let textarea = editor_surface_style();
     let mut lines = Vec::new();
-    for (line_index, line) in source[viewport_start..viewport_end].iter().enumerate() {
+    for (line_index, raw_line) in source[viewport_start..viewport_end].iter().enumerate() {
         let absolute_line = viewport_start + line_index;
         let prefix = format!("{:>2} ", absolute_line + 1);
-        let content =
-            if !save_focused && absolute_line == cursor_line {
-                let caret = widgets::block_caret(line, cursor - cursor_line_start, &textarea);
-                let padding = " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
+        let line = usagi_core::domain::presentation_text::sanitize_presentation_line(raw_line);
+        let content = if !save_focused && absolute_line == cursor_line {
+            let caret_offset = usagi_core::domain::presentation_text::sanitize_presentation_line(
+                &raw_line[..(cursor - cursor_line_start).min(raw_line.len())],
+            )
+            .len();
+            let caret = widgets::block_caret(&line, caret_offset, &textarea);
+            let padding =
+                " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
                     widgets::display_width(&prefix) + widgets::display_width(&caret),
                 ));
-                format!(
-                    "{}{}{}",
-                    textarea.paint(&prefix),
-                    caret,
-                    textarea.paint(&padding)
-                )
-            } else {
-                let padding = " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
-                    widgets::display_width(&prefix) + widgets::display_width(line),
+            format!(
+                "{}{}{}",
+                textarea.paint(&prefix),
+                caret,
+                textarea.paint(&padding)
+            )
+        } else {
+            let padding =
+                " ".repeat(ENVIRONMENT_TEXTAREA_WIDTH.saturating_sub(
+                    widgets::display_width(&prefix) + widgets::display_width(&line),
                 ));
-                textarea.paint(&format!("{prefix}{line}{padding}"))
-            };
+            textarea.paint(&format!("{prefix}{line}{padding}"))
+        };
         lines.push(modal::content_line(&content, ENVIRONMENT_INNER_WIDTH));
     }
     while lines.len() < ENVIRONMENT_MAX_ROWS {
@@ -1756,6 +1771,11 @@ mod tests {
         config.cancel_setup_commands();
         assert!(!config.is_editing_setup_commands());
         assert!(!config.save_setup_commands(&mut port));
+        assert!(
+            super::parse_setup_commands_source("cargo test\u{7}")
+                .unwrap_err()
+                .contains("cannot contain control characters")
+        );
     }
 
     #[test]

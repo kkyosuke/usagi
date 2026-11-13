@@ -467,10 +467,12 @@ pub(super) fn render(
                         format!(
                             "{}: {}",
                             i + 1,
-                            sanitize_presentation_line(line)
-                                .chars()
-                                .skip(search.horizontal)
-                                .collect::<String>()
+                            unicode_segmentation::UnicodeSegmentation::graphemes(
+                                sanitize_presentation_line(line).as_str(),
+                                true
+                            )
+                            .skip(search.horizontal)
+                            .collect::<String>()
                         ),
                     )
                 }),

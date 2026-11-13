@@ -703,6 +703,7 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
     let mut escapes_before = String::new();
     let mut column = 0usize;
     let mut selected = false;
+    let mut last_glyph_emitted = false;
     let mut carries_style = false;
     let mut chars = text.chars();
 
@@ -725,10 +726,9 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
             }
             continue;
         }
-
         let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if char_width == 0 {
-            if selected && column <= end {
+            if last_glyph_emitted && column <= end {
                 out.push(ch);
             }
             continue;
@@ -736,6 +736,7 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
 
         let char_end = column.saturating_add(char_width);
         if char_end <= start {
+            last_glyph_emitted = false;
             column = char_end;
             continue;
         }
@@ -754,8 +755,10 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
             let overlap_start = column.max(start);
             let overlap_end = char_end.min(end);
             out.push_str(&" ".repeat(overlap_end.saturating_sub(overlap_start)));
+            last_glyph_emitted = false;
         } else {
             out.push(ch);
+            last_glyph_emitted = true;
         }
         column = char_end;
     }
@@ -1287,5 +1290,8 @@ mod tests {
         let sliced = columns("a\u{301}b", 0, 2);
         assert_eq!(display_width(&sliced), 2);
         assert!(sliced.contains('\u{301}'));
+
+        let clipped_wide = columns("か\u{3099}b", 1, 2);
+        assert_eq!(clipped_wide, " b");
     }
 }
