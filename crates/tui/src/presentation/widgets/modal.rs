@@ -704,6 +704,7 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
     let mut column = 0usize;
     let mut selected = false;
     let mut last_glyph_emitted = false;
+    let mut pending_marker = None;
     let mut carries_style = false;
     let mut chars = text.chars();
 
@@ -732,12 +733,7 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
                 | crate::presentation::frame::TERMINAL_CURSOR_MARKER
         ) {
             if column >= start && column < end {
-                if !selected {
-                    out.push_str(&escapes_before);
-                    carries_style = !escapes_before.is_empty();
-                    selected = true;
-                }
-                out.push(ch);
+                pending_marker = Some(ch);
             }
             continue;
         }
@@ -770,8 +766,12 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
             let overlap_start = column.max(start);
             let overlap_end = char_end.min(end);
             out.push_str(&" ".repeat(overlap_end.saturating_sub(overlap_start)));
+            pending_marker = None;
             last_glyph_emitted = false;
         } else {
+            if let Some(marker) = pending_marker.take() {
+                out.push(marker);
+            }
             out.push(ch);
             last_glyph_emitted = true;
         }
@@ -1322,5 +1322,13 @@ mod tests {
         assert!(!middle.contains(INPUT_CURSOR_MARKER));
         assert!(middle.contains(TERMINAL_CURSOR_MARKER));
         assert!(middle.starts_with("\u{1b}[32m"));
+
+        // A cursor marker on a wide character clipped at `end` is dropped along
+        // with the half-cell, while an unclipped wide character preserves it.
+        assert_eq!(columns(&format!("{TERMINAL_CURSOR_MARKER}か"), 0, 1), " ");
+        assert_eq!(
+            columns(&format!("{TERMINAL_CURSOR_MARKER}か"), 0, 2),
+            format!("{TERMINAL_CURSOR_MARKER}か")
+        );
     }
 }
