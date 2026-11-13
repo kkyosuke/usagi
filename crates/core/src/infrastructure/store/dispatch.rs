@@ -1801,7 +1801,11 @@ impl DispatchStore {
             self.limits.registry_bytes,
             "dispatch registry",
         )?;
-        Ok(json_file::read(&self.registry_path())?.unwrap_or_default())
+        Ok(json_file::read_bounded(
+            &self.registry_path(),
+            usize::try_from(self.limits.registry_bytes).unwrap_or(usize::MAX),
+        )?
+        .unwrap_or_default())
     }
 
     fn load_workspace_registry(&self) -> Result<WorkspaceRegistry> {
@@ -1810,7 +1814,11 @@ impl DispatchStore {
             self.limits.workspace_registry_bytes,
             "dispatch workspace registry",
         )?;
-        Ok(json_file::read(&self.workspace_registry_path())?.unwrap_or_default())
+        Ok(json_file::read_bounded(
+            &self.workspace_registry_path(),
+            usize::try_from(self.limits.workspace_registry_bytes).unwrap_or(usize::MAX),
+        )?
+        .unwrap_or_default())
     }
 
     fn write_workspace_registry(

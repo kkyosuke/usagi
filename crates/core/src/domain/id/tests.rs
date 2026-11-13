@@ -153,7 +153,15 @@ fn runtime_scope_requires_its_terminal_session_and_runtime_id() {
         Err(ScopeError::SessionDoesNotOwnTerminal)
     );
     // A workspace-root runtime hosts a workspace-root terminal.
-    assert!(AgentRuntimeRef::new(AgentRuntimeId::new(), terminal(None), None).is_ok());
+    let valid_root = AgentRuntimeRef::new(AgentRuntimeId::new(), terminal(None), None).unwrap();
+    let encoded = serde_json::to_value(&valid_root).unwrap();
+    assert_eq!(
+        serde_json::from_value::<AgentRuntimeRef>(encoded.clone()).unwrap(),
+        valid_root
+    );
+    let mut mismatched = encoded;
+    mismatched["session_id"] = serde_json::to_value(Some(session)).unwrap();
+    assert!(serde_json::from_value::<AgentRuntimeRef>(mismatched).is_err());
     assert!(
         ScopeError::SessionDoesNotOwnTerminal
             .to_string()

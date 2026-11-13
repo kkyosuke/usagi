@@ -1023,9 +1023,11 @@ mod tests {
             }
         ));
         review.status_unknown = false;
-        let invalid: PrIdentity =
-            serde_json::from_value(serde_json::json!("https://example.com/not-a-pr")).unwrap();
-        review.target = Some(AttentionTarget::PullRequest { identity: invalid });
+        assert!(
+            serde_json::from_value::<PrIdentity>(serde_json::json!("https://example.com/not-a-pr"))
+                .is_err()
+        );
+        review.session = None;
         assert!(!valid_snapshot(
             workspace,
             &WorkspaceAttention {

@@ -573,6 +573,8 @@ impl RetentionLedger {
             record.superseded = previous.superseded;
             record.pinned = previous.pinned;
         }
+        self.markers.remove(terminal);
+        self.marker_order.retain(|key| key != terminal);
         self.insert_final(record);
         FinalCommit {
             reserved,
@@ -857,6 +859,7 @@ impl RetentionLedger {
             self.counters.forgotten_markers = self.counters.forgotten_markers.saturating_add(1);
             return;
         }
+        self.marker_order.retain(|key| key != &marker.terminal);
         self.marker_order.push_back(marker.terminal.clone());
         self.markers.insert(marker.terminal.clone(), marker);
         while self.marker_order.len() > self.budget.max_eviction_markers
@@ -1741,8 +1744,14 @@ mod tests {
             FinalClass::Dismissed
         );
         // Debug and Clone participate in coverage through the ledger too.
-        let ledger = RetentionLedger::new(small_budget());
+        let mut ledger = RetentionLedger::new(small_budget());
         assert!(format!("{ledger:?}").contains("RetentionLedger"));
+        let term = terminal_in(space);
+        ledger.commit_final(&term, TerminalKind::Agent, 10, at(0));
+        let _ = ledger.collect(at(10_000));
+        assert!(matches!(ledger.lookup(&term), FinalLookup::Evicted(_)));
+        ledger.commit_final(&term, TerminalKind::Agent, 10, at(10_001));
+        assert!(matches!(ledger.lookup(&term), FinalLookup::Retained(_)));
         assert_eq!(
             format!("{:?}", GcReport::default()),
             format!("{:?}", GcReport::default())

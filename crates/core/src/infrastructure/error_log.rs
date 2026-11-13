@@ -109,12 +109,29 @@ impl ErrorLog {
             "failed to create log directory {}",
             self.dir.display()
         ))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = fs::set_permissions(&self.dir, fs::Permissions::from_mode(0o700));
+        }
         let path = self.file_for(now.date_naive());
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut options = fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        }
+        let mut file = options
             .open(&path)
             .context(format!("failed to open log file {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
+        }
         let body = message.replace('\n', "\n    ");
         // Build the whole entry (timestamp + body + newline) as one buffer and
         // emit it in a single `write_all`. writeln! on an unbuffered File issues a
@@ -137,7 +154,18 @@ impl ErrorLog {
     /// recorded": this reports a failure, it must never become one.
     #[must_use]
     pub fn last_entry(&self, date: NaiveDate) -> Option<String> {
-        let contents = fs::read_to_string(self.file_for(date)).ok()?;
+        const MAX_LAST_ENTRY_READ_BYTES: u64 = 1024 * 1024;
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut file = fs::File::open(self.file_for(date)).ok()?;
+        let len = file.metadata().ok()?.len();
+        if len > MAX_LAST_ENTRY_READ_BYTES {
+            let _ = file.seek(SeekFrom::Start(len - MAX_LAST_ENTRY_READ_BYTES));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_LAST_ENTRY_READ_BYTES)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let contents = String::from_utf8_lossy(&bytes);
         // Entries are `[YYYY-MM-DD HH:MM:SS] message`. A multi-line entry's
         // continuation lines are indented and carry no timestamp, so scanning
         // back for the last *timestamped* line lands on the entry itself and
@@ -257,6 +285,14 @@ mod tests {
         assert_eq!(
             log.last_entry(day.date_naive()).as_deref(),
             Some("outer failure")
+        );
+
+        let path = log.file_for(day.date_naive());
+        fs::write(&path, vec![b'\n'; 1024 * 1024 + 64]).unwrap();
+        log.append(day, "after large prefix").unwrap();
+        assert_eq!(
+            log.last_entry(day.date_naive()).as_deref(),
+            Some("after large prefix")
         );
     }
 

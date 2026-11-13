@@ -276,6 +276,7 @@ impl TerminalRef {
 
 /// A runtime reference scoped to one Agent pane and its terminal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "AgentRuntimeRefWire")]
 pub struct AgentRuntimeRef {
     /// Runtime reservation identity.
     pub agent_runtime_id: AgentRuntimeId,
@@ -283,6 +284,21 @@ pub struct AgentRuntimeRef {
     pub terminal: TerminalRef,
     /// Session owning the Agent runtime; absent for a workspace-root runtime.
     pub session_id: Option<SessionId>,
+}
+
+#[derive(Deserialize)]
+struct AgentRuntimeRefWire {
+    agent_runtime_id: AgentRuntimeId,
+    terminal: TerminalRef,
+    session_id: Option<SessionId>,
+}
+
+impl TryFrom<AgentRuntimeRefWire> for AgentRuntimeRef {
+    type Error = ScopeError;
+
+    fn try_from(wire: AgentRuntimeRefWire) -> Result<Self, Self::Error> {
+        Self::new(wire.agent_runtime_id, wire.terminal, wire.session_id)
+    }
 }
 
 impl AgentRuntimeRef {
