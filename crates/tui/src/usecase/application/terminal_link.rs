@@ -34,6 +34,9 @@
 //! reach the right edge is consequently joined with the row below, the one
 //! ambiguity of working from the rendered grid rather than the decoder's wrap
 //! bit.
+//! Bordered tables are projected into separate cell grids first, excluding the
+//! borders and one column of padding on either side. Wrapping is then inferred
+//! within each cell, without joining neighbouring columns or table sections.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -60,6 +63,7 @@ const EDGE_SLACK: usize = 1;
 struct Columns {
     rows: Vec<Vec<char>>,
     width: usize,
+    indented_wrap: bool,
 }
 
 /// How row `r` connects to row `r + 1` when logical lines are rebuilt.
@@ -92,6 +96,7 @@ impl Columns {
         let last = cur.iter().rposition(|&ch| ch != ' ');
         let first = next.iter().position(|&ch| ch != ' ');
         if let (Some(last), Some(first)) = (last, first)
+            && self.indented_wrap
             && last + 1 + EDGE_SLACK >= self.width
             && is_url_char(cur[last])
             && is_url_char(next[first])
@@ -161,7 +166,11 @@ fn expand(viewport: &[String]) -> Columns {
         .max()
         .unwrap_or(0);
     let rows = viewport.iter().map(|row| columns_of(row, width)).collect();
-    Columns { rows, width }
+    Columns {
+        rows,
+        width,
+        indented_wrap: true,
+    }
 }
 
 /// One `char` per display column for a single row, padded or clipped to `width`.
@@ -179,13 +188,87 @@ fn columns_of(row: &str, width: usize) -> Vec<char> {
     cols
 }
 
+/// Content ranges between aligned vertical table borders, with the conventional
+/// single space of cell padding removed. Requiring both padding columns keeps
+/// a pipe embedded in a URL from being treated as a table boundary.
+fn table_ranges(row: &[char]) -> Vec<Range<usize>> {
+    let borders: Vec<_> = row
+        .iter()
+        .enumerate()
+        .filter_map(|(index, ch)| matches!(ch, '│' | '┃' | '║' | '|').then_some(index))
+        .collect();
+    borders
+        .windows(2)
+        .filter_map(|pair| {
+            let (left, right) = (pair[0], pair[1]);
+            (right > left + 3 && row[left + 1] == ' ' && row[right - 1] == ' ')
+                .then_some(left + 2..right - 1)
+        })
+        .collect()
+}
+
+/// Independent rectangular grids plus their original viewport origin. Table
+/// content is blanked in the ordinary grid so it cannot also yield a truncated
+/// URL through the full-terminal-width detector.
+fn link_regions(viewport: &[String]) -> Vec<(Columns, TerminalPoint)> {
+    let mut grid = expand(viewport);
+    let mut regions = Vec::new();
+    let mut row = 0;
+    while row < grid.rows.len() {
+        let ranges = table_ranges(&grid.rows[row]);
+        if ranges.is_empty() {
+            row += 1;
+            continue;
+        }
+        let mut end = row + 1;
+        while end < grid.rows.len() && table_ranges(&grid.rows[end]) == ranges {
+            end += 1;
+        }
+        for range in ranges {
+            let rows = grid.rows[row..end]
+                .iter_mut()
+                .map(|line| {
+                    let content = line[range.clone()].to_vec();
+                    line[range.clone()].fill(' ');
+                    content
+                })
+                .collect();
+            regions.push((
+                Columns {
+                    rows,
+                    width: range.len(),
+                    indented_wrap: false,
+                },
+                TerminalPoint {
+                    row,
+                    column: range.start,
+                },
+            ));
+        }
+        row = end;
+    }
+    regions.push((grid, TerminalPoint { row: 0, column: 0 }));
+    regions
+}
+
 /// Detect the `http(s)` URL the cell at `point` sits on, returning it as text, or
 /// `None` when the cell is blank or not part of a URL. A URL that wrapped onto
 /// the next row(s) is stitched back together, so a click anywhere along it yields
 /// the whole link.
 #[must_use]
 pub fn url_at(viewport: &[String], point: TerminalPoint) -> Option<String> {
-    let grid = expand(viewport);
+    link_regions(viewport)
+        .into_iter()
+        .find_map(|(grid, origin)| {
+            let point = TerminalPoint {
+                row: point.row.checked_sub(origin.row)?,
+                column: point.column.checked_sub(origin.column)?,
+            };
+            grid_url_at(&grid, point)
+        })
+}
+
+fn grid_url_at(grid: &Columns, point: TerminalPoint) -> Option<String> {
     if grid.width == 0 || point.row >= grid.rows.len() || point.column >= grid.width {
         return None;
     }
@@ -199,7 +282,21 @@ pub fn url_at(viewport: &[String], point: TerminalPoint) -> Option<String> {
 /// links to mark them clickable. Each logical line is scanned once.
 #[must_use]
 pub fn link_cells(viewport: &[String]) -> HashSet<TerminalPoint> {
-    let grid = expand(viewport);
+    let mut cells = HashSet::new();
+    for (grid, origin) in link_regions(viewport) {
+        cells.extend(
+            grid_link_cells(&grid)
+                .into_iter()
+                .map(|point| TerminalPoint {
+                    row: point.row + origin.row,
+                    column: point.column + origin.column,
+                }),
+        );
+    }
+    cells
+}
+
+fn grid_link_cells(grid: &Columns) -> HashSet<TerminalPoint> {
     let mut cells = HashSet::new();
     if grid.width == 0 {
         return cells;
