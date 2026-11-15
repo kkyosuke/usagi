@@ -1245,7 +1245,7 @@ fn project_tab_label(index: usize, active: usize, slot: &WorkspaceSlot) -> Strin
     };
     format!(
         "{}{} ",
-        style.paint(&format!(" {} {name}", index + 1)),
+        style.paint(&format!(" {} {name} ({})", index + 1, slot.sessions.len())),
         badge_style.paint(&badge)
     )
 }
@@ -1885,6 +1885,55 @@ mod tests {
     }
 
     #[test]
+    fn project_bar_counts_sessions_per_project_and_refreshes_after_changes() {
+        let alpha = snapshot("alpha", "/alpha");
+        let beta = snapshot_with_sessions("beta", "/beta", &["build", "review"]);
+        let mut deck = WorkspaceDeck::from_snapshots(&[alpha, beta.clone()]).unwrap();
+        let bar = project_bar(&deck, 100);
+        assert!(bar.line.contains("1 alpha (0)"));
+        assert!(bar.line.contains("2 beta (2)"));
+
+        deck.activate_snapshot(&beta);
+        let mut sessions = deck.slots()[1].projected_sessions();
+        sessions.pop();
+        deck.update_active_sessions(&sessions);
+        assert!(project_bar(&deck, 100).line.contains("2 beta (1)"));
+        deck.update_active_sessions(&[]);
+        assert!(project_bar(&deck, 100).line.contains("2 beta (0)"));
+        deck.activate_snapshot(&beta);
+        assert!(project_bar(&deck, 100).line.contains("2 beta (2)"));
+    }
+
+    #[test]
+    fn project_bar_count_cells_belong_to_the_project_even_with_cjk_and_multiple_digits() {
+        let alpha = snapshot_with_sessions("兎プロジェクトの長い名前", "/alpha", &["session"; 12]);
+        let beta = snapshot("beta", "/beta");
+        let deck = WorkspaceDeck::from_snapshots(&[alpha, beta]).unwrap();
+        for width in [1, 24, 50, 100] {
+            let bar = project_bar(&deck, width);
+            assert!(widgets::display_width(&bar.line) <= width);
+            for hit in &bar.hits {
+                for column in hit.columns.clone() {
+                    assert_eq!(bar.target_at(column), Some(&hit.target));
+                }
+            }
+        }
+        let bar = project_bar(&deck, 100);
+        assert!(bar.line.contains(" (12)"));
+        let hit = &bar.hits[0];
+        assert_eq!(
+            hit.target,
+            ProjectBarTarget::Workspace(PathBuf::from("/alpha"))
+        );
+        let name = widgets::clip_to_width(deck.slots()[0].label(), TAB_NAME_WIDTH);
+        let count_start = widgets::display_width(&format!(" 1 {name} "));
+        for column in count_start..count_start + 4 {
+            assert_eq!(bar.target_at(column), Some(&hit.target));
+        }
+        assert!(bar.line.contains("2 beta (0)"));
+    }
+
+    #[test]
     fn narrow_cjk_bar_keeps_active_identity_visible_and_hits_exact_path() {
         let alpha = snapshot("長い兎プロジェクト", "/alpha");
         let beta = snapshot("別の長い名前", "/beta");
@@ -1921,12 +1970,12 @@ mod tests {
         );
 
         let left = WorkspaceDeck::from_snapshots(&snapshots).unwrap();
-        let right_overflow = project_bar(&left, 50);
+        let right_overflow = project_bar(&left, 60);
         assert!(right_overflow.line.contains("… +"));
 
         let mut right = left;
         right.activate_snapshot(&snapshots[9]);
-        let left_overflow = project_bar(&right, 50);
+        let left_overflow = project_bar(&right, 60);
         assert!(left_overflow.line.contains("… +"));
     }
 
