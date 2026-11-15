@@ -12,7 +12,20 @@ pub const PR_INVENTORY_ENTRIES_MAX: usize = 256;
 
 /// Canonical GitHub pull-request identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct PrIdentity(String);
+
+impl TryFrom<String> for PrIdentity {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let canonical = canonicalize(&value).ok_or("invalid GitHub pull-request identity")?;
+        if canonical.0 != value {
+            return Err("non-canonical GitHub pull-request identity");
+        }
+        Ok(canonical)
+    }
+}
 
 impl PrIdentity {
     /// Returns the canonical browser URL.
@@ -172,9 +185,12 @@ fn valid_percent_encoding(value: &str) -> bool {
 
 fn valid_path_part(value: &str) -> bool {
     !value.is_empty()
+        && value != "."
+        && value != ".."
+        && !value.starts_with('-')
         && value
             .bytes()
-            .all(|byte| !byte.is_ascii_control() && byte != b'%')
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// State known about a tracked PR.
@@ -767,6 +783,19 @@ mod tests {
     fn identity_exposes_number_and_reference_can_be_promoted() {
         let id = canonicalize("https://github.com/acme/widgets/pull/42").unwrap();
         assert_eq!(id.number(), 42);
+        for invalid in [
+            "https://github.com/./widgets/pull/42",
+            "https://github.com/acme/../pull/42",
+            "https://github.com/-acme/widgets/pull/42",
+            "https://github.com/acme/bad repo/pull/42",
+        ] {
+            assert_eq!(canonicalize(invalid), None);
+            assert!(serde_json::from_str::<PrIdentity>(&format!("\"{invalid}\"")).is_err());
+        }
+        assert!(
+            serde_json::from_str::<PrIdentity>("\"http://github.com/acme/widgets/pull/42\"")
+                .is_err()
+        );
         let mut inventory = PrInventory::default();
         assert!(inventory.discover_with_auto_open([(id.clone(), false)]));
         assert!(!inventory.entries[&id].auto_open);
