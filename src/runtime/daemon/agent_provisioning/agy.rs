@@ -87,7 +87,7 @@ impl AgyProvisioner for RootAgyProvisioner {
         sandbox_roots.extend(prepare_agy_writable_paths(self.sandbox_home.as_deref())?);
         sandbox_roots.sort();
         sandbox_roots.dedup();
-        let mut read_only_roots = Vec::new();
+        let mut read_only_roots = session_git.map_or_else(Vec::new, |p| p.read_only_roots);
         let policy = SandboxPolicyInputs {
             mode,
             agent: DefaultModel::Agy,

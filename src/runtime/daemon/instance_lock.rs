@@ -15,11 +15,12 @@ use super::{
     ClientWorkspace, ConnectionCleanup, ConnectionId, Custody, CustodyProbe,
     DaemonProcessObservation, DaemonRecord, Duration, ErrorLog, FileExt, FsRecordFile,
     GenerationRole, InstanceLock, Instant, LivenessProbe, Mutex, NodeIdentity, Path, PathBuf,
-    ProcessIdentitySource, RefCell, ShutdownRequest, SystemClock, WORKSPACE_ADOPTION_PATIENCE,
-    WorkspaceFence, WorkspaceFenceFactory, WorkspaceFenceOutcome, Write, build_artifact_decision,
-    build_rollover_trigger, connect_client, current_build, deadline_transport, ensure_private_dir,
-    ensure_private_dir_all, install_panic_logger, node_identity, private_lock_error,
-    process_start_identity, read_owner_hint, run_inner, runtime_channel, write_owner_hint,
+    ProcessIdentitySource, RefCell, SharedAgentRuntime, ShutdownRequest, SystemClock,
+    WORKSPACE_ADOPTION_PATIENCE, WorkspaceFence, WorkspaceFenceFactory, WorkspaceFenceOutcome,
+    Write, build_artifact_decision, build_rollover_trigger, connect_client, current_build,
+    deadline_transport, ensure_private_dir, ensure_private_dir_all, install_panic_logger,
+    node_identity, private_lock_error, process_start_identity, read_owner_hint, run_inner,
+    runtime_channel, write_owner_hint,
 };
 
 /// Couples the presentation-owned connection ID with its authenticated peer
@@ -30,6 +31,8 @@ pub(super) struct CensusConnectionFence<'a> {
     pub(super) inner: &'a dyn usagi_daemon::presentation::ipc::ConnectionFence,
     pub(super) cleanup: ConnectionCleanup,
     pub(super) peer_pid: u32,
+    pub(super) peer_ancestors: &'a [(u32, u32)],
+    pub(super) agent: Option<&'a SharedAgentRuntime>,
 }
 
 impl usagi_daemon::presentation::ipc::ConnectionFence for CensusConnectionFence<'_> {
@@ -47,6 +50,12 @@ impl usagi_daemon::presentation::ipc::ConnectionFence for CensusConnectionFence<
         &self,
         body: &serde_json::Value,
     ) -> Result<Option<AdmissionLease>, usagi_core::infrastructure::ipc::ProtocolError> {
+        if let Some(agent) = self.agent {
+            agent
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .authorize_peer_request(self.peer_pid, self.peer_ancestors, body)?;
+        }
         self.inner.admit(body)
     }
 

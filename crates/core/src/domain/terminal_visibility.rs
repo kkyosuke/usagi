@@ -197,14 +197,20 @@ impl From<TerminalVisibilityLedger> for Vec<TerminalVisibilityRecord> {
     }
 }
 
+/// Upper bound on recorded tombstone visibilities so repeated mutations for
+/// already-evicted or unknown terminals cannot grow the ledger without bound.
+pub const MAX_VISIBILITY_ENTRIES: usize = 512;
+
 impl From<Vec<TerminalVisibilityRecord>> for TerminalVisibilityLedger {
     fn from(records: Vec<TerminalVisibilityRecord>) -> Self {
-        Self {
-            entries: records
-                .into_iter()
-                .map(|record| (record.terminal, record.visibility))
-                .collect(),
+        let mut entries: BTreeMap<TerminalRef, TerminalVisibility> = records
+            .into_iter()
+            .map(|record| (record.terminal, record.visibility))
+            .collect();
+        while entries.len() > MAX_VISIBILITY_ENTRIES {
+            entries.pop_first();
         }
+        Self { entries }
     }
 }
 
@@ -233,6 +239,10 @@ impl TerminalVisibilityLedger {
     ) -> VisibilityOutcome {
         let outcome = self.visibility(terminal).raise(target, expected_revision);
         if let VisibilityOutcome::Applied(next) = outcome {
+            if !self.entries.contains_key(terminal) && self.entries.len() >= MAX_VISIBILITY_ENTRIES
+            {
+                self.entries.pop_first();
+            }
             self.entries.insert(terminal.clone(), next);
         }
         outcome
@@ -255,6 +265,11 @@ impl TerminalVisibilityLedger {
             TerminalVisibilityState::Dismissed,
             expected_revision,
         )
+    }
+
+    /// Retains only the tombstone entries matching `predicate`.
+    pub fn retain(&mut self, predicate: impl FnMut(&TerminalRef, &mut TerminalVisibility) -> bool) {
+        self.entries.retain(predicate);
     }
 
     /// The number of tombstones with recorded (non-default) visibility.
@@ -429,5 +444,28 @@ mod tests {
         let ledger_json = serde_json::to_string(&ledger).unwrap();
         let restored: TerminalVisibilityLedger = serde_json::from_str(&ledger_json).unwrap();
         assert_eq!(restored, ledger);
+
+        let kept = terminal();
+        ledger.observe(&kept, 0);
+        ledger.retain(|candidate, _| candidate == &kept);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger.visibility(&kept).state,
+            TerminalVisibilityState::Observed
+        );
+
+        let oversized: Vec<TerminalVisibilityRecord> = (0..=MAX_VISIBILITY_ENTRIES)
+            .map(|_| TerminalVisibilityRecord {
+                terminal: terminal(),
+                visibility: TerminalVisibility {
+                    state: TerminalVisibilityState::Observed,
+                    revision: 1,
+                },
+            })
+            .collect();
+        let mut bounded = TerminalVisibilityLedger::from(oversized);
+        assert_eq!(bounded.len(), MAX_VISIBILITY_ENTRIES);
+        assert!(bounded.observe(&terminal(), 0).is_success());
+        assert_eq!(bounded.len(), MAX_VISIBILITY_ENTRIES);
     }
 }

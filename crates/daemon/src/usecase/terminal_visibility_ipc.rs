@@ -9,35 +9,78 @@
 //! `Arc<Mutex<_>>` because `SharedTerminalOwner` is constructed per connection
 //! while this authority must outlive any one connection.
 //!
-//! Aggregate retention and garbage collection of tombstones (and cross-restart
-//! persistence) belongs to the aggregate-retention service; this service publishes
-//! only the observe / dismiss / visibility contract.
+//! [`SharedTerminalVisibility::open`] persists the ledger to
+//! `<data-dir>/daemon/terminal-visibility.json` and [`SharedTerminalVisibility::retain_terminal_ids`]
+//! prunes entries whose owners are no longer retained.
 
-use std::sync::{Arc, Mutex, PoisonError};
-
-use usagi_core::domain::{
-    id::TerminalRef,
-    terminal_visibility::{
-        CompletedTerminalEntry, TerminalVisibility, TerminalVisibilityLedger, VisibilityOutcome,
-    },
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError},
 };
+
+use usagi_core::{
+    domain::{
+        id::TerminalRef,
+        terminal_visibility::{
+            CompletedTerminalEntry, TerminalVisibility, TerminalVisibilityLedger, VisibilityOutcome,
+        },
+    },
+    infrastructure::persistence::json_file,
+};
+
+const MAX_VISIBILITY_FILE_BYTES: usize = 256 * 1024;
+const VISIBILITY_FILE_NAME: &str = "terminal-visibility.json";
+
+#[derive(Default)]
+struct VisibilityAuthority {
+    ledger: TerminalVisibilityLedger,
+    daemon_dir: Option<PathBuf>,
+}
+
+impl VisibilityAuthority {
+    fn persist(&self) {
+        if let Some(daemon_dir) = &self.daemon_dir {
+            let path = daemon_dir.join(VISIBILITY_FILE_NAME);
+            let _ = json_file::write_atomic(daemon_dir, &path, &self.ledger);
+        }
+    }
+}
 
 /// A cheaply-clonable handle to the daemon's single visibility ledger. Cloning
 /// shares the same authoritative state; each clone speaks for the same
 /// workspace-global authority.
 #[derive(Clone, Default)]
-pub struct SharedTerminalVisibility(Arc<Mutex<TerminalVisibilityLedger>>);
+pub struct SharedTerminalVisibility(Arc<Mutex<VisibilityAuthority>>);
 
 impl SharedTerminalVisibility {
-    /// Creates a new authority over an empty ledger.
+    /// Creates a new in-memory authority over an empty ledger.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Opens a durable visibility authority backed by
+    /// `<data-dir>/daemon/terminal-visibility.json`, falling back to an empty
+    /// ledger when the file is absent or unreadable.
+    #[must_use]
+    pub fn open(data_dir: &Path) -> Self {
+        let daemon_dir = data_dir.join("daemon");
+        let path = daemon_dir.join(VISIBILITY_FILE_NAME);
+        let ledger =
+            json_file::read_bounded::<TerminalVisibilityLedger>(&path, MAX_VISIBILITY_FILE_BYTES)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+        Self(Arc::new(Mutex::new(VisibilityAuthority {
+            ledger,
+            daemon_dir: Some(daemon_dir),
+        })))
+    }
+
     /// Runs `body` under the ledger lock, recovering from a poisoned lock so a
     /// panic on one connection never wedges visibility for the others.
-    fn with<R>(&self, body: impl FnOnce(&mut TerminalVisibilityLedger) -> R) -> R {
+    fn with<R>(&self, body: impl FnOnce(&mut VisibilityAuthority) -> R) -> R {
         let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         body(&mut guard)
     }
@@ -45,27 +88,53 @@ impl SharedTerminalVisibility {
     /// Returns the authoritative visibility of `terminal`.
     #[must_use]
     pub fn visibility(&self, terminal: &TerminalRef) -> TerminalVisibility {
-        self.with(|ledger| ledger.visibility(terminal))
+        self.with(|authority| authority.ledger.visibility(terminal))
     }
 
     /// Raises `terminal` to at least `Observed` under compare-and-swap.
     #[must_use]
     pub fn observe(&self, terminal: &TerminalRef, expected_revision: u64) -> VisibilityOutcome {
-        self.with(|ledger| ledger.observe(terminal, expected_revision))
+        self.with(|authority| {
+            let outcome = authority.ledger.observe(terminal, expected_revision);
+            if outcome.is_success() {
+                authority.persist();
+            }
+            outcome
+        })
     }
 
     /// Raises `terminal` to `Dismissed` under compare-and-swap.
     #[must_use]
     pub fn dismiss(&self, terminal: &TerminalRef, expected_revision: u64) -> VisibilityOutcome {
-        self.with(|ledger| ledger.dismiss(terminal, expected_revision))
+        self.with(|authority| {
+            let outcome = authority.ledger.dismiss(terminal, expected_revision);
+            if outcome.is_success() {
+                authority.persist();
+            }
+            outcome
+        })
+    }
+
+    /// Retains only entries whose `terminal_id` is in `retained`, persisting
+    /// the ledger when any stale tombstone entry is pruned.
+    pub fn retain_terminal_ids(&self, retained: &BTreeSet<String>) {
+        self.with(|authority| {
+            let before = authority.ledger.len();
+            authority
+                .ledger
+                .retain(|terminal, _| retained.contains(&terminal.terminal_id.as_str()));
+            if authority.ledger.len() != before {
+                authority.persist();
+            }
+        });
     }
 
     /// Overwrites each entry's placeholder visibility with the authoritative
     /// workspace-global value.
     pub fn stamp(&self, entries: &mut [CompletedTerminalEntry]) {
-        self.with(|ledger| {
+        self.with(|authority| {
             for entry in entries.iter_mut() {
-                entry.visibility = ledger.visibility(&entry.terminal);
+                entry.visibility = authority.ledger.visibility(&entry.terminal);
             }
         });
     }
@@ -127,6 +196,42 @@ mod tests {
         // A terminal with no recorded visibility stays Unobserved.
         assert_eq!(
             entries[1].visibility.state,
+            TerminalVisibilityState::Unobserved
+        );
+    }
+
+    #[test]
+    fn durable_authority_persists_across_reopen_and_prunes_evicted_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("daemon")).unwrap();
+        let kept = terminal();
+        let evicted = terminal();
+        let visibility = SharedTerminalVisibility::open(temp.path());
+        assert!(!visibility.observe(&kept, 99).is_success());
+        assert!(visibility.observe(&kept, 0).is_success());
+        assert!(!visibility.dismiss(&evicted, 99).is_success());
+        assert!(visibility.dismiss(&evicted, 0).is_success());
+
+        let reopened = SharedTerminalVisibility::open(temp.path());
+        assert_eq!(
+            reopened.visibility(&kept).state,
+            TerminalVisibilityState::Observed
+        );
+        assert_eq!(
+            reopened.visibility(&evicted).state,
+            TerminalVisibilityState::Dismissed
+        );
+
+        let retained = BTreeSet::from([kept.terminal_id.as_str()]);
+        reopened.retain_terminal_ids(&retained);
+        reopened.retain_terminal_ids(&retained);
+        let after_prune = SharedTerminalVisibility::open(temp.path());
+        assert_eq!(
+            after_prune.visibility(&kept).state,
+            TerminalVisibilityState::Observed
+        );
+        assert_eq!(
+            after_prune.visibility(&evicted).state,
             TerminalVisibilityState::Unobserved
         );
     }

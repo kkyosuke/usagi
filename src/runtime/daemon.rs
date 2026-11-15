@@ -1270,6 +1270,7 @@ fn known_sessions(daemon_dir: &Path) -> Option<std::collections::BTreeSet<Sessio
 /// whose fence this active generation still holds.
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=automatic_orphan_cleanup_ticks_until_shutdown
 fn start_orphan_cleanup_worker(
+    data_dir: PathBuf,
     workspaces: &Workspaces,
     gate: AdmissionGate,
     agent: SharedAgentRuntime,
@@ -1279,6 +1280,7 @@ fn start_orphan_cleanup_worker(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     spawn_orphan_cleanup_worker(
         AutomaticOrphanCleanup {
+            data_dir,
             workspaces: Arc::clone(workspaces),
             gate,
             agent,
@@ -2050,6 +2052,7 @@ const BROKER_START: u8 = b'S';
 const BROKER_STOP: u8 = b'X';
 const BROKER_OK: u8 = b'O';
 const BROKER_READINESS_ATTEMPTS: u32 = 100;
+const BROKER_DAEMON_READINESS_ATTEMPTS: u32 = 600;
 const BROKER_IO_TIMEOUT: Duration = Duration::from_secs(1);
 const BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a broker stays up with no request and no daemon to serve.
@@ -2196,6 +2199,25 @@ impl IpcRolloverRequester<'_> {
     }
 
     fn stop_standby(&self, mut standby: LaunchedStandby) {
+        if !matches!(standby.child.try_wait(), Ok(Some(_))) {
+            // Signal only the identity captured while the spawned Child still held
+            // custody of its PID. Re-reading identity here could authenticate an
+            // unrelated process if a failed standby had exited and the PID was
+            // reused before cleanup.
+            let _ = Terminator::terminate(&SigtermTerminator, &standby.record);
+            let grace_deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                if matches!(standby.child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
+                if Instant::now() >= grace_deadline {
+                    let _ = standby.child.kill();
+                    break;
+                }
+                RealSleeper.sleep();
+            }
+            reap_child(standby.child);
+        }
         let retired = GenerationRegistryFile::new(self.data_dir)
             .map(|file| GenerationRegistry::new(file, DEFAULT_GENERATION_LIMIT))
             .and_then(|registry| {
@@ -2223,19 +2245,6 @@ impl IpcRolloverRequester<'_> {
                 "failed standby registry retirement deferred: {error}"
             ));
         }
-        if standby
-            .child
-            .try_wait()
-            .is_ok_and(|status| status.is_some())
-        {
-            return;
-        }
-        // Signal only the identity captured while the spawned Child still held
-        // custody of its PID. Re-reading identity here could authenticate an
-        // unrelated process if a failed standby had exited and the PID was
-        // reused before cleanup.
-        let _ = Terminator::terminate(&SigtermTerminator, &standby.record);
-        reap_child(standby.child);
     }
 
     fn wait_until_verified(
@@ -2386,16 +2395,30 @@ impl IpcRolloverRequester<'_> {
             .map(|plan| planned_agent_workspace_root(self.data_dir, plan))
             .transpose()?
             .flatten();
-        if let Some(intent) =
+        let intent_written = if let Some(intent) =
             agent_plan.and_then(|plan| restart_intent::RestartIntent::new(&operation.0, plan))
         {
             restart_intent::write(self.data_dir, &intent)?;
-        }
+            true
+        } else {
+            false
+        };
         let deadline = Instant::now() + ROLLOVER_STARTUP_WINDOW;
-        let standby = self.launcher.launch_standby(agent_workspace.as_deref())?;
+        let standby = match self.launcher.launch_standby(agent_workspace.as_deref()) {
+            Ok(standby) => standby,
+            Err(error) => {
+                if intent_written {
+                    let _ = restart_intent::clear(self.data_dir, &operation.0);
+                }
+                return Err(error);
+            }
+        };
         let standby_record = standby.record.clone();
         if let Err(error) = self.wait_until_verified(&standby_record, deadline) {
             self.stop_standby(standby);
+            if intent_written {
+                let _ = restart_intent::clear(self.data_dir, &operation.0);
+            }
             return Err(error);
         }
         // Rollover is a machine-wide lifecycle request. Binding this control
@@ -2429,6 +2452,9 @@ impl IpcRolloverRequester<'_> {
         }
         if !committed {
             self.stop_standby(standby);
+            if intent_written {
+                let _ = restart_intent::clear(self.data_dir, &operation.0);
+            }
             let failure = match result {
                 Ok(_) => "rollover returned before its authority commit".to_owned(),
                 Err(error) => error.to_string(),

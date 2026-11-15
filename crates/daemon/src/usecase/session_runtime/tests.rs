@@ -771,6 +771,17 @@ fn runtime(git: FakeSessionGit) -> (TempDir, SessionRuntime) {
     .unwrap();
     (tmp, runtime)
 }
+
+fn write_linked_worktree_marker(repo_root: &Path, session_root: &Path) {
+    let name = session_root.file_name().unwrap().to_string_lossy();
+    let git_dir = repo_root.join(".git").join("worktrees").join(name.as_ref());
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let marker = session_root.join(".git");
+    std::fs::write(&marker, format!("gitdir: {}\n", git_dir.display())).unwrap();
+    std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+    std::fs::write(git_dir.join("gitdir"), format!("{}\n", marker.display())).unwrap();
+}
+
 // Most removal fixtures have no provider-verified merged head.
 fn perform_remove(
     runtime: &Mutex<SessionRuntime>,
@@ -805,7 +816,11 @@ fn confined_teardown() -> PendingTeardown {
 #[test]
 fn a_branch_preserving_teardown_skips_git_branch_deletion() {
     assert_eq!(
-        delete_teardown_branch(&FakeSessionGit::ok(), &confined_teardown()),
+        delete_teardown_branch(
+            &FakeSessionGit::ok(),
+            &SystemSessionWorktreeIo,
+            &confined_teardown(),
+        ),
         Ok(())
     );
 }
@@ -841,7 +856,7 @@ fn a_stored_conventional_branch_is_deleted_only_once() {
     teardown.delete_branch = true;
     teardown.branch_name = Some("usagi/one".into());
 
-    delete_teardown_branch(&git, &teardown).unwrap();
+    delete_teardown_branch(&git, &SystemSessionWorktreeIo, &teardown).unwrap();
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
@@ -891,6 +906,7 @@ fn an_exact_merged_pr_head_force_deletes_only_that_squash_merged_branch() {
                 head,
                 calls: Arc::clone(&calls),
             },
+            &SystemSessionWorktreeIo,
             &teardown,
         )
         .unwrap();
@@ -971,7 +987,9 @@ fn removal_identity_treats_a_missing_branch_as_absent_and_rejects_unknown_names(
         Err(SessionRuntimeError::UnknownSession)
     );
     let before = runtime.state().unwrap();
-    runtime.git = Box::new(ScriptedGit::new([ScriptedGitResult::Error]));
+    runtime.git = SharedGit(Arc::new(Mutex::new(Box::new(ScriptedGit::new([
+        ScriptedGitResult::Error,
+    ])))));
     assert_eq!(
         runtime.removal_identity("one"),
         Err(SessionRuntimeError::Storage)
@@ -1074,7 +1092,7 @@ fn startup_adopts_a_clean_merged_orphan_and_safe_remove_deletes_actual_branch() 
     runtime
         .io
         .build_session_tree(
-            runtime.git.as_ref(),
+            &runtime.git,
             coverage_path,
             coverage_path,
             "usagi/coverage",
@@ -1707,11 +1725,7 @@ fn remove_forwards_force_to_the_worktree_removal() {
     runtime
         .handle(SessionAction::Create, &operation(), &json!({"name":"one"}))
         .unwrap();
-    std::fs::write(
-        tmp.path().join(".usagi/sessions/one/.git"),
-        "gitdir: /fixture",
-    )
-    .unwrap();
+    write_linked_worktree_marker(tmp.path(), &tmp.path().join(".usagi/sessions/one"));
     runtime
         .handle(
             SessionAction::Remove,
@@ -2518,7 +2532,7 @@ fn failed_remove_replays_the_same_failure_without_repeating_the_effect() {
         .unwrap();
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     drop(creator);
 
     let operation = operation();
@@ -3526,7 +3540,7 @@ fn compensating_a_delegated_create_undoes_the_branch_and_frees_the_name() {
 
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("triage");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
     perform_compensating_remove(&runtime, &signal, &operation(), "triage").unwrap();
 
@@ -3584,7 +3598,7 @@ fn removing_an_available_session_safely_deletes_its_branch() {
     .unwrap();
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
     let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
@@ -3642,7 +3656,7 @@ fn removing_a_session_with_unmerged_commits_keeps_the_branch_and_failed_name() {
     .unwrap();
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
 
@@ -3769,7 +3783,7 @@ fn removing_a_failed_session_deletes_its_branch() {
     }
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
 
     let signal = TeardownSignal::new();
     perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
@@ -3845,7 +3859,7 @@ fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_work
     // Materialize a linked worktree so a teardown would have to invoke Git.
     let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
     std::fs::create_dir_all(&session_root).unwrap();
-    std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+    write_linked_worktree_marker(tmp.path(), &session_root);
     let signal = TeardownSignal::new();
 
     let reply = perform_remove(&runtime, &signal, &operation(), &json!({"name":"one"})).unwrap();
@@ -3952,7 +3966,7 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
         .unwrap();
         let session_root = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("one");
         std::fs::create_dir_all(&session_root).unwrap();
-        std::fs::write(session_root.join(".git"), "gitdir: /fixture").unwrap();
+        write_linked_worktree_marker(tmp.path(), &session_root);
         let operation = operation();
         let signal = TeardownSignal::new();
         let request = json!({"name":"one", "force":first_force});
@@ -5621,5 +5635,206 @@ fn lifecycle_orphan_adoption_write_failures_preserve_the_unowned_directory() {
     assert_eq!(
         state.sessions[0].failure.as_ref().unwrap().stage,
         FailureStage::Integrity
+    );
+}
+
+#[test]
+fn perform_removal_identity_and_orphan_diagnosis_release_the_session_lock_before_git() {
+    let (tmp, rt) = runtime(FakeSessionGit::ok());
+    let runtime = Arc::new(Mutex::new(rt));
+    perform_create(
+        &runtime,
+        &FakeSessionGit::ok(),
+        &operation(),
+        &json!({"name":"one"}),
+    )
+    .unwrap();
+
+    let observed_unlocked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let probe = LockProbeGit {
+        runtime: Arc::downgrade(&runtime),
+        observed_unlocked: Arc::clone(&observed_unlocked),
+    };
+    let (session_id, _) = perform_removal_identity(&runtime, &probe, "one").unwrap();
+    assert_eq!(
+        session_id,
+        runtime.lock().unwrap().session_id("one").unwrap()
+    );
+    assert!(observed_unlocked.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(
+        perform_removal_identity(&runtime, &probe, "missing"),
+        Err(SessionRuntimeError::UnknownSession)
+    );
+
+    // Occupied orphan path during perform_create inspects git outside runtime.lock().
+    let orphan_path = tmp.path().join(STATE_DIR).join(SESSIONS_DIR).join("orphan");
+    std::fs::create_dir_all(&orphan_path).unwrap();
+    write_linked_worktree_marker(tmp.path(), &orphan_path);
+    observed_unlocked.store(false, std::sync::atomic::Ordering::SeqCst);
+    let err =
+        perform_create(&runtime, &probe, &operation(), &json!({"name":"orphan"})).unwrap_err();
+    assert!(matches!(err, SessionRuntimeError::OrphanRecoveryBlocked(_)));
+    assert!(observed_unlocked.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Removing the adopted integrity orphan inspects git outside runtime.lock().
+    runtime.lock().unwrap().git = SharedGit(Arc::new(Mutex::new(Box::new(LockProbeGit {
+        runtime: Arc::downgrade(&runtime),
+        observed_unlocked: Arc::clone(&observed_unlocked),
+    }))));
+    observed_unlocked.store(false, std::sync::atomic::Ordering::SeqCst);
+    let signal = TeardownSignal::new();
+    let _ = perform_remove(&runtime, &signal, &operation(), &json!({"name":"orphan"}));
+    assert!(observed_unlocked.load(std::sync::atomic::Ordering::SeqCst));
+
+    poison_lock(&runtime);
+    assert_eq!(
+        perform_removal_identity(&runtime, &FakeSessionGit::ok(), "one"),
+        Err(SessionRuntimeError::Storage)
+    );
+}
+
+struct MultiRepoIo {
+    fail_repos: bool,
+}
+
+impl SessionWorktreeIo for MultiRepoIo {
+    fn remove_file_best_effort(&self, _: &Path) {}
+    fn canonical_path(&self, path: &Path) -> Option<PathBuf> {
+        Some(path.to_path_buf())
+    }
+    fn path_occupied(&self, _: &Path) -> bool {
+        false
+    }
+    fn is_repo_root(&self, _: &Path) -> bool {
+        false
+    }
+    fn is_linked_worktree(&self, _: &Path) -> bool {
+        true
+    }
+    fn workspace_repositories(&self, _: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        if self.fail_repos {
+            anyhow::bail!("cannot list workspace repositories");
+        }
+        Ok(vec![PathBuf::from("svc-a"), PathBuf::from("svc-b")])
+    }
+    fn build_session_tree(
+        &self,
+        _: &dyn GitRunner,
+        _: &Path,
+        _: &Path,
+        _: &str,
+        _: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn run_setup_command(&self, _: &Path, _: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn remove_session_tree(&self, _: &dyn GitRunner, _: &Path, _: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state_dir = tmp.path().join("daemon");
+    let rt = SessionRuntime::open(
+        tmp.path().to_path_buf(),
+        &state_dir,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        MultiRepoIo { fail_repos: false },
+    )
+    .unwrap();
+    let runtime = Arc::new(Mutex::new(rt));
+    perform_create(
+        &runtime,
+        &FakeSessionGit::ok(),
+        &operation(),
+        &json!({"name":"one"}),
+    )
+    .unwrap();
+
+    let git = RecordingGit::new();
+    let reply = perform_status(&runtime, &git, &operation()).unwrap();
+    let worktrees = reply.body["sessions"][0]["worktrees"].as_array().unwrap();
+    assert_eq!(worktrees.len(), 2);
+
+    let mut teardown = confined_teardown();
+    teardown.delete_branch = true;
+    let teardown_git = RecordingGit::new();
+    let calls = Arc::clone(&teardown_git.calls);
+    WorktreeTeardown::new(teardown_git, MultiRepoIo { fail_repos: false })
+        .tear_down(&teardown)
+        .unwrap();
+    let recorded = calls.lock().unwrap();
+    assert!(
+        recorded
+            .iter()
+            .any(|(repo, _)| repo == Path::new("/repo/svc-a"))
+    );
+    assert!(
+        recorded
+            .iter()
+            .any(|(repo, _)| repo == Path::new("/repo/svc-b"))
+    );
+    drop(recorded);
+
+    assert!(
+        remove_teardown_tree(
+            &FakeSessionGit::ok(),
+            &MultiRepoIo { fail_repos: true },
+            &teardown,
+        )
+        .is_err()
+    );
+    assert!(
+        remove_teardown_tree(
+            &FakeSessionGit::fail(),
+            &MultiRepoIo { fail_repos: false },
+            &teardown,
+        )
+        .is_err()
+    );
+    assert!(
+        delete_teardown_branch(
+            &FakeSessionGit::ok(),
+            &MultiRepoIo { fail_repos: true },
+            &teardown,
+        )
+        .is_err()
+    );
+
+    let failing_rt = SessionRuntime::open(
+        tmp.path().to_path_buf(),
+        &state_dir,
+        DaemonGeneration::new(),
+        FakeSessionGit::ok(),
+        MultiRepoIo { fail_repos: true },
+    )
+    .unwrap();
+    let failing_runtime = Arc::new(Mutex::new(failing_rt));
+    assert_eq!(
+        perform_status(&failing_runtime, &FakeSessionGit::ok(), &operation()),
+        Err(SessionRuntimeError::Storage)
+    );
+    assert_eq!(
+        perform_create(
+            &runtime,
+            &FakeSessionGit::ok(),
+            &operation(),
+            &json!({"name": "bad/name"}),
+        ),
+        Err(SessionRuntimeError::InvalidRequest)
+    );
+    assert_eq!(
+        perform_remove(
+            &runtime,
+            &TeardownSignal::new(),
+            &operation(),
+            &json!({"name": "bad/name"}),
+        ),
+        Err(SessionRuntimeError::InvalidRequest)
     );
 }

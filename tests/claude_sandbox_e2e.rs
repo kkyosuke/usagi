@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
+#[path = "support/daemon.rs"]
+mod daemon_fixture;
+
 const ORIGINAL: &[u8] = b"authority-sentinel\n";
 
 fn fixture_root() -> PathBuf {
@@ -24,13 +27,14 @@ fn run_in_session(own: &Path, script: &str, arguments: &[&Path]) -> Output {
     let protected = fixture_root()
         .canonicalize()
         .expect("canonical protected root");
-    run_in_session_with_roots(&protected, own, &[], script, arguments)
+    run_in_session_with_roots(&protected, own, &[], &[], script, arguments)
 }
 
 fn run_in_session_with_roots(
     protected: &Path,
     own: &Path,
     additional_roots: &[PathBuf],
+    read_only_roots: &[PathBuf],
     script: &str,
     arguments: &[&Path],
 ) -> Output {
@@ -43,6 +47,9 @@ fn run_in_session_with_roots(
         .arg(&own);
     for root in additional_roots {
         command.arg("--writable-root").arg(root);
+    }
+    for root in read_only_roots {
+        command.arg("--read-only-root").arg(root);
     }
     #[cfg(target_os = "macos")]
     command.arg("--backend").arg(
@@ -91,7 +98,7 @@ fn run_in_root(root: &Path, script: &str) -> Output {
         .current_dir(root)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_COUNT", "5")
+        .env("GIT_CONFIG_COUNT", "6")
         .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
         .env("GIT_CONFIG_VALUE_0", "false")
         .env("GIT_CONFIG_KEY_1", "core.hooksPath")
@@ -102,6 +109,8 @@ fn run_in_root(root: &Path, script: &str) -> Output {
         .env("GIT_CONFIG_VALUE_3", "false")
         .env("GIT_CONFIG_KEY_4", "diff.ignoreSubmodules")
         .env("GIT_CONFIG_VALUE_4", "all")
+        .env("GIT_CONFIG_KEY_5", "extensions.worktreeConfig")
+        .env("GIT_CONFIG_VALUE_5", "false")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_PAGER", "")
         .env("GIT_EXTERNAL_DIFF", "")
@@ -283,6 +292,7 @@ fn retire_bootstrap_brokers(repo: &Path, data: &Path, fixture: &Path) {
 
 #[test]
 fn session_scope_preserves_sibling_tracked_source_and_daemon_authority_for_path_alias_matrix() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let fixture = fixture_root();
     let _ = fs::remove_dir_all(&fixture);
     let own = fixture.join("sessions/a");
@@ -348,6 +358,7 @@ fn session_scope_preserves_sibling_tracked_source_and_daemon_authority_for_path_
 
 #[test]
 fn session_scope_can_commit_without_granting_the_main_ref() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let protected = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("claude-sandbox-session-git");
@@ -382,6 +393,11 @@ fn session_scope_can_commit_without_granting_the_main_ref() {
     let common = PathBuf::from(git(&worktree, &["rev-parse", "--git-common-dir"]))
         .canonicalize()
         .unwrap();
+    let read_only_roots = [
+        worktree.join(".git").canonicalize().unwrap(),
+        git_dir.join("commondir").canonicalize().unwrap(),
+        git_dir.join("gitdir").canonicalize().unwrap(),
+    ];
     let roots = [
         git_dir,
         common.join("objects").canonicalize().unwrap(),
@@ -389,10 +405,20 @@ fn session_scope_can_commit_without_granting_the_main_ref() {
         common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
     ];
     let protected = protected.canonicalize().unwrap();
+    let tamper = run_in_session_with_roots(
+        &protected,
+        &worktree,
+        &roots,
+        &read_only_roots,
+        "printf 'gitdir: /tmp\\n' > .git",
+        &[],
+    );
+    assert!(!tamper.status.success(), ".git pointer must stay read-only");
     let output = run_in_session_with_roots(
         &protected,
         &worktree,
         &roots,
+        &read_only_roots,
         "printf committed > tracked && git add tracked && git commit --quiet -m sandbox",
         &[],
     );
@@ -417,6 +443,7 @@ fn session_scope_can_commit_without_granting_the_main_ref() {
 /// `.gemini`.
 #[test]
 fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("agent-root-state-scope");
@@ -480,6 +507,7 @@ fn root_scope_grants_only_the_state_directory_of_the_agent_it_launches() {
 #[test]
 #[allow(clippy::too_many_lines)] // One sandbox run must show every granted AGY runtime path beside every denied customization path.
 fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("agy-global-config-read-only");
@@ -669,6 +697,7 @@ fn agy_grants_only_conversation_state_in_the_shipping_sandbox() {
 
 #[test]
 fn claude_global_config_atomic_save_preserves_other_existing_home_entries() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("claude-global-config-prefix");
@@ -726,6 +755,7 @@ fn claude_global_config_atomic_save_preserves_other_existing_home_entries() {
 
 #[test]
 fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join("agent-root-read-only");
@@ -812,16 +842,19 @@ fn root_scope_keeps_checkout_and_git_common_dir_byte_identical() {
 
 #[test]
 fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
+    let _guard = daemon_fixture::heavy_e2e_lock();
     // Keep the Unix socket path below `SUN_LEN`. The sandbox always grants
     // `/tmp` and `/var/tmp`, so putting the protected repository below either
     // directory would make a universal writable root its ancestor.
-    let fixture = PathBuf::from(std::env::var_os("HOME").expect("test HOME"))
-        .join(".codex")
-        .join(format!("ub{}", std::process::id()));
+    let codex_dir = PathBuf::from(std::env::var_os("HOME").expect("test HOME")).join(".codex");
+    let fixture = codex_dir.join(format!("ub{}", std::process::id()));
     let _ = fs::remove_dir_all(&fixture);
     let repo = fixture.join("repo");
     let data = fixture.join("data");
     fs::create_dir_all(&repo).unwrap();
+    for dir in [&codex_dir, &fixture, &repo] {
+        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    }
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_usagi"));
     let run = |arguments: &[&str]| {
         Command::new(&binary)
@@ -934,47 +967,11 @@ fn root_scope_cold_starts_through_the_out_of_sandbox_broker() {
 }
 
 /// End the running daemon the way anything other than `usagi daemon stop` does:
-/// by signalling the process named in its record and waiting for it to retire.
-///
-/// `daemon stop` deliberately also retires the bootstrap broker, so it cannot be
-/// used to reach the state this exercises — a workspace whose daemon is gone and
-/// whose broker is still there to start a replacement.
+/// by signalling the exact process incarnation named in its record and waiting
+/// for it to retire.
 fn signal_daemon_away(data: &Path) {
-    let record = data.join("daemon/daemon.json");
-    // A daemon the broker started registers itself a moment after the broker
-    // reports success, so the record is waited for rather than assumed.
-    let mut text = String::new();
-    for _ in 0..200 {
-        if let Ok(contents) = fs::read_to_string(&record)
-            && contents.contains("\"pid\"")
-        {
-            text = contents;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    assert!(!text.is_empty(), "no daemon recorded itself to signal");
-    let pid = text
-        .split("\"pid\"")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split(|c: char| !c.is_ascii_digit())
-                .find(|s| !s.is_empty())
-        })
-        .and_then(|digits| digits.parse::<i32>().ok())
-        .expect("the daemon record names a pid");
     assert!(
-        Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .unwrap()
-            .success()
+        daemon_fixture::signal_exact_daemon(data, libc::SIGTERM),
+        "the signalled daemon never cleared its record"
     );
-    for _ in 0..100 {
-        if !record.exists() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("the signalled daemon never cleared its record");
 }

@@ -615,6 +615,7 @@ pub(super) trait OrphanCleanupPass: Send {
 }
 
 pub(super) struct AutomaticOrphanCleanup {
+    pub(super) data_dir: super::PathBuf,
     pub(super) workspaces: Workspaces,
     pub(super) gate: AdmissionGate,
     pub(super) agent: SharedAgentRuntime,
@@ -636,6 +637,7 @@ impl usagi_daemon::usecase::session_cache_jobs::CacheJobExecutor for AutomaticOr
             .workspace(workspace)
             .ok_or("cache workspace is unavailable")?;
         match super::session_cache::clean_session_caches(
+            &self.data_dir,
             &ConnectionWorkspace {
                 tenant,
                 workspaces: Arc::clone(&self.workspaces),
@@ -681,6 +683,7 @@ impl OrphanCleanupPass for AutomaticOrphanCleanup {
                 ));
             }
             match super::session_cache::clean_session_caches(
+                &self.data_dir,
                 &bound,
                 &self.agent,
                 &self.terminal,
@@ -852,6 +855,7 @@ pub(super) fn start_lock_watchdog(
 pub(super) fn start_retention_gc_worker(
     terminal: SharedTerminalRuntime,
     agent: SharedAgentRuntime,
+    visibility: usagi_daemon::usecase::terminal_visibility_ipc::SharedTerminalVisibility,
     durable: ShardedRuntimeState,
     shutdown: Arc<ShutdownRequest>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
@@ -869,6 +873,7 @@ pub(super) fn start_retention_gc_worker(
                 agent.collect_retention_garbage();
                 retained.extend(agent.retained_resources());
             }
+            visibility.retain_terminal_ids(&retained);
             if let Err(error) = durable.collect(&retained, &limits) {
                 ErrorLog::record(&format!("durable runtime collection deferred: {error}"));
             }

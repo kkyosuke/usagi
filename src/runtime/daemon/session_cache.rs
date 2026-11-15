@@ -323,6 +323,7 @@ impl CacheMutationIo for SystemCacheTree {
 }
 
 struct SystemSessionCaches<'a> {
+    data_dir: &'a Path,
     bound: &'a ConnectionWorkspace,
     agent: &'a SharedAgentRuntime,
     terminal: &'a SharedTerminalRuntime,
@@ -368,6 +369,11 @@ impl SessionCacheIo for SystemSessionCaches<'_> {
 
     #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_cache_cleanup_reports_usage_and_keeps_the_session
     fn detach(&mut self, candidate: &CacheCandidate) -> io::Result<Option<PathBuf>> {
+        let policy = WorkspaceSessionConfig::load(self.bound.tenant.root())
+            .map_err(io::Error::other)?
+            .cache_cleanup()
+            .clone();
+        let generations = self.generation_state()?;
         let agent = lock_owner(&self.agent.owner)?;
         let terminal = lock_owner(self.terminal)?;
         let workspace = self.bound.tenant.workspace_id();
@@ -376,15 +382,15 @@ impl SessionCacheIo for SystemSessionCaches<'_> {
             .session_scope_by_id(candidate.session)
             .map_err(session_error)?;
         let current = CacheObservation {
-            policy: WorkspaceSessionConfig::load(self.bound.tenant.root())
-                .map_err(io::Error::other)?
-                .cache_cleanup()
-                .clone(),
+            policy,
             activity: (
                 agent.cache_cleanup_activity(workspace),
                 terminal.cache_cleanup_activity(workspace),
             ),
         };
+        drop(runtime);
+        drop(terminal);
+        drop(agent);
         detach_revalidated(
             &SystemCacheTree,
             &SystemGit,
@@ -394,7 +400,7 @@ impl SessionCacheIo for SystemSessionCaches<'_> {
                 executable: &self.executable,
                 scanned: &self.observation,
                 current: &current,
-                generations: self.generation_state()?,
+                generations,
             },
             candidate,
         )
@@ -463,13 +469,13 @@ impl CacheMaintenanceIo for SystemSessionCaches<'_> {
         let generations = super::trusted_generations()
             .map_err(io::Error::other)?
             .len();
-        let data = usagi_core::infrastructure::paths::data_dir().map_err(io::Error::other)?;
-        let document =
-            usagi_daemon::infrastructure::generation_registry::read_registry_document(&data)
-                .map_err(io::Error::other)?
-                .ok_or(io::Error::other(
-                    "cache cleanup generation ownership is unavailable",
-                ))?;
+        let document = usagi_daemon::infrastructure::generation_registry::read_registry_document(
+            self.data_dir,
+        )
+        .map_err(io::Error::other)?
+        .ok_or(io::Error::other(
+            "cache cleanup generation ownership is unavailable",
+        ))?;
         let mut roles = Vec::new();
         for entry in document.generations {
             roles.push(entry.role);
@@ -502,6 +508,7 @@ impl CacheMaintenanceIo for SystemSessionCaches<'_> {
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=session_cache_cleanup_reports_usage_and_keeps_the_session
 pub(super) fn clean_session_caches(
+    data_dir: &Path,
     bound: &ConnectionWorkspace,
     agent: &SharedAgentRuntime,
     terminal: &SharedTerminalRuntime,
@@ -512,6 +519,7 @@ pub(super) fn clean_session_caches(
         .cache_cleanup()
         .clone();
     let mut io = SystemSessionCaches {
+        data_dir,
         bound,
         agent,
         terminal,

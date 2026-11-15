@@ -121,7 +121,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
 
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
     fn is_linked_worktree(&self, path: &Path) -> bool {
-        path.join(".git").is_file()
+        is_valid_linked_worktree_gitfile(path)
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=orphan_session_entries_are_sorted_and_direct
@@ -136,6 +136,18 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
         };
         names.sort();
         Ok(names)
+    }
+
+    fn workspace_repositories(&self, workspace_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        if self.is_repo_root(workspace_root) {
+            return Ok(vec![PathBuf::new()]);
+        }
+        let mut repositories = Vec::new();
+        collect_workspace_repositories(self, workspace_root, Path::new(""), &mut repositories)?;
+        if repositories.is_empty() {
+            repositories.push(PathBuf::new());
+        }
+        Ok(repositories)
     }
 
     #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
@@ -227,7 +239,11 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
             &ErrorLog::record,
         )?;
         let mut worktrees = Vec::new();
-        collect_session_worktrees(self, session_root, &mut worktrees)?;
+        if collect_session_worktrees(self, session_root, &mut worktrees).is_err() {
+            let _ = grant_owner_access(session_root);
+            worktrees.clear();
+            collect_session_worktrees(self, session_root, &mut worktrees)?;
+        }
         worktrees.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
         for worktree in worktrees {
             remove_worktree(git, &worktree, &worktree, force)?;
@@ -238,6 +254,36 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn collect_workspace_repositories(
+    io: &SystemSessionWorktreeIo,
+    directory: &Path,
+    relative_prefix: &Path,
+    repositories: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Ok(());
+    };
+    let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let name = entry.file_name();
+        if skipped_entry(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() || io.is_linked_worktree(&path) {
+            continue;
+        }
+        let relative = relative_prefix.join(&name);
+        if io.is_repo_root(&path) {
+            repositories.push(relative);
+        } else {
+            collect_workspace_repositories(io, &path, &relative, repositories)?;
+        }
+    }
+    Ok(())
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=session_runtime_fake_fs_contract
@@ -271,11 +317,23 @@ fn mirror_directory(
                 std::fs::create_dir_all(&target)?;
                 mirror_directory(io, git, &source, &target, branch, base_ref, created)?;
             }
-        } else {
+        } else if file_type.is_file() {
             std::fs::copy(source, target)?;
+        } else if file_type.is_symlink() {
+            let link_target = std::fs::read_link(&source)?;
+            if is_confined_relative_symlink(&link_target) {
+                std::os::unix::fs::symlink(link_target, target)?;
+            }
         }
     }
     Ok(())
+}
+
+fn is_confined_relative_symlink(target: &Path) -> bool {
+    !target.is_absolute()
+        && !target
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
 }
 
 /// Remove `root` and everything under it.
@@ -369,6 +427,46 @@ fn collect_session_worktrees(
 
 fn skipped_entry(name: &OsStr) -> bool {
     name == OsStr::new(".git") || name == OsStr::new(STATE_DIR)
+}
+
+fn is_valid_linked_worktree_gitfile(path: &Path) -> bool {
+    let marker = path.join(".git");
+    let Ok(marker_canonical) = marker.canonicalize() else {
+        return false;
+    };
+    let Some(git_dir) = read_linked_git_pointer(&marker, Some("gitdir:"), path) else {
+        return false;
+    };
+    let Some(common_dir) = read_linked_git_pointer(&git_dir.join("commondir"), None, &git_dir)
+    else {
+        return false;
+    };
+    if git_dir.parent() != common_dir.join("worktrees").canonicalize().ok().as_deref() {
+        return false;
+    }
+    read_linked_git_pointer(&git_dir.join("gitdir"), None, &git_dir)
+        .is_some_and(|backlink| backlink == marker_canonical)
+}
+
+fn read_linked_git_pointer(
+    path: &Path,
+    prefix: Option<&str>,
+    relative_to: &Path,
+) -> Option<PathBuf> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > 16 * 1024 {
+        return None;
+    }
+    let contents = std::fs::read_to_string(path).ok()?;
+    let trimmed = contents.trim();
+    let target = match prefix {
+        Some(prefix) => trimmed.strip_prefix(prefix)?.trim(),
+        None => trimmed,
+    };
+    if target.is_empty() {
+        return None;
+    }
+    relative_to.join(target).canonicalize().ok()
 }
 
 #[cfg(test)]
@@ -740,6 +838,54 @@ mod tests {
                 .unwrap();
         }
     }
+
+    #[test]
+    fn linked_worktree_marker_must_be_a_valid_non_symlink_gitdir_pointer_with_backlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let common = temp.path().join("repo/.git");
+        let git_dir = common.join("worktrees/work");
+        let worktree = temp.path().join("repo/.usagi/sessions/work");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        let marker = worktree.join(".git");
+        std::fs::create_dir(&marker).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+        std::fs::remove_dir(&marker).unwrap();
+
+        std::fs::write(&marker, "not-a-gitdir\n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(&marker, "gitdir:   \n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(&marker, vec![b'a'; 16 * 1024 + 1]).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+        std::fs::remove_file(&marker).unwrap();
+
+        let target = temp.path().join("real-marker");
+        std::fs::write(&target, format!("gitdir: {}\n", git_dir.display())).unwrap();
+        std::os::unix::fs::symlink(&target, &marker).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+        std::fs::remove_file(&marker).unwrap();
+
+        std::fs::write(&marker, format!("gitdir: {}\n", git_dir.display())).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("commondir"), "..\n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("gitdir"), format!("{}\n", target.display())).unwrap();
+        assert!(!is_valid_linked_worktree_gitfile(&worktree));
+
+        std::fs::write(git_dir.join("gitdir"), format!("{}\n", marker.display())).unwrap();
+        assert!(is_valid_linked_worktree_gitfile(&worktree));
+    }
 }
 
 #[cfg(test)]
@@ -888,5 +1034,64 @@ mod bounded_git_tests {
             assert_eq!(output.stdout, "removed");
             assert_eq!(output.stderr, "diagnostic");
         });
+    }
+
+    #[test]
+    fn workspace_repositories_enumerates_single_multi_and_non_git_workspaces() {
+        let temp = tempfile::tempdir().unwrap();
+        let single = temp.path().join("single");
+        std::fs::create_dir_all(single.join(".git")).unwrap();
+        assert_eq!(
+            SystemSessionWorktreeIo
+                .workspace_repositories(&single)
+                .unwrap(),
+            vec![PathBuf::new()]
+        );
+
+        let non_git = temp.path().join("non-git");
+        std::fs::create_dir_all(&non_git).unwrap();
+        assert_eq!(
+            SystemSessionWorktreeIo
+                .workspace_repositories(&non_git)
+                .unwrap(),
+            vec![PathBuf::new()]
+        );
+        assert_eq!(
+            SystemSessionWorktreeIo
+                .workspace_repositories(&temp.path().join("missing"))
+                .unwrap(),
+            vec![PathBuf::new()]
+        );
+
+        let multi = temp.path().join("multi");
+        std::fs::create_dir_all(multi.join(".usagi/sessions/ignored/.git")).unwrap();
+        std::fs::create_dir_all(multi.join("group/repo-a/.git")).unwrap();
+        std::fs::create_dir_all(multi.join("repo-b/.git")).unwrap();
+        let linked = multi.join("linked");
+        let linked_git_dir = multi.join("repo-b/.git/worktrees/linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::create_dir_all(&linked_git_dir).unwrap();
+        let linked_marker = linked.join(".git");
+        std::fs::write(
+            &linked_marker,
+            format!("gitdir: {}\n", linked_git_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(linked_git_dir.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            linked_git_dir.join("gitdir"),
+            format!("{}\n", linked_marker.display()),
+        )
+        .unwrap();
+        std::fs::write(multi.join("note.txt"), "text").unwrap();
+        assert_eq!(
+            SystemSessionWorktreeIo
+                .workspace_repositories(&multi)
+                .unwrap(),
+            vec![PathBuf::from("group/repo-a"), PathBuf::from("repo-b")]
+        );
+        assert!(is_confined_relative_symlink(Path::new("nested/file.txt")));
+        assert!(!is_confined_relative_symlink(Path::new("/etc/passwd")));
+        assert!(!is_confined_relative_symlink(Path::new("../outside")));
     }
 }

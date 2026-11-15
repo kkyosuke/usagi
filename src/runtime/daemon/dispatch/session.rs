@@ -463,11 +463,12 @@ pub(super) fn dispatch_session_action(
         // multi-gigabyte `target/`.
         SessionAction::Remove => {
             let name = string("name")?;
-            let (id, branch_head) = bound
-                .sessions()
-                .lock()
-                .map_err(|_| SessionRuntimeError::Storage)?
-                .removal_identity(name)?;
+            let (id, branch_head) =
+                usagi_daemon::usecase::session_runtime::perform_removal_identity(
+                    bound.sessions(),
+                    &SystemGit,
+                    name,
+                )?;
             if let Some(caller) = caller {
                 let target = bound
                     .sessions()
@@ -531,6 +532,9 @@ pub(super) fn dispatch_session_action(
             })
         }
         SessionAction::Clean => {
+            if authenticated_caller.is_some() {
+                return Err(SessionRuntimeError::InvalidRequest);
+            }
             let flag = |name| match payload.get(name) {
                 None => Ok(false),
                 Some(serde_json::Value::Bool(value)) => Ok(*value),
