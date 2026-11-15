@@ -44,6 +44,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 |---|---|
 | 複数の作業が同じ checkout で衝突する | session ごとに独立した worktree を作る |
 | Agent と terminal が散らばり、状態を追いにくい | workspace をまたいで TUI から一覧・操作する |
+| project ごとの session 数をひと目で把握したい | [上部の project tab](document/03-tui.md#project-tab-と-workspace-deck) で件数を確認する |
 | 増えた機能や検索対象をまとめて探したい | [統合検索](document/03-tui.md#統合検索)。`Tab` で All / Terminal / Artifact / Current session を切り替える |
 | 複数の Agent / Terminal の出力からエラーを探したい | [ターミナル出力の横断検索](document/03-tui.md#ターミナル出力の横断検索) で保持中の出力を検索 |
 | session・タブ・操作の場所を探すのに時間がかかる | [横断コマンドパレット](document/03-tui.md#横断コマンドパレット) で検索して開く |
