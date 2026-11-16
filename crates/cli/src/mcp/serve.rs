@@ -223,13 +223,17 @@ pub fn serve_with_client_and_caller_at(
     caller_credential: &str,
     store_root: &Path,
 ) -> io::Result<()> {
+    let workspace_root = resolve_workspace_root(
+        store_root.to_path_buf(),
+        std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
+    );
     serve_with_client_and_caller_at_roots(
         input,
         out,
         version,
         client,
         caller_credential,
-        store_root,
+        &workspace_root,
         store_root,
     )
 }
@@ -250,11 +254,7 @@ pub fn serve_with_client_and_caller_at_roots(
     store_root: &Path,
     memory_root: &Path,
 ) -> io::Result<()> {
-    let workspace_root = resolve_workspace_root(
-        store_root.to_path_buf(),
-        std::env::var_os(WORKSPACE_ROOT_ENV).map(PathBuf::from),
-    );
-    let (snapshot, families) = load_runtime_configuration(&workspace_root)?;
+    let (snapshot, families) = load_runtime_configuration(store_root)?;
     serve_with_client_and_capabilities(
         input,
         out,

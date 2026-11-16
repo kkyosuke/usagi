@@ -536,9 +536,8 @@ pub(super) fn open_agent_runtime(
         claude_sandbox::Platform::Unsupported
     };
     let sandbox_backend = cli::resolve_sandbox_backend(sandbox_platform);
-    let sandbox_tmpdir = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .and_then(|path| path.canonicalize().ok());
+    let sandbox_tmpdir =
+        agent_provisioning::resolve_sandbox_tmpdir(std::env::var_os("TMPDIR").as_deref());
     let sandbox_cache_dir = resolve_sandbox_cache_dir();
     let sandbox_passthrough = claude_sandbox::passthrough_requested(
         cfg!(debug_assertions),

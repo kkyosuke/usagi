@@ -149,19 +149,40 @@ fn contains_executable(
     Ok(false)
 }
 
+fn resolve_git_target<'a>(
+    io: &impl CacheTreeIo,
+    root: &Path,
+    relative: &'a Path,
+) -> (PathBuf, &'a Path) {
+    let mut prefix = PathBuf::new();
+    let mut components = relative.components();
+    while let Some(component) = components.next() {
+        prefix.push(component);
+        let remainder = components.as_path();
+        if !remainder.as_os_str().is_empty() && io.node(&root.join(&prefix).join(".git")).is_ok() {
+            return (root.join(prefix), remainder);
+        }
+    }
+    (root.to_path_buf(), relative)
+}
+
 fn has_tracked_files(
     io: &impl CacheTreeIo,
     git: &impl GitRunner,
     root: &Path,
     relative: &Path,
 ) -> io::Result<bool> {
+    let (repo_root, repo_relative) = resolve_git_target(io, root, relative);
     // A literal pathspec is still case-sensitive on a case-insensitive filesystem.
     // Compare index spelling with filesystem identity, including tracked gitlinks
     // that are ancestors of the selected directory.
     let result = git
-        .run(root, &["ls-files", "-z", "--"])
+        .run(&repo_root, &["ls-files", "-z", "--"])
         .map_err(io::Error::other)?;
     if !result.success {
+        if relative.starts_with(".usagi/cache-trash") && io.node(&repo_root.join(".git")).is_err() {
+            return Ok(false);
+        }
         return Err(io::Error::other("could not verify cache files against Git"));
     }
     // GitRunner exposes UTF-8 text. Fail closed if its lossy conversion could
@@ -169,17 +190,21 @@ fn has_tracked_files(
     if result.stdout.contains('\u{fffd}') {
         return Err(io::Error::other("could not decode tracked cache paths"));
     }
-    let depth = relative.components().count();
+    let depth = repo_relative.components().count();
     let mut checked = std::collections::BTreeSet::new();
     for tracked in result.stdout.split_terminator('\0').map(Path::new) {
-        if tracked.starts_with(relative) || relative.starts_with(tracked) {
+        if tracked.starts_with(repo_relative) || repo_relative.starts_with(tracked) {
             return Ok(true);
         }
         let shared_depth = depth.min(tracked.components().count());
-        let cache_prefix: PathBuf = relative.components().take(shared_depth).collect();
+        let cache_prefix: PathBuf = repo_relative.components().take(shared_depth).collect();
         let tracked_prefix: PathBuf = tracked.components().take(shared_depth).collect();
         if checked.insert((cache_prefix.clone(), tracked_prefix.clone()))
-            && same_directory(io, &root.join(cache_prefix), &root.join(tracked_prefix))?
+            && same_directory(
+                io,
+                &repo_root.join(cache_prefix),
+                &repo_root.join(tracked_prefix),
+            )?
         {
             return Ok(true);
         }
@@ -856,6 +881,30 @@ mod tests {
                 .is_err()
             );
         }
+        tree.directory("/fixture/repo-a", 10);
+        tree.directory("/fixture/repo-a/.git", 11);
+        tree.directory("/fixture/repo-a/target", 12);
+        assert!(
+            super::has_tracked_files(
+                &tree,
+                &git("target/source\0"),
+                root,
+                Path::new("repo-a/target")
+            )
+            .unwrap()
+        );
+        assert!(
+            !super::has_tracked_files(
+                &tree,
+                &FakeGit {
+                    failure: 2,
+                    ..FakeGit::default()
+                },
+                root,
+                Path::new(".usagi/cache-trash/item")
+            )
+            .unwrap()
+        );
     }
 
     #[test]

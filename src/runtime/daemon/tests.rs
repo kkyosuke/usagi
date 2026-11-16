@@ -12417,3 +12417,260 @@ fn broker_socket_endpoint_requires_an_owned_0600_unix_socket() {
     std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600)).unwrap();
     broker::verify_broker_socket_endpoint(&sock).unwrap();
 }
+
+#[test]
+fn resolve_sandbox_tmpdir_rejects_sticky_or_missing_and_accepts_owned_dirs() {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    assert_eq!(agent_provisioning::resolve_sandbox_tmpdir(None), None);
+    assert_eq!(
+        agent_provisioning::resolve_sandbox_tmpdir(Some(OsStr::new("/tmp"))),
+        None
+    );
+    assert_eq!(
+        agent_provisioning::resolve_sandbox_tmpdir(Some(OsStr::new("/var/tmp"))),
+        None
+    );
+    assert_eq!(
+        agent_provisioning::resolve_sandbox_tmpdir(Some(OsStr::new("/definitely/missing/tmpdir"))),
+        None
+    );
+    let owned_tmp = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(owned_tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let canonical_tmp = owned_tmp.path().canonicalize().unwrap();
+    assert_eq!(
+        agent_provisioning::resolve_sandbox_tmpdir(Some(owned_tmp.path().as_os_str())),
+        Some(canonical_tmp)
+    );
+}
+
+#[test]
+fn multi_repo_git_policy_and_root_common_dir_cover_nested_repositories() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // Non-Git workspace returns Ok(None) for session_git_policy and Ok(()) for root common dir policy.
+    let plain_ws = tempfile::tempdir().unwrap();
+    let plain_session_dir = plain_ws.path().join(".usagi/sessions/s1");
+    std::fs::create_dir_all(&plain_session_dir).unwrap();
+    assert!(
+        agent_provisioning::session_git_policy(plain_ws.path(), &plain_session_dir)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        agent_provisioning::validate_root_git_common_dir_policy(
+            plain_ws.path(),
+            DefaultModel::Claude,
+            None,
+            None,
+            None,
+        )
+        .is_ok()
+    );
+
+    // Multi-Repo workspace with two child repositories grants writable Git dirs for both.
+    std::fs::create_dir_all("target").unwrap();
+    let multi_ws = tempfile::tempdir_in("target").unwrap();
+    let multi_session_dir = multi_ws.path().join(".usagi/sessions/s1");
+    for child in ["repo-a", "repo-b"] {
+        let repo = multi_ws.path().join(child);
+        let common = repo.join(".git");
+        let wt_admin = common.join("worktrees/s1");
+        let wt_checkout = multi_session_dir.join(child);
+        std::fs::create_dir_all(&wt_admin).unwrap();
+        std::fs::create_dir_all(common.join("objects")).unwrap();
+        std::fs::create_dir_all(&wt_checkout).unwrap();
+        std::fs::set_permissions(&common, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&wt_admin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(
+            common.join("objects"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let wt_gitfile = wt_checkout.join(".git");
+        std::fs::write(&wt_gitfile, format!("gitdir: {}\n", wt_admin.display())).unwrap();
+        std::fs::write(wt_admin.join("commondir"), "../..\n").unwrap();
+        std::fs::write(
+            wt_admin.join("gitdir"),
+            format!("{}\n", wt_gitfile.canonicalize().unwrap().display()),
+        )
+        .unwrap();
+    }
+    let policy = agent_provisioning::session_git_policy(multi_ws.path(), &multi_session_dir)
+        .unwrap()
+        .expect("multi-repo session git policy");
+    assert_eq!(policy.writable_roots.len(), 8);
+    assert_eq!(policy.read_only_roots.len(), 6);
+    assert!(
+        agent_provisioning::validate_root_git_common_dir_policy(
+            multi_ws.path(),
+            DefaultModel::Claude,
+            None,
+            None,
+            None,
+        )
+        .is_ok()
+    );
+    assert!(
+        agent_provisioning::validate_root_git_common_dir_policy(
+            multi_ws.path(),
+            DefaultModel::Claude,
+            Some(multi_ws.path()),
+            None,
+            None,
+        )
+        .is_err()
+    );
+    assert!(
+        agent_provisioning::validate_root_git_common_dir_policy(
+            &multi_session_dir.join("repo-a/.git"),
+            DefaultModel::Claude,
+            None,
+            None,
+            None,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn doctor_repair_recovers_inaccessible_dirs_corrupt_records_and_comma_separated_pr_heads() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use usagi_core::domain::pr_inventory::{PrEntry, PrRefreshState, PrState, canonicalize};
+    use usagi_core::infrastructure::ipc::PrSnapshot;
+
+    let snapshot = PrSnapshot {
+        session_id: SessionId::new(),
+        revision: 1,
+        entries: vec![PrEntry {
+            identity: canonicalize("https://github.com/owner/repo/pull/1").unwrap(),
+            title: Some("pr".into()),
+            state: PrState::Merged,
+            head_oid: Some("oid-b".into()),
+            pinned: false,
+            refresh: PrRefreshState::Idle,
+            draft: false,
+            checks: None,
+            review: None,
+            auto_open: false,
+        }],
+    };
+    assert_eq!(
+        dispatch::exact_merged_pr_head(Some(snapshot), Some("oid-a,oid-b".into())),
+        Some("oid-b".into())
+    );
+
+    let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+    let data_dir = temp.path().join("data");
+    let daemon_dir = data_dir.join("daemon");
+    let generations_dir = daemon_dir.join("generations");
+    let gen_dir = generations_dir.join("gen-stale");
+    std::fs::create_dir_all(&gen_dir).unwrap();
+    let sock_path = gen_dir.join("sock");
+    let listener = std::os::unix::net::UnixListener::bind(&sock_path).unwrap();
+    drop(listener);
+    std::fs::set_permissions(&generations_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&gen_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let settings_path = data_dir.join("settings.json");
+    let current_path = daemon_dir.join("current.json");
+    let record_path = daemon_dir.join("daemon.json");
+    std::fs::write(&settings_path, b"{}").unwrap();
+    std::fs::write(&current_path, b"not-valid-json").unwrap();
+    std::fs::write(&record_path, b"not-valid-json").unwrap();
+
+    // Make settings.json 0000 and daemon_dir 0300 so OpenOptions::read fails with PermissionDenied.
+    std::fs::set_permissions(&settings_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    std::fs::set_permissions(&current_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::set_permissions(&daemon_dir, std::fs::Permissions::from_mode(0o300)).unwrap();
+
+    repair_non_lifecycle_doctor_state(&data_dir);
+
+    assert_eq!(
+        std::fs::metadata(&daemon_dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(&settings_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(!current_path.exists());
+    assert!(!record_path.exists());
+    assert!(!sock_path.exists());
+}
+
+#[test]
+fn doctor_repair_keeps_a_live_owner_record_and_skips_symlinked_nodes() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+    let data = temp.path().join("data");
+    let daemon = data.join("daemon");
+    std::fs::create_dir_all(&daemon).unwrap();
+    for dir in [&data, &daemon] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let store = DaemonRecordStore::new(FsRecordFile {
+        path: daemon.join("daemon.json"),
+    });
+    // The record names this very process with its exact start identity, so the
+    // owner is provably alive: repair must neither clear it nor sweep around it.
+    let identity = ExactProcessControl
+        .process_start_identity(std::process::id())
+        .unwrap();
+    let record = DaemonRecord::identified(std::process::id(), identity);
+    store.save(&record).unwrap();
+
+    // A symlinked settings file is never followed: its target keeps its mode.
+    let target = temp.path().join("settings-target.json");
+    std::fs::write(&target, b"{}").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&target, data.join("settings.json")).unwrap();
+
+    repair_non_lifecycle_doctor_state(&data);
+
+    assert_eq!(store.load().unwrap(), Some(record));
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+#[test]
+fn doctor_repair_retires_a_well_formed_locator_whose_endpoint_is_gone() {
+    use std::mem::ManuallyDrop;
+
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let data = directory.path();
+    let daemon = data.join("daemon");
+    let mut listener = ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+    let socket = daemon.join(&listener.locator().endpoint);
+    let current = daemon.join("current.json");
+    std::fs::remove_file(&socket).unwrap();
+    // The locator itself is intact; only its endpoint is unreachable.
+    assert!(read_locator(&daemon).is_ok());
+
+    repair_non_lifecycle_doctor_state(data);
+
+    assert!(!current.exists());
+    // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
+    unsafe { ManuallyDrop::drop(&mut listener) };
+}
+
+#[test]
+fn multi_repo_git_policy_refuses_a_session_missing_a_nested_checkout() {
+    // The workspace declares `repo-a`, but the session tree has no checkout for
+    // it: one unprovable repository refuses the whole policy.
+    std::fs::create_dir_all("target").unwrap();
+    let workspace = tempfile::tempdir_in("target").unwrap();
+    std::fs::create_dir_all(workspace.path().join("repo-a/.git")).unwrap();
+    let session = workspace.path().join(".usagi/sessions/s1");
+    std::fs::create_dir_all(&session).unwrap();
+
+    assert!(agent_provisioning::session_git_policy(workspace.path(), &session).is_err());
+}

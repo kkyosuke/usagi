@@ -1832,7 +1832,7 @@ pub(super) fn dispatch_mcp_child_claim(
             let session_id = runtime.caller_session(&credential);
             (credential, session_id)
         };
-        let store_root = if let Some(session_id) = session_id {
+        if let Some(session_id) = session_id {
             bound
                 .sessions()
                 .lock()
@@ -1848,11 +1848,9 @@ pub(super) fn dispatch_mcp_child_claim(
                         ErrorCode::Unavailable,
                         "MCP caller session scope is unavailable",
                     )
-                })?
-                .path
-        } else {
-            bound.tenant.root().to_path_buf()
-        };
+                })?;
+        }
+        let store_root = bound.tenant.root().to_path_buf();
         let memory_root = data_dir
             .join("agent-memory")
             .join(bound.tenant.workspace_id().to_string())
@@ -2000,11 +1998,16 @@ pub(super) fn exact_merged_pr_head(
 ) -> Option<String> {
     inventory.and_then(|inventory| {
         branch_head.and_then(|head| {
-            inventory.entries.into_iter().find_map(|entry| {
-                (entry.state == usagi_core::domain::pr_inventory::PrState::Merged
-                    && entry.head_oid.as_deref() == Some(head.as_str()))
-                .then_some(head.clone())
-            })
+            let matched = head
+                .split(',')
+                .filter(|oid| {
+                    inventory.entries.iter().any(|entry| {
+                        entry.state == usagi_core::domain::pr_inventory::PrState::Merged
+                            && entry.head_oid.as_deref() == Some(*oid)
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!matched.is_empty()).then(|| matched.join(","))
         })
     })
 }
@@ -2039,8 +2042,11 @@ pub(super) fn clean_orphan_session_resources(
     force: bool,
     target: Option<&usagi_core::usecase::clean::CleanTarget>,
 ) -> Result<serde_json::Value, SessionRuntimeError> {
+    use super::SystemSessionWorktreeIo;
+    use usagi_core::domain::workspace_layout::{SESSIONS_DIR, STATE_DIR};
     use usagi_core::infrastructure::git::{delete_branch, remove_worktree};
     use usagi_core::usecase::clean::{CleanCandidate, CleanInventory, DaemonWorkspaceData, plan};
+    use usagi_daemon::usecase::session_runtime::SessionWorktreeIo as _;
 
     let lifecycle = || -> Result<(PathBuf, BTreeSet<String>), SessionRuntimeError> {
         let sessions = bound
@@ -2067,14 +2073,31 @@ pub(super) fn clean_orphan_session_resources(
         Ok((root, names))
     };
     let (root, names) = lifecycle()?;
-    let repositories = usagi_core::infrastructure::git::observe_repository(&SystemGit, &root)
+    let repo_relatives = SystemSessionWorktreeIo
+        .workspace_repositories(&root)
         .map_err(|error| {
             SessionRuntimeError::DurableFailure(format!(
                 "could not inspect orphan session resources: {error}"
             ))
-        })?
-        .into_iter()
-        .collect();
+        })?;
+    let mut repositories = Vec::new();
+    for relative in repo_relatives {
+        let repo_root = if relative.as_os_str().is_empty() {
+            root.clone()
+        } else {
+            root.join(relative)
+        };
+        if let Some(observed) = usagi_core::infrastructure::git::observe_repository(
+            &SystemGit, &repo_root,
+        )
+        .map_err(|error| {
+            SessionRuntimeError::DurableFailure(format!(
+                "could not inspect orphan session resources: {error}"
+            ))
+        })? {
+            repositories.push(observed);
+        }
+    }
     let candidates = plan(&CleanInventory {
         daemon_data: vec![DaemonWorkspaceData {
             root: root.clone(),
@@ -2095,11 +2118,21 @@ pub(super) fn clean_orphan_session_resources(
             )
         })
         .collect::<Vec<_>>();
-    if target.is_some() && git_candidates.len() != 1 {
+    if target.is_some() && git_candidates.is_empty() {
         return Err(SessionRuntimeError::DurableFailure(
             "selected resource is no longer an orphan cleanup candidate".into(),
         ));
     }
+    let sessions_parent = root.join(STATE_DIR).join(SESSIONS_DIR);
+    let worktree_session_name = |path: &Path| -> Option<String> {
+        path.strip_prefix(&sessions_parent)
+            .ok()?
+            .components()
+            .next()?
+            .as_os_str()
+            .to_str()
+            .map(str::to_owned)
+    };
     let agent = agent.filter(|_| target.is_none());
     let failed_reservations = agent.map_or_else(
         || Ok(Vec::new()),
@@ -2120,7 +2153,7 @@ pub(super) fn clean_orphan_session_resources(
                 ..
             } => serde_json::json!({
                 "kind": "worktree",
-                "name": path.file_name().and_then(|name| name.to_str()),
+                "name": worktree_session_name(path),
                 "path": path,
                 "protected": requires_force,
             }),
@@ -2179,36 +2212,50 @@ pub(super) fn clean_orphan_session_resources(
             continue;
         }
         let name = match candidate {
-            CleanCandidate::Worktree { path, .. } => path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or(SessionRuntimeError::InvalidRequest)?,
+            CleanCandidate::Worktree { path, .. } => {
+                worktree_session_name(path).ok_or(SessionRuntimeError::InvalidRequest)?
+            }
             CleanCandidate::Branch { name, .. } => name
                 .strip_prefix("usagi/")
+                .map(str::to_owned)
                 .ok_or(SessionRuntimeError::InvalidRequest)?,
             _ => unreachable!(),
         };
         let (_, current) = lifecycle()?;
-        if current.contains(name) {
+        if current.contains(name.as_str()) {
             return Err(SessionRuntimeError::DurableFailure(format!(
                 "orphan cleanup stopped because session \"{name}\" became active"
             )));
         }
         let result = match candidate {
-            CleanCandidate::Worktree { path, .. } => {
-                usagi_core::infrastructure::artifacts::archive_before_removal(
+            CleanCandidate::Worktree {
+                root: repo_root,
+                path,
+                ..
+            } => usagi_core::infrastructure::artifacts::archive_before_removal(
+                path,
+                force,
+                &ErrorLog::record,
+            )
+            .map_err(anyhow::Error::from)
+            .and_then(|()| {
+                remove_worktree(
+                    &SystemGit,
+                    repo_root,
                     path,
-                    force,
-                    &ErrorLog::record,
+                    candidate.requires_force() && force,
                 )
-                .map_err(anyhow::Error::from)
-                .and_then(|()| {
-                    remove_worktree(&SystemGit, &root, path, candidate.requires_force() && force)
-                })
-            }
-            CleanCandidate::Branch { name, .. } => {
-                delete_branch(&SystemGit, &root, name, candidate.requires_force() && force)
-            }
+            }),
+            CleanCandidate::Branch {
+                root: repo_root,
+                name,
+                ..
+            } => delete_branch(
+                &SystemGit,
+                repo_root,
+                name,
+                candidate.requires_force() && force,
+            ),
             _ => unreachable!(),
         };
         result.map_err(|error| {
