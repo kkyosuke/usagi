@@ -1,4 +1,5 @@
 //! Reuse the bounded terminal, artifact and knowledge readers on one worker.
+#[cfg(test)]
 use std::path::Path;
 use std::sync::{
     Arc,
@@ -19,9 +20,20 @@ pub(crate) struct UnifiedSearch {
 }
 
 impl UnifiedSearch {
+    #[cfg(test)]
     pub(crate) fn new(root: &Path, terminals: Box<dyn GardenInventoryPort>) -> Self {
+        Self::with_knowledge(
+            super::knowledge_search::KnowledgeSearch::new(root),
+            terminals,
+        )
+    }
+
+    pub(crate) fn with_knowledge(
+        knowledge: super::knowledge_search::KnowledgeSearch,
+        terminals: Box<dyn GardenInventoryPort>,
+    ) -> Self {
         Self {
-            knowledge: super::knowledge_search::KnowledgeSearch::new(root),
+            knowledge,
             terminals,
         }
     }

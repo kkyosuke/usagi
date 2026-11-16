@@ -1106,6 +1106,7 @@ impl BackendWorkspaceCommandPort for ProductionWorkspaceCommands {
 struct ProductionBackendFactory {
     helper_reaper: PlatformChildReaper,
     garden_reduced_motion: bool,
+    workspace_memory: Option<(PathBuf, PathBuf)>,
 }
 
 /// Filesystem adapter for the inline session-create collision hint.
@@ -1214,6 +1215,18 @@ impl Default for ProductionBackendFactory {
             garden_reduced_motion: reduced_motion_from_environment(
                 std::env::var_os("USAGI_REDUCE_MOTION").as_deref(),
             ),
+            workspace_memory: None,
+        }
+    }
+}
+
+impl ProductionBackendFactory {
+    fn build_knowledge_search(&self, root: &Path) -> super::knowledge_search::KnowledgeSearch {
+        match &self.workspace_memory {
+            Some((workspace_root, primary)) if workspace_root == root => {
+                super::knowledge_search::KnowledgeSearch::with_fallback(primary, root)
+            }
+            _ => super::knowledge_search::KnowledgeSearch::new(root),
         }
     }
 }
@@ -1236,8 +1249,8 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         &self,
         root: &Path,
     ) -> Box<dyn usagi_tui::usecase::application::unified_search::UnifiedSearchPort> {
-        Box::new(super::unified_search::UnifiedSearch::new(
-            root,
+        Box::new(super::unified_search::UnifiedSearch::with_knowledge(
+            self.build_knowledge_search(root),
             Box::new(DaemonGardenInventoryPort),
         ))
     }
@@ -1245,7 +1258,7 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         &self,
         root: &Path,
     ) -> Box<dyn usagi_tui::usecase::application::knowledge_search::KnowledgeSearchPort> {
-        Box::new(super::knowledge_search::KnowledgeSearch::new(root))
+        Box::new(self.build_knowledge_search(root))
     }
 
     fn client_build(&self) -> Option<usagi_core::infrastructure::ipc::BuildIdentity> {
@@ -1262,12 +1275,16 @@ impl ControllerBackendFactory for ProductionBackendFactory {
         host: ControllerHost,
     ) -> ControllerBackendComposition {
         let sessions = Arc::new(Mutex::new(project_backend_session_roots(snapshot)));
-        let environment_data_dir = usagi_core::infrastructure::paths::data_dir()
+        let data_dir = usagi_core::infrastructure::paths::data_dir()
             .expect("workspace launch already resolved the daemon data directory");
+        let memory_dir = data_dir
+            .join("agent-memory")
+            .join(snapshot.workspace_id.to_string());
+        self.workspace_memory = Some((snapshot.workspace.path.clone(), memory_dir));
         let store = RepoEnvironmentStore::new(
             &snapshot.workspace.path,
-            SettingsEnvironmentStore::new(environment_data_dir.clone(), &snapshot.workspace.path),
-            environment_data_dir,
+            SettingsEnvironmentStore::new(data_dir.clone(), &snapshot.workspace.path),
+            data_dir.clone(),
         );
         let pr_sessions = Arc::new(Mutex::new(snapshot.session_ids.clone()));
         let pr_pump = spawn_pr_pump(snapshot.workspace.path.clone(), Arc::clone(&pr_sessions));
@@ -1322,8 +1339,6 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             clipboard: PlatformClipboard,
         }));
         backend.dispatch(usagi_tui::usecase::application::controller::Effect::LoadSessionFavorites);
-        let data_dir = usagi_core::infrastructure::paths::data_dir()
-            .expect("workspace launch already resolved the daemon data directory");
         let (restore_connection, restore_publisher) =
             DaemonRestoreConnectionPort::channel(data_dir.clone());
         ControllerBackendComposition {
@@ -4686,8 +4701,11 @@ pub(super) fn platform_open_command(url: &str) -> Result<Command, String> {
         command.args(["--", url]);
         command
     } else if cfg!(target_os = "linux") {
+        // `xdg-open` does not accept a `--` option terminator (`xdg-open:
+        // unexpected option '--'`). Option-like targets starting with `-` are
+        // already rejected above before constructing `Command`.
         let mut command = Command::new("xdg-open");
-        command.args(["--", url]);
+        command.arg(url);
         command
     } else if cfg!(target_os = "windows") {
         // `start` is a `cmd` builtin, so it is launched through `cmd /C`. Its
@@ -4716,6 +4734,8 @@ struct PlatformBrowserOpener {
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=production_backend_factory_effect_matrix
 impl BrowserOpener for PlatformBrowserOpener {
     fn open(&mut self, url: &str) -> Result<(), String> {
+        let url = usagi_tui::usecase::application::terminal_link::validate_url(url)
+            .map_err(|_| "refusing to open a non-http(s) or invalid URL".to_owned())?;
         let mut command = platform_open_command(url)?;
         self.reaper
             .spawn(&mut command)
@@ -5340,7 +5360,14 @@ mod tests {
     #[test]
     fn knowledge_search_factory_scopes_the_reader_to_the_current_workspace() {
         let tmp = tempfile::tempdir().unwrap();
-        let factory = ProductionBackendFactory::default();
+        let mut factory = ProductionBackendFactory::default();
+        let mut port = factory.knowledge_search(tmp.path());
+        assert_eq!(
+            port.search("", std::sync::Arc::default()).documents,
+            [] as [usagi_tui::usecase::application::knowledge_search::Document; 0]
+        );
+        factory.workspace_memory =
+            Some((tmp.path().to_path_buf(), tmp.path().join("agent-memory")));
         let mut port = factory.knowledge_search(tmp.path());
         assert_eq!(
             port.search("", std::sync::Arc::default()).documents,

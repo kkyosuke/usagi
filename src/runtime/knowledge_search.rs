@@ -12,11 +12,28 @@ use usagi_tui::usecase::application::knowledge_search::{
 
 pub(crate) struct KnowledgeSearch {
     root: PathBuf,
+    fallback: PathBuf,
 }
 
 impl KnowledgeSearch {
     pub(crate) fn new(root: &Path) -> Self {
-        Self { root: root.into() }
+        Self::with_fallback(root, root)
+    }
+
+    pub(crate) fn with_fallback(root: &Path, fallback: &Path) -> Self {
+        Self {
+            root: root.into(),
+            fallback: fallback.into(),
+        }
+    }
+
+    fn active_root(&self) -> &Path {
+        if self.root.join(".usagi/memory").exists() || !self.fallback.join(".usagi/memory").exists()
+        {
+            &self.root
+        } else {
+            &self.fallback
+        }
     }
 }
 
@@ -27,7 +44,7 @@ impl KnowledgeSearchPort for KnowledgeSearch {
             return result;
         }
         match memory::search(
-            &MemoryStore::new(&self.root).with_lock_cancellation(Arc::clone(&cancelled)),
+            &MemoryStore::new(self.active_root()).with_lock_cancellation(Arc::clone(&cancelled)),
             query,
             &memory::MemoryFilter::default(),
         ) {
@@ -69,7 +86,8 @@ impl KnowledgeSearchPort for KnowledgeSearch {
                         .is_some_and(|extension| extension == "md")
             })
             .ok_or_else(|| "Invalid Memory source".to_owned())?;
-        super::file_preview::read_file(&self.root, path).map_err(|error| error.message().to_owned())
+        super::file_preview::read_file(self.active_root(), path)
+            .map_err(|error| error.message().to_owned())
     }
 }
 

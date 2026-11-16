@@ -130,11 +130,12 @@ fn check_from_result(
     required: bool,
     result: Result<String, String>,
 ) -> DiagnosticCheck {
+    use usagi_core::domain::presentation_text::sanitize_presentation_line;
     match result {
         Ok(detail) => DiagnosticCheck {
             name,
             status: CheckStatus::Pass,
-            detail,
+            detail: sanitize_presentation_line(&detail),
         },
         Err(detail) => DiagnosticCheck {
             name,
@@ -143,7 +144,7 @@ fn check_from_result(
             } else {
                 CheckStatus::Warning
             },
-            detail,
+            detail: sanitize_presentation_line(&detail),
         },
     }
 }
@@ -270,7 +271,7 @@ mod tests {
     #[test]
     fn distinguishes_optional_warnings_from_required_failures() {
         let mut port = fake(
-            Err("not found"),
+            Err("not found\u{1b}[31m\nspoof"),
             Ok("claude 2.0"),
             Err("not found"),
             Err("not found"),
@@ -281,6 +282,10 @@ mod tests {
 
         assert!(!report.is_healthy());
         assert_eq!(report.checks[0].status, CheckStatus::Fail);
+        assert_eq!(
+            report.checks[0].detail,
+            "not found\u{fffd}[31m\u{fffd}spoof"
+        );
         assert_eq!(report.checks[1].status, CheckStatus::Pass);
         assert_eq!(report.checks[2].status, CheckStatus::Warning);
         assert_eq!(report.checks[3].status, CheckStatus::Warning);

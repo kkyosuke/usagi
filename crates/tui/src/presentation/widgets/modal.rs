@@ -704,6 +704,7 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
     let mut column = 0usize;
     let mut selected = false;
     let mut last_glyph_emitted = false;
+    let mut pending_marker = None;
     let mut carries_style = false;
     let mut chars = text.chars();
 
@@ -723,6 +724,16 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
                 // suffix は行の途中から始まる。そこまでの SGR を再生すれば、
                 // modal の手前で reset しても suffix の元の色を復元できる。
                 escapes_before.push_str(&sequence);
+            }
+            continue;
+        }
+        if matches!(
+            ch,
+            crate::presentation::frame::INPUT_CURSOR_MARKER
+                | crate::presentation::frame::TERMINAL_CURSOR_MARKER
+        ) {
+            if column >= start && column < end {
+                pending_marker = Some(ch);
             }
             continue;
         }
@@ -755,8 +766,12 @@ pub(crate) fn columns(text: &str, start: usize, width: usize) -> String {
             let overlap_start = column.max(start);
             let overlap_end = char_end.min(end);
             out.push_str(&" ".repeat(overlap_end.saturating_sub(overlap_start)));
+            pending_marker = None;
             last_glyph_emitted = false;
         } else {
+            if let Some(marker) = pending_marker.take() {
+                out.push(marker);
+            }
             out.push(ch);
             last_glyph_emitted = true;
         }
@@ -1287,11 +1302,33 @@ mod tests {
 
     #[test]
     fn column_slice_keeps_zero_width_combining_characters() {
+        use crate::presentation::frame::{INPUT_CURSOR_MARKER, TERMINAL_CURSOR_MARKER};
         let sliced = columns("a\u{301}b", 0, 2);
         assert_eq!(display_width(&sliced), 2);
         assert!(sliced.contains('\u{301}'));
 
         let clipped_wide = columns("か\u{3099}b", 1, 2);
         assert_eq!(clipped_wide, " b");
+
+        // Cell-leading cursor markers belong to the cell that follows them, not
+        // the preceding cell, and preserve leading SGR state on the suffix.
+        let with_markers = format!(
+            "\u{1b}[32m{INPUT_CURSOR_MARKER}a{TERMINAL_CURSOR_MARKER}b{INPUT_CURSOR_MARKER}c\u{1b}[0m"
+        );
+        let prefix = columns(&with_markers, 0, 1);
+        assert!(prefix.contains(INPUT_CURSOR_MARKER));
+        assert!(!prefix.contains(TERMINAL_CURSOR_MARKER));
+        let middle = columns(&with_markers, 1, 1);
+        assert!(!middle.contains(INPUT_CURSOR_MARKER));
+        assert!(middle.contains(TERMINAL_CURSOR_MARKER));
+        assert!(middle.starts_with("\u{1b}[32m"));
+
+        // A cursor marker on a wide character clipped at `end` is dropped along
+        // with the half-cell, while an unclipped wide character preserves it.
+        assert_eq!(columns(&format!("{TERMINAL_CURSOR_MARKER}か"), 0, 1), " ");
+        assert_eq!(
+            columns(&format!("{TERMINAL_CURSOR_MARKER}か"), 0, 2),
+            format!("{TERMINAL_CURSOR_MARKER}か")
+        );
     }
 }

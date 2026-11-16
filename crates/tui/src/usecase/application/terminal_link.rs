@@ -189,14 +189,24 @@ fn columns_of(row: &str, width: usize) -> Vec<char> {
     cols
 }
 
+fn is_table_border(row: &[char], index: usize) -> bool {
+    match row[index] {
+        '│' | '┃' | '║' => true,
+        '|' => {
+            let left_padded = index == 0 || row[index - 1] == ' ';
+            let right_padded = index + 1 == row.len() || row[index + 1] == ' ';
+            left_padded && right_padded
+        }
+        _ => false,
+    }
+}
+
 /// Content ranges between aligned vertical table borders, with the conventional
 /// single space of cell padding removed. Requiring both padding columns keeps
 /// a pipe embedded in a URL from being treated as a table boundary.
 fn table_ranges(row: &[char]) -> Vec<Range<usize>> {
-    let borders: Vec<_> = row
-        .iter()
-        .enumerate()
-        .filter_map(|(index, ch)| matches!(ch, '│' | '┃' | '║' | '|').then_some(index))
+    let borders: Vec<_> = (0..row.len())
+        .filter(|&index| is_table_border(row, index))
         .collect();
     borders
         .windows(2)
@@ -206,6 +216,22 @@ fn table_ranges(row: &[char]) -> Vec<Range<usize>> {
                 .then_some(left + 2..right - 1)
         })
         .collect()
+}
+
+/// Whether two rendered rows belong to the same bordered table section, so
+/// windowed link scanning includes adjacent table rows.
+#[must_use]
+pub fn table_rows_connect(upper: &str, lower: &str) -> bool {
+    let width = upper
+        .chars()
+        .map(char_width)
+        .sum::<usize>()
+        .max(lower.chars().map(char_width).sum());
+    if width == 0 {
+        return false;
+    }
+    let upper_ranges = table_ranges(&columns_of(upper, width));
+    !upper_ranges.is_empty() && upper_ranges == table_ranges(&columns_of(lower, width))
 }
 
 /// Independent rectangular grids plus their original viewport origin. Table
@@ -705,6 +731,26 @@ mod tests {
             url_at(&view, at(0, 0)).as_deref(),
             Some("https://example.test/a|b|c")
         );
+        // An unpadded interior `|` inside one cell (such as `a|b` or a regex)
+        // must not change the table's column geometry relative to wrapped rows.
+        let view = grid(
+            32,
+            &[
+                "| https://example.test/long | a|b |",
+                "| /path                     | c   |",
+            ],
+        );
+        assert_eq!(
+            url_at(&view, at(0, 2)).as_deref(),
+            Some("https://example.test/long/path")
+        );
+        assert_eq!(
+            url_at(&view, at(1, 2)).as_deref(),
+            Some("https://example.test/long/path")
+        );
+        assert!(table_rows_connect(&view[0], &view[1]));
+        assert!(!table_rows_connect("", ""));
+        assert!(!table_rows_connect(&view[0], "ordinary text"));
     }
 
     #[test]

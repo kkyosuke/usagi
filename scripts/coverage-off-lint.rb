@@ -131,8 +131,8 @@ end
 def debt_owner(path)
   case path
   when %r{\Acrates/core/} then ["core", "#485"]
-  when %r{\Acrates/daemon/}, %r{\Asrc/runtime/daemon\.rs\z} then ["daemon", "#486"]
-  when %r{\Acrates/tui/}, %r{\Asrc/(runtime/tui|tui_input)\.rs\z} then ["tui", "#487"]
+  when %r{\Acrates/daemon/}, %r{\Asrc/runtime/daemon(?:\.rs|/)} then ["daemon", "#486"]
+  when %r{\Acrates/tui/}, %r{\Asrc/(?:runtime/tui|tui_input)(?:\.rs|/)} then ["tui", "#487"]
   else ["root-cli", "root-cli-follow-up"]
   end
 end
