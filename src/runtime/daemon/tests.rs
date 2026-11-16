@@ -12661,3 +12661,16 @@ fn doctor_repair_retires_a_well_formed_locator_whose_endpoint_is_gone() {
     // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
     unsafe { ManuallyDrop::drop(&mut listener) };
 }
+
+#[test]
+fn multi_repo_git_policy_refuses_a_session_missing_a_nested_checkout() {
+    // The workspace declares `repo-a`, but the session tree has no checkout for
+    // it: one unprovable repository refuses the whole policy.
+    std::fs::create_dir_all("target").unwrap();
+    let workspace = tempfile::tempdir_in("target").unwrap();
+    std::fs::create_dir_all(workspace.path().join("repo-a/.git")).unwrap();
+    let session = workspace.path().join(".usagi/sessions/s1");
+    std::fs::create_dir_all(&session).unwrap();
+
+    assert!(agent_provisioning::session_git_policy(workspace.path(), &session).is_err());
+}
