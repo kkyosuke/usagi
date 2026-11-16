@@ -5802,6 +5802,22 @@ impl GitRunner for MismatchedBranchGit {
     }
 }
 
+/// Every nested repository reports the same session branch.
+struct MatchingBranchGit;
+
+impl GitRunner for MatchingBranchGit {
+    fn run(&self, cwd: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+        if args.first() == Some(&"symbolic-ref") {
+            return Ok(GitOutput {
+                success: true,
+                stdout: "usagi/orphan\n".to_owned(),
+                stderr: String::new(),
+            });
+        }
+        MismatchedBranchGit.run(cwd, args)
+    }
+}
+
 #[test]
 fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
     let tmp = tempfile::tempdir().unwrap();
@@ -5925,6 +5941,15 @@ fn multi_repo_removal_identity_and_orphan_inspection_aggregate_across_repositori
     assert_eq!(mismatched.branch, None);
     assert_eq!(mismatched.dirty, Some(false));
     assert_eq!(mismatched.unmerged_commits, Some(0));
+
+    let matching = inspect_orphan_with(
+        &MatchingBranchGit,
+        &OccupiedMultiRepoIo { fail_repos: false },
+        Path::new("/repo"),
+        "orphan",
+    );
+    assert!(matching.linked_worktree);
+    assert_eq!(matching.branch.as_deref(), Some("usagi/orphan"));
 
     let failed_io = inspect_orphan_with(
         &MismatchedBranchGit,

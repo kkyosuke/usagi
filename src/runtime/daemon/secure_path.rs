@@ -167,14 +167,18 @@ pub(super) fn session_git_policy(
     }
     let mut writable_roots = Vec::new();
     let mut read_only_roots = Vec::new();
-    for relative in relatives {
-        if let Some(policy) = single_repo_session_git_policy(
-            &workspace_root.join(&relative),
-            &worktree.join(&relative),
-        )? {
-            writable_roots.extend(policy.writable_roots);
-            read_only_roots.extend(policy.read_only_roots);
-        }
+    // A repository that grants no Git authority contributes nothing; flattening
+    // the per-repository answers keeps that case a plain absence instead of a
+    // separate control path.
+    let policies = relatives
+        .iter()
+        .map(|relative| {
+            single_repo_session_git_policy(&workspace_root.join(relative), &worktree.join(relative))
+        })
+        .collect::<Result<Vec<_>, ()>>()?;
+    for policy in policies.into_iter().flatten() {
+        writable_roots.extend(policy.writable_roots);
+        read_only_roots.extend(policy.read_only_roots);
     }
     Ok((!writable_roots.is_empty()).then_some(SessionGitPolicy {
         writable_roots,

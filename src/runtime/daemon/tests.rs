@@ -12603,3 +12603,58 @@ fn doctor_repair_recovers_inaccessible_dirs_corrupt_records_and_comma_separated_
     assert!(!record_path.exists());
     assert!(!sock_path.exists());
 }
+
+#[test]
+fn doctor_repair_keeps_a_live_owner_record_and_skips_symlinked_nodes() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = tempfile::TempDir::new_in("/tmp").unwrap();
+    let data = temp.path().join("data");
+    let daemon = data.join("daemon");
+    std::fs::create_dir_all(&daemon).unwrap();
+    let store = DaemonRecordStore::new(FsRecordFile {
+        path: daemon.join("daemon.json"),
+    });
+    // The record names this very process with its exact start identity, so the
+    // owner is provably alive: repair must neither clear it nor sweep around it.
+    let identity = ExactProcessControl
+        .process_start_identity(std::process::id())
+        .unwrap();
+    let record = DaemonRecord::identified(std::process::id(), identity);
+    store.save(&record).unwrap();
+
+    // A symlinked settings file is never followed: its target keeps its mode.
+    let target = temp.path().join("settings-target.json");
+    std::fs::write(&target, b"{}").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::os::unix::fs::symlink(&target, data.join("settings.json")).unwrap();
+
+    repair_non_lifecycle_doctor_state(&data);
+
+    assert_eq!(store.load().unwrap(), Some(record));
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+}
+
+#[test]
+fn doctor_repair_retires_a_well_formed_locator_whose_endpoint_is_gone() {
+    use std::mem::ManuallyDrop;
+
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let data = directory.path();
+    let daemon = data.join("daemon");
+    let mut listener = ManuallyDrop::new(SecureUnixListener::bind(data, ipc_generation()).unwrap());
+    let socket = daemon.join(&listener.locator().endpoint);
+    let current = daemon.join("current.json");
+    std::fs::remove_file(&socket).unwrap();
+    // The locator itself is intact; only its endpoint is unreachable.
+    assert!(read_locator(&daemon).is_ok());
+
+    repair_non_lifecycle_doctor_state(data);
+
+    assert!(!current.exists());
+    // SAFETY: the listener was not moved or dropped; cleanup is idempotent.
+    unsafe { ManuallyDrop::drop(&mut listener) };
+}

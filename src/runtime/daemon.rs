@@ -3762,16 +3762,19 @@ fn repair_owned_node_permissions(path: &Path, is_dir: bool, mode: u32) {
                 .custom_flags(flags)
                 .open(path)
         });
-    if let Ok(file) = file
-        && file.metadata().is_ok_and(|opened| {
-            opened.dev() == meta.dev()
-                && opened.ino() == meta.ino()
-                && opened.uid() == euid
-                && (is_dir || opened.nlink() == 1)
+    // Only the exact inode observed above is repaired; a node swapped in
+    // between the observation and the open is left untouched.
+    let _ = file
+        .ok()
+        .filter(|file| {
+            file.metadata().is_ok_and(|opened| {
+                opened.dev() == meta.dev()
+                    && opened.ino() == meta.ino()
+                    && opened.uid() == euid
+                    && (is_dir || opened.nlink() == 1)
+            })
         })
-    {
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
-    }
+        .map(|file| file.set_permissions(std::fs::Permissions::from_mode(mode)));
 }
 
 pub(crate) fn repair_doctor_data_dir(data_dir: &Path) {
