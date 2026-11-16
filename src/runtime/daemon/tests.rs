@@ -12612,6 +12612,9 @@ fn doctor_repair_keeps_a_live_owner_record_and_skips_symlinked_nodes() {
     let data = temp.path().join("data");
     let daemon = data.join("daemon");
     std::fs::create_dir_all(&daemon).unwrap();
+    for dir in [&data, &daemon] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let store = DaemonRecordStore::new(FsRecordFile {
         path: daemon.join("daemon.json"),
     });
