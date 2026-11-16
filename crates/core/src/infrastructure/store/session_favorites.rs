@@ -17,6 +17,8 @@ struct Favorites {
     sessions: BTreeSet<SessionId>,
 }
 
+const MAX_FAVORITES_BYTES: u64 = 1024 * 1024;
+
 /// Workspace-local preferences keyed by session incarnation, never by name.
 pub struct SessionFavoritesStore {
     dir: PathBuf,
@@ -45,7 +47,7 @@ impl SessionFavoritesStore {
             // A FIFO must not wait for a writer before its type can be checked.
             options.custom_flags(libc::O_NONBLOCK);
         }
-        let mut file = match options.open(&path) {
+        let file = match options.open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(BTreeSet::new());
@@ -64,8 +66,14 @@ impl SessionFavoritesStore {
             path.display()
         );
         let mut text = String::new();
-        file.read_to_string(&mut text)
+        file.take(MAX_FAVORITES_BYTES + 1)
+            .read_to_string(&mut text)
             .context(format!("failed to read {}", path.display()))?;
+        anyhow::ensure!(
+            text.len() as u64 <= MAX_FAVORITES_BYTES,
+            "session favorites exceeds the {MAX_FAVORITES_BYTES}-byte limit: {}",
+            path.display()
+        );
         let favorites: Favorites = json_file::decode_supported_version(&path, &text)?;
         Ok(favorites.sessions)
     }
@@ -194,7 +202,13 @@ mod tests {
         std::fs::write(&path, "broken").unwrap();
         assert!(store.load().is_err());
         assert!(store.toggle(SessionId::new()).is_err());
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
+
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_FAVORITES_BYTES + 1)
+            .unwrap();
+        assert!(store.load().is_err());
     }
 
     #[test]
