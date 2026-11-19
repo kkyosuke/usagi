@@ -3095,45 +3095,59 @@ fn poison_lock(runtime: &Arc<Mutex<SessionRuntime>>) {
 
 #[test]
 fn reconnect_during_create_replays_the_final_outcome() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    struct PausedGit {
+        branch_started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        git: FakeSessionGit,
+    }
+    impl GitRunner for PausedGit {
+        fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            if args.starts_with(&["branch", "--"]) {
+                self.branch_started.send(())?;
+                self.release.recv_timeout(Duration::from_secs(5))?;
+            }
+            self.git.run(repo, args)
+        }
+    }
+
     for success in [true, false] {
         let (_tmp, rt) = runtime(FakeSessionGit::ok());
         let runtime = Mutex::new(rt);
         let id = OperationId::new();
         let operation = id.to_string();
         let payload = json!({"name":"one"});
-        let writer = runtime.lock().unwrap().create_lock(id);
 
         std::thread::scope(|scope| {
-            let guard = writer.lock().unwrap();
-            let build = pending_create(
-                runtime
-                    .lock()
-                    .unwrap()
-                    .begin_create(CreateOrigin::Direct, &operation, &payload)
-                    .unwrap(),
-            )
-            .unwrap();
-            let retry = scope
-                .spawn(|| perform_create(&runtime, &FakeSessionGit::fail(), &operation, &payload));
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while Arc::strong_count(&writer) == 1 {
-                assert!(!retry.is_finished() && std::time::Instant::now() < deadline);
-                std::thread::yield_now();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let git = PausedGit {
+                branch_started: started_tx,
+                release: release_rx,
+                git: FakeSessionGit(success),
+            };
+            let create = |git: &dyn GitRunner| perform_create(&runtime, git, &operation, &payload);
+            let writer = scope.spawn(move || create(&git));
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let retry = scope.spawn(move || create(&FakeSessionGit::fail()));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while runtime.lock().unwrap().create_locks[&id].strong_count() < 2 {
+                assert!(!retry.is_finished() && Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
             }
-            let outcome = SessionRuntime::execute_create(&FakeSessionGit(success), &build);
-            let completed = runtime.lock().unwrap().finish_create(*build, outcome);
-            drop(guard);
+            release_tx.send(()).unwrap();
 
+            let completed = writer.join().unwrap();
             let replay = retry.join().unwrap();
             if success {
-                let Ok(SessionCreateCompletion::Done(expected)) = completed else {
-                    panic!("expected completed create");
-                };
+                let expected = completed.unwrap();
                 let replay = replay.unwrap();
                 assert_eq!(replay.operation_id, expected.operation_id);
                 assert_eq!(replay.body, expected.body);
             } else {
-                let expected = completed.err().unwrap().safe_message();
+                let expected = completed.unwrap_err().safe_message();
                 assert_eq!(replay, Err(SessionRuntimeError::DurableFailure(expected)));
             }
         });
