@@ -56,6 +56,8 @@ durable reducer と store は accepted event ごとに `state_revision` を増�
 session incarnation で fence する。IPC の create/remove は daemon が reservation を永続化してから worktree
 effect を実行し、同じ daemon generation・operation・session attempt・revision の completion だけを反映する。
 失敗した effect は safe failure として残り、client が local worktree 操作へ fallback しない。
+worktree 作成や setup 中に client が再接続して同じ operation ID を再送した場合、daemon は先行要求の完了を待ち、
+記録済みの結果を返す。待機中も別の operation ID の作成と session 一覧の取得は進行できる。
 
 create の重い Git worktree 構築（`git worktree add`）は**共有 session lock を解放した状態で実行する**。lock を握るのは fast な durable transition（reservation・completion の永続化）だけであり、その間に session 一覧・terminal poll・user-decision 一覧など他 connection の read が同じ lock 待ちで固まらない。remove はさらに一歩進めて、`Deleting` への遷移だけで受理を返し、worktree 撤去（`git worktree remove` と session tree の除去）を daemon 所有の worker へ渡す（[session teardown worker](#session-teardown-worker)）。したがって長い worktree 操作の最中も daemon は応答し続け、TUI の描画・入力ループが session 作成・削除で凍結しない。
 

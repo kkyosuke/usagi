@@ -3094,6 +3094,53 @@ fn poison_lock(runtime: &Arc<Mutex<SessionRuntime>>) {
 }
 
 #[test]
+fn reconnect_during_create_replays_the_final_outcome() {
+    for success in [true, false] {
+        let (_tmp, rt) = runtime(FakeSessionGit::ok());
+        let runtime = Mutex::new(rt);
+        let id = OperationId::new();
+        let operation = id.to_string();
+        let payload = json!({"name":"one"});
+        let writer = runtime.lock().unwrap().create_lock(id);
+
+        std::thread::scope(|scope| {
+            let guard = writer.lock().unwrap();
+            let build = pending_create(
+                runtime
+                    .lock()
+                    .unwrap()
+                    .begin_create(CreateOrigin::Direct, &operation, &payload)
+                    .unwrap(),
+            )
+            .unwrap();
+            let retry = scope
+                .spawn(|| perform_create(&runtime, &FakeSessionGit::fail(), &operation, &payload));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while Arc::strong_count(&writer) == 1 {
+                assert!(!retry.is_finished() && std::time::Instant::now() < deadline);
+                std::thread::yield_now();
+            }
+            let outcome = SessionRuntime::execute_create(&FakeSessionGit(success), &build);
+            let completed = runtime.lock().unwrap().finish_create(*build, outcome);
+            drop(guard);
+
+            let replay = retry.join().unwrap();
+            if success {
+                let Ok(SessionCreateCompletion::Done(expected)) = completed else {
+                    panic!("expected completed create");
+                };
+                let replay = replay.unwrap();
+                assert_eq!(replay.operation_id, expected.operation_id);
+                assert_eq!(replay.body, expected.body);
+            } else {
+                let expected = completed.err().unwrap().safe_message();
+                assert_eq!(replay, Err(SessionRuntimeError::DurableFailure(expected)));
+            }
+        });
+    }
+}
+
+#[test]
 fn perform_create_releases_the_session_lock_while_building_the_worktree() {
     let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
