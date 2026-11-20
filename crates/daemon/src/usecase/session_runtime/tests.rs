@@ -3094,6 +3094,67 @@ fn poison_lock(runtime: &Arc<Mutex<SessionRuntime>>) {
 }
 
 #[test]
+fn reconnect_during_create_replays_the_final_outcome() {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    struct PausedGit {
+        branch_started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+        git: FakeSessionGit,
+    }
+    impl GitRunner for PausedGit {
+        fn run(&self, repo: &Path, args: &[&str]) -> anyhow::Result<GitOutput> {
+            if args.starts_with(&["branch", "--"]) {
+                self.branch_started.send(())?;
+                self.release.recv_timeout(Duration::from_secs(5))?;
+            }
+            self.git.run(repo, args)
+        }
+    }
+
+    for success in [true, false] {
+        let (_tmp, rt) = runtime(FakeSessionGit::ok());
+        let runtime = Mutex::new(rt);
+        let id = OperationId::new();
+        let operation = id.to_string();
+        let payload = json!({"name":"one"});
+
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let git = PausedGit {
+                branch_started: started_tx,
+                release: release_rx,
+                git: FakeSessionGit(success),
+            };
+            let create = |git: &dyn GitRunner| perform_create(&runtime, git, &operation, &payload);
+            let writer = scope.spawn(move || create(&git));
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let retry = scope.spawn(move || create(&FakeSessionGit::fail()));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while runtime.lock().unwrap().create_locks[&id].strong_count() < 2 {
+                assert!(!retry.is_finished() && Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            release_tx.send(()).unwrap();
+
+            let completed = writer.join().unwrap();
+            let replay = retry.join().unwrap();
+            if success {
+                let expected = completed.unwrap();
+                let replay = replay.unwrap();
+                assert_eq!(replay.operation_id, expected.operation_id);
+                assert_eq!(replay.body, expected.body);
+            } else {
+                let expected = completed.unwrap_err().safe_message();
+                assert_eq!(replay, Err(SessionRuntimeError::DurableFailure(expected)));
+            }
+        });
+    }
+}
+
+#[test]
 fn perform_create_releases_the_session_lock_while_building_the_worktree() {
     let (_tmp, rt) = runtime(FakeSessionGit::ok());
     let runtime = Arc::new(Mutex::new(rt));
