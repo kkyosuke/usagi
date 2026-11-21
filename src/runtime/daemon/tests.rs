@@ -8391,6 +8391,124 @@ fn session_git_policy_anchors_authority_to_the_registered_worktree() {
     assert!(session_git_policy(&fixture.path().join("repo"), &worktree).is_err());
 }
 
+/// Lay out one child repository of a Multi-Repo workspace together with the
+/// linked worktree a session holds for it, returning `(common, admin, worktree)`.
+fn multi_repo_session_worktree(
+    workspace: &Path,
+    session: &Path,
+    relative: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let common = workspace.join(relative).join(".git");
+    let git_dir = common.join("worktrees").join("session");
+    let worktree = session.join(relative);
+    for path in [&git_dir, &common.join("objects"), &worktree] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", git_dir.display()),
+    )
+    .unwrap();
+    std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+    std::fs::write(
+        git_dir.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )
+    .unwrap();
+    (common, git_dir, worktree)
+}
+
+#[test]
+fn session_git_policy_grants_every_child_repository_of_a_multi_repo_session() {
+    std::fs::create_dir_all("target").unwrap();
+    let fixture = tempfile::tempdir_in("target").unwrap();
+    let workspace = fixture.path().join("workspace");
+    let session = workspace.join(".usagi/sessions/session");
+    let (core_common, core_admin, core_worktree) =
+        multi_repo_session_worktree(&workspace, &session, "core");
+    let (infra_common, infra_admin, infra_worktree) =
+        multi_repo_session_worktree(&workspace, &session, "group/infra");
+    // A repository cloned after the session was created has no worktree in it.
+    std::fs::create_dir_all(workspace.join("late/.git")).unwrap();
+    std::fs::create_dir_all(session.join("late")).unwrap();
+    std::fs::write(workspace.join("README.md"), "plain file").unwrap();
+
+    let policy = session_git_policy(&workspace, &session).unwrap().unwrap();
+    let grant = |common: &Path, admin: &Path| {
+        [
+            admin.canonicalize().unwrap(),
+            common.join("objects").canonicalize().unwrap(),
+            common.join("refs/heads/usagi").canonicalize().unwrap(),
+            common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+        ]
+    };
+    assert_eq!(
+        policy.writable_roots,
+        [
+            grant(&core_common, &core_admin),
+            grant(&infra_common, &infra_admin)
+        ]
+        .concat()
+    );
+    let pointers = |admin: &Path, worktree: &Path| {
+        [
+            worktree.join(".git").canonicalize().unwrap(),
+            admin.join("commondir").canonicalize().unwrap(),
+            admin.join("gitdir").canonicalize().unwrap(),
+        ]
+    };
+    assert_eq!(
+        policy.read_only_roots,
+        [
+            pointers(&core_admin, &core_worktree),
+            pointers(&infra_admin, &infra_worktree)
+        ]
+        .concat()
+    );
+    for common in [&core_common, &infra_common] {
+        assert!(
+            !policy
+                .writable_roots
+                .contains(&common.canonicalize().unwrap())
+        );
+    }
+    assert!(
+        !policy
+            .writable_roots
+            .iter()
+            .any(|root| root.starts_with(workspace.join("late").canonicalize().unwrap())),
+        "a repository without a session worktree contributes no authority"
+    );
+
+    // The session tree is agent-writable, so a marker that names another
+    // repository's admin directory is refused instead of followed.
+    std::fs::write(
+        core_worktree.join(".git"),
+        format!("gitdir: {}\n", infra_admin.display()),
+    )
+    .unwrap();
+    assert!(session_git_policy(&workspace, &session).is_err());
+
+    // A standalone repository planted in place of the worktree is no authority.
+    std::fs::remove_file(core_worktree.join(".git")).unwrap();
+    std::fs::create_dir(core_worktree.join(".git")).unwrap();
+    assert!(session_git_policy(&workspace, &session).is_err());
+
+    // A workspace whose only repositories have no session worktree, and one
+    // without any repository, need no grant outside the session root.
+    std::fs::remove_dir(core_worktree.join(".git")).unwrap();
+    std::fs::remove_file(infra_worktree.join(".git")).unwrap();
+    assert!(session_git_policy(&workspace, &session).unwrap().is_none());
+    let plain = fixture.path().join("plain");
+    let plain_session = plain.join(".usagi/sessions/session");
+    std::fs::create_dir_all(&plain_session).unwrap();
+    assert!(
+        session_git_policy(&plain, &plain_session)
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn a_session_claude_is_confined_to_its_worktree_and_gets_the_guard_hook() {
     let usagi = Path::new("/opt/usagi/bin/usagi");

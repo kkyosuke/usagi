@@ -17,6 +17,8 @@ use super::{
     claude_product_mcp_arguments, claude_sandbox, codex_product_mcp_arguments,
     launch_system_prompt, paths, scoped_settings_json, user_env,
 };
+use usagi_daemon::infrastructure::session_worktree::SystemSessionWorktreeIo;
+use usagi_daemon::usecase::session_runtime::SessionWorktreeIo as _;
 
 mod agy;
 pub(super) use agy::RootAgyProvisioner;
@@ -606,6 +608,11 @@ pub(super) struct SessionGitPolicy {
 /// Resolve the narrow Git metadata set a linked session worktree needs for a
 /// normal `git add` / `git commit` transaction, keeping its `.git` file and
 /// worktree-admin indirection pointers read-only.
+///
+/// A Multi-Repo workspace is not a repository itself: its session root is a
+/// plain directory mirroring the workspace, with one linked worktree per child
+/// repository. Each of those worktrees receives the same narrow grant, anchored
+/// to the child repository the daemon enumerates below the workspace root.
 pub(super) fn session_git_policy(
     workspace_root: &Path,
     worktree: &Path,
@@ -615,7 +622,9 @@ pub(super) fn session_git_policy(
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return match std::fs::symlink_metadata(workspace_root.join(".git")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    multi_repo_session_git_policy(workspace_root, worktree)
+                }
                 _ => Err(()),
             };
         }
@@ -630,6 +639,50 @@ pub(super) fn session_git_policy(
             Err(())
         };
     }
+    linked_worktree_git_policy(workspace_root, worktree).map(Some)
+}
+
+/// Union the per-repository grants of a Multi-Repo session.
+///
+/// The repository set comes from the workspace root, which the session cannot
+/// write, never from the agent-writable session tree. A child repository with
+/// no worktree marker in the session (cloned after the session was created)
+/// contributes no authority; a marker that is present must pass the same
+/// validation as a single-repository session or the launch is refused.
+fn multi_repo_session_git_policy(
+    workspace_root: &Path,
+    session_root: &Path,
+) -> Result<Option<SessionGitPolicy>, ()> {
+    let repositories = SystemSessionWorktreeIo
+        .workspace_repositories(workspace_root)
+        .map_err(|_| ())?;
+    let mut policy = SessionGitPolicy {
+        writable_roots: Vec::new(),
+        read_only_roots: Vec::new(),
+    };
+    for relative in repositories
+        .iter()
+        .filter(|relative| !relative.as_os_str().is_empty())
+    {
+        let worktree = session_root.join(relative);
+        match std::fs::symlink_metadata(worktree.join(".git")) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            _ => return Err(()),
+        }
+        let nested = linked_worktree_git_policy(&workspace_root.join(relative), &worktree)?;
+        policy.writable_roots.extend(nested.writable_roots);
+        policy.read_only_roots.extend(nested.read_only_roots);
+    }
+    Ok((!policy.writable_roots.is_empty()).then_some(policy))
+}
+
+/// The grant for one linked worktree whose `.git` marker is a regular file.
+fn linked_worktree_git_policy(
+    workspace_root: &Path,
+    worktree: &Path,
+) -> Result<SessionGitPolicy, ()> {
+    let marker = worktree.join(".git");
     let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
     let common = session_git_common_dir(worktree)?.ok_or(())?;
     let expected_common = session_git_common_dir(workspace_root)?.ok_or(())?;
@@ -656,10 +709,10 @@ pub(super) fn session_git_policy(
     for root in &writable_roots {
         validate_owned_directory(root).map_err(|_| ())?;
     }
-    Ok(Some(SessionGitPolicy {
+    Ok(SessionGitPolicy {
         writable_roots,
         read_only_roots,
-    }))
+    })
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e
