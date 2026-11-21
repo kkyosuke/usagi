@@ -68,9 +68,8 @@ fn multi_repo_session_git_policy(
     workspace_root: &Path,
     session_root: &Path,
 ) -> Result<Option<SessionGitPolicy>, ()> {
-    let repositories = SystemSessionWorktreeIo
-        .workspace_repositories(workspace_root)
-        .map_err(|_| ())?;
+    let io = SystemSessionWorktreeIo;
+    let repositories = io.workspace_repositories(workspace_root).map_err(|_| ())?;
     let mut policy = SessionGitPolicy {
         writable_roots: Vec::new(),
         read_only_roots: Vec::new(),
