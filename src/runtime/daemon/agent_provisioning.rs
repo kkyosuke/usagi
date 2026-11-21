@@ -5,8 +5,7 @@
 //! orchestration remain in the parent composition module.
 
 use super::secure_path::{
-    InvalidOwnedDirectory, ensure_owned_subdirectories, tighten_owned_directories,
-    validate_owned_directory, validate_owned_path,
+    InvalidOwnedDirectory, tighten_owned_directories, validate_owned_directory, validate_owned_path,
 };
 use super::{
     AGENT_PHASE_HOOK_EVENTS, Arc, BTreeMap, BTreeSet, ClaudeProvision, ClaudeProvisionFailure,
@@ -19,6 +18,7 @@ use super::{
 };
 
 mod agy;
+mod session_git;
 pub(super) use agy::RootAgyProvisioner;
 #[cfg(test)]
 pub(super) use agy::{
@@ -26,6 +26,7 @@ pub(super) use agy::{
     agy_workspace_arguments, agy_workspace_documents, materialize_agy_workspace,
     prepare_agy_writable_paths, publish_agy_workspace_alias,
 };
+pub(super) use session_git::{SessionGitPolicy, session_git_policy};
 
 #[coverage(off)] // coverage: reason=composition owner=daemon expires=2027-01-31 tests=production_role_prompt_contract_reaches_every_shipping_agent_argv
 fn working_directories(
@@ -595,71 +596,6 @@ pub(super) fn session_git_common_dir(workspace_root: &Path) -> Result<Option<Pat
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(()),
     }
-}
-
-/// Git authority granted to one linked session worktree.
-pub(super) struct SessionGitPolicy {
-    pub(super) writable_roots: Vec<PathBuf>,
-    pub(super) read_only_roots: Vec<PathBuf>,
-}
-
-/// Resolve the narrow Git metadata set a linked session worktree needs for a
-/// normal `git add` / `git commit` transaction, keeping its `.git` file and
-/// worktree-admin indirection pointers read-only.
-pub(super) fn session_git_policy(
-    workspace_root: &Path,
-    worktree: &Path,
-) -> Result<Option<SessionGitPolicy>, ()> {
-    let marker = worktree.join(".git");
-    let marker_metadata = match std::fs::symlink_metadata(&marker) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return match std::fs::symlink_metadata(workspace_root.join(".git")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                _ => Err(()),
-            };
-        }
-        Err(_) => return Err(()),
-    };
-    if !marker_metadata.file_type().is_file() {
-        let workspace_root = workspace_root.canonicalize().map_err(|_| ())?;
-        let worktree = worktree.canonicalize().map_err(|_| ())?;
-        return if marker_metadata.file_type().is_dir() && worktree == workspace_root {
-            Ok(None)
-        } else {
-            Err(())
-        };
-    }
-    let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
-    let common = session_git_common_dir(worktree)?.ok_or(())?;
-    let expected_common = session_git_common_dir(workspace_root)?.ok_or(())?;
-    if common != expected_common {
-        return Err(());
-    }
-    let worktrees = common.join("worktrees").canonicalize().map_err(|_| ())?;
-    if git_dir.parent() != Some(worktrees.as_path()) {
-        return Err(());
-    }
-    let backlink = read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?;
-    if backlink != marker.canonicalize().map_err(|_| ())? {
-        return Err(());
-    }
-    let subdirs = ["refs/heads/usagi", "logs/refs/heads/usagi"];
-    ensure_owned_subdirectories(&common, &subdirs).map_err(|_| ())?;
-    let read_only_roots = vec![backlink, git_dir.join("commondir"), git_dir.join("gitdir")];
-    let writable_roots = vec![
-        git_dir,
-        common.join("objects"),
-        common.join("refs/heads/usagi"),
-        common.join("logs/refs/heads/usagi"),
-    ];
-    for root in &writable_roots {
-        validate_owned_directory(root).map_err(|_| ())?;
-    }
-    Ok(Some(SessionGitPolicy {
-        writable_roots,
-        read_only_roots,
-    }))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=daemon expires=2027-01-31 tests=claude_sandbox_e2e

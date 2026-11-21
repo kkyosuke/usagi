@@ -8391,6 +8391,173 @@ fn session_git_policy_anchors_authority_to_the_registered_worktree() {
     assert!(session_git_policy(&fixture.path().join("repo"), &worktree).is_err());
 }
 
+/// Lay out one child repository of a Multi-Repo workspace together with the
+/// linked worktree a session holds for it, returning `(common, admin, worktree)`.
+fn multi_repo_session_worktree(
+    workspace: &Path,
+    session: &Path,
+    relative: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
+    let common = workspace.join(relative).join(".git");
+    let git_dir = common.join("worktrees").join("session");
+    let worktree = session.join(relative);
+    for path in [&git_dir, &common.join("objects"), &worktree] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", git_dir.display()),
+    )
+    .unwrap();
+    std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
+    std::fs::write(
+        git_dir.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )
+    .unwrap();
+    (common, git_dir, worktree)
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One Multi-Repo grant contract, including every fail-closed edge.
+fn session_git_policy_grants_every_child_repository_of_a_multi_repo_session() {
+    std::fs::create_dir_all("target").unwrap();
+    let fixture = tempfile::tempdir_in("target").unwrap();
+    let workspace = fixture.path().join("workspace");
+    let session = workspace.join(".usagi/sessions/session");
+    let (core_common, core_admin, core_worktree) =
+        multi_repo_session_worktree(&workspace, &session, "core");
+    let (infra_common, infra_admin, infra_worktree) =
+        multi_repo_session_worktree(&workspace, &session, "group/infra");
+    // A repository cloned after the session was created has no worktree in it.
+    std::fs::create_dir_all(workspace.join("late/.git")).unwrap();
+    std::fs::create_dir_all(session.join("late")).unwrap();
+    std::fs::write(workspace.join("README.md"), "plain file").unwrap();
+
+    let policy = session_git_policy(&workspace, &session).unwrap().unwrap();
+    let grant = |common: &Path, admin: &Path| {
+        [
+            admin.canonicalize().unwrap(),
+            common.join("objects").canonicalize().unwrap(),
+            common.join("refs/heads/usagi").canonicalize().unwrap(),
+            common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+        ]
+    };
+    assert_eq!(
+        policy.writable_roots,
+        [
+            grant(&core_common, &core_admin),
+            grant(&infra_common, &infra_admin)
+        ]
+        .concat()
+    );
+    let pointers = |admin: &Path, worktree: &Path| {
+        [
+            worktree.join(".git").canonicalize().unwrap(),
+            admin.join("commondir").canonicalize().unwrap(),
+            admin.join("gitdir").canonicalize().unwrap(),
+        ]
+    };
+    assert_eq!(
+        policy.read_only_roots,
+        [
+            pointers(&core_admin, &core_worktree),
+            pointers(&infra_admin, &infra_worktree)
+        ]
+        .concat()
+    );
+    for common in [&core_common, &infra_common] {
+        assert!(
+            !policy
+                .writable_roots
+                .contains(&common.canonicalize().unwrap())
+        );
+    }
+    assert!(
+        !policy
+            .writable_roots
+            .iter()
+            .any(|root| root.starts_with(workspace.join("late").canonicalize().unwrap())),
+        "a repository without a session worktree contributes no authority"
+    );
+
+    // The session tree is agent-writable, so a marker that names another
+    // repository's admin directory is refused instead of followed.
+    std::fs::write(
+        core_worktree.join(".git"),
+        format!("gitdir: {}\n", infra_admin.display()),
+    )
+    .unwrap();
+    assert!(session_git_policy(&workspace, &session).is_err());
+
+    // A standalone repository planted at one repository path contributes no
+    // grant and leaves the other repository's grant intact.
+    std::fs::remove_file(core_worktree.join(".git")).unwrap();
+    std::fs::create_dir(core_worktree.join(".git")).unwrap();
+    assert_eq!(
+        session_git_policy(&workspace, &session)
+            .unwrap()
+            .unwrap()
+            .writable_roots,
+        grant(&infra_common, &infra_admin)
+    );
+    std::fs::remove_dir(core_worktree.join(".git")).unwrap();
+
+    // A symlinked marker is refused rather than followed.
+    std::os::unix::fs::symlink(infra_worktree.join(".git"), core_worktree.join(".git")).unwrap();
+    assert!(session_git_policy(&workspace, &session).is_err());
+
+    // A symlinked path component aliases another linked worktree of the same
+    // repository: every pointer check would pass for that worktree, so the
+    // alias itself is refused. Both a direct child and an intermediate
+    // component of the repository path are covered.
+    std::fs::remove_dir_all(&core_worktree).unwrap();
+    let elsewhere = fixture.path().join("elsewhere");
+    for (relative, admin, worktree, swapped) in [
+        ("core", &core_admin, &core_worktree, session.join("core")),
+        (
+            "group/infra",
+            &infra_admin,
+            &infra_worktree,
+            session.join("group"),
+        ),
+    ] {
+        let alias = elsewhere.join(relative);
+        std::fs::create_dir_all(&alias).unwrap();
+        std::fs::write(alias.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", alias.join(".git").display()),
+        )
+        .unwrap();
+        let aliased_parent = elsewhere.join(swapped.strip_prefix(&session).unwrap());
+        if swapped.exists() {
+            std::fs::remove_dir_all(&swapped).unwrap();
+        }
+        std::os::unix::fs::symlink(&aliased_parent, &swapped).unwrap();
+        assert!(worktree.join(".git").is_file());
+        assert!(
+            session_git_policy(&workspace, &session).is_err(),
+            "{relative} reached through a symlink must not be granted"
+        );
+        std::fs::remove_file(&swapped).unwrap();
+    }
+
+    // A standalone repository planted in the session, repositories without a
+    // session worktree, and a workspace without any repository need no grant
+    // outside the session root.
+    std::fs::create_dir_all(core_worktree.join(".git")).unwrap();
+    assert!(session_git_policy(&workspace, &session).unwrap().is_none());
+    let plain = fixture.path().join("plain");
+    let plain_session = plain.join(".usagi/sessions/session");
+    std::fs::create_dir_all(&plain_session).unwrap();
+    assert!(
+        session_git_policy(&plain, &plain_session)
+            .unwrap()
+            .is_none()
+    );
+}
+
 #[test]
 fn a_session_claude_is_confined_to_its_worktree_and_gets_the_guard_hook() {
     let usagi = Path::new("/opt/usagi/bin/usagi");

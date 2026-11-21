@@ -550,7 +550,7 @@ Rust が `Debug` で印字するため、丁寧に書いた message が
 | PTY 所有・IPC socket サーバ・daemon 永続化（daemon 専用の外部接続） | `crates/daemon/` の `infrastructure/` |
 | セッション監視ティック・autostart queue consumer・通知調停（daemon 専用ロジック） | `crates/daemon/` の `usecase/` |
 | IPC リクエストの dispatch・応答整形（daemon サーバ入口） | `crates/daemon/` の `presentation/`。terminal の JSON decode、action/payload 照合、negotiated snapshot の応答整形を担い、`usecase::terminal_owner` の typed application port を呼ぶ |
-| Antigravity / Codex / Claude の Agent 起動 materialization | 合成ルートの `src/runtime/daemon/agent_provisioning.rs`。Antigravity 固有の workspace configuration materialization は子モジュール `agent_provisioning/agy.rs` に閉じ、provider argv、sandbox policy、role/launch contract、workspace 別 environment と MCP tool family の注入だけを束ねる。socket admission、runtime ownership、background worker lifecycle は `src/runtime/daemon.rs` に残す |
+| Antigravity / Codex / Claude の Agent 起動 materialization | 合成ルートの `src/runtime/daemon/agent_provisioning.rs`。session の Git grant は子モジュール `agent_provisioning/session_git.rs`、Antigravity 固有の workspace configuration materialization は子モジュール `agent_provisioning/agy.rs` に閉じ、provider argv、sandbox policy、role/launch contract、workspace 別 environment と MCP tool family の注入だけを束ねる。socket admission、runtime ownership、background worker lifecycle は `src/runtime/daemon.rs` に残す |
 | admitted daemon request と concrete owner / store の接続 | 合成ルートの `src/runtime/daemon/dispatch.rs`。request family ごとの decode・authorization・response shaping を、注入済みの daemon runtime / store へ接続する composition adapter とする。session family の action table と delegation は子モジュール `dispatch/session.rs`、session scratchpad（note / todo / decision log）の読み書きは `dispatch/scratchpad.rs` に閉じる。Unix socket accept、signal、process lifecycle、background worker ownership は `src/runtime/daemon.rs` に残し、daemon の business rule は `crates/daemon/src/usecase/`、transport-independent な server loop は `crates/daemon/src/presentation/ipc.rs` に残す |
 | live tenant の inventory / explicit retire を registry・session・Agent・generic terminal owner へ結合する unbound control | 合成ルートの `src/runtime/daemon/tenant_control.rs`。socket accept / lifecycle 全体は `src/runtime/daemon.rs` に残し、tenant policy を同じ巨大 module へ戻さない |
 | 各画面の描画（view） | `crates/tui/` の `presentation/views/` |
@@ -1002,9 +1002,16 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   全体、`main` / remote ref、repository config、workspace のそのほかの `.usagi`、data home は追加しない。
   worktree 内の `.git` pointer は writable な agent input なので grant の権威にはしない。daemon が選択した workspace の
   common directory と一致し、private admin directory がその common directory の direct `worktrees/*` child で、admin 側の
-  backlink が選択した worktree の `.git` marker を指すことを起動ごとに再検証してから launcher へ渡す。Git 管理されて
-  いない workspace と、workspace root 自体が standalone Git repository である場合は追加 Git root を持たず、own
-  worktree だけを書き込み可能にする。後者の `.git` directory は既に writable な worktree の内側にある。
+  backlink が選択した worktree の `.git` marker を指すことを起動ごとに再検証してから launcher へ渡す。
+  workspace root 自体は repository でなく、配下に複数の repository を持つ workspace の session root は、repository ごとの
+  linked worktree を並べた通常の directory である。この場合は daemon が workspace root 配下から列挙した repository
+  ごとに、対応する session 内 worktree へ同じ検証と同じ範囲の grant を適用して合算する。列挙の権威は session が
+  書けない workspace root であり、session tree の内容ではない。session 内に worktree marker を持たない repository
+  （session 作成後に追加されたもの）と、その位置に置かれた standalone repository は grant を持たない。linked worktree の
+  marker は session root 配下の symlink を含まない path にあることを要求し、symlink 経由で別の worktree を指す場合と
+  検証を通らない場合は起動を拒否する。
+  repository を 1 つも持たない workspace と、workspace root 自体が standalone Git repository である場合は追加 Git root を
+  持たず、own worktree だけを書き込み可能にする。後者の `.git` directory は既に writable な worktree の内側にある。
   したがって sibling session の作業ファイル、root の tracked source、daemon durable state は path の表記や
   symlink alias にかかわらず read-only である。root coordinator には起動固有 writable root を
   渡さず、project root・workspace の `.usagi`・Git common dir・usagi state を read-only に保つ。
