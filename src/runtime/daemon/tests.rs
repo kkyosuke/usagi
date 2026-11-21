@@ -8490,8 +8490,20 @@ fn session_git_policy_grants_every_child_repository_of_a_multi_repo_session() {
     .unwrap();
     assert!(session_git_policy(&workspace, &session).is_err());
 
-    // A symlinked marker is refused rather than followed.
+    // A standalone repository planted at one repository path contributes no
+    // grant and leaves the other repository's grant intact.
     std::fs::remove_file(core_worktree.join(".git")).unwrap();
+    std::fs::create_dir(core_worktree.join(".git")).unwrap();
+    assert_eq!(
+        session_git_policy(&workspace, &session)
+            .unwrap()
+            .unwrap()
+            .writable_roots,
+        grant(&infra_common, &infra_admin)
+    );
+    std::fs::remove_dir(core_worktree.join(".git")).unwrap();
+
+    // A symlinked marker is refused rather than followed.
     std::os::unix::fs::symlink(infra_worktree.join(".git"), core_worktree.join(".git")).unwrap();
     assert!(session_git_policy(&workspace, &session).is_err());
 

@@ -639,7 +639,8 @@ pub(super) fn session_git_policy(
             Err(())
         };
     }
-    linked_worktree_git_policy(workspace_root, worktree).map(Some)
+    let marker = marker.canonicalize().map_err(|_| ())?;
+    linked_worktree_git_policy(workspace_root, worktree, &marker).map(Some)
 }
 
 /// Union the per-repository grants of a Multi-Repo session.
@@ -682,7 +683,12 @@ fn multi_repo_session_git_policy(
         if worktree.canonicalize().map_err(|_| ())? != worktree {
             return Err(());
         }
-        let nested = linked_worktree_git_policy(&workspace_root.join(relative), &worktree)?;
+        // The backlink is compared with this daemon-derived path, not with a
+        // re-resolved one, so a component swapped after the check above still
+        // cannot name another worktree's admin directory.
+        let marker = worktree.join(".git");
+        let nested =
+            linked_worktree_git_policy(&workspace_root.join(relative), &worktree, &marker)?;
         policy.writable_roots.extend(nested.writable_roots);
         policy.read_only_roots.extend(nested.read_only_roots);
     }
@@ -690,9 +696,11 @@ fn multi_repo_session_git_policy(
 }
 
 /// The grant for one linked worktree whose `.git` marker is a regular file.
+/// `expected_marker` is the canonical marker path the admin backlink must name.
 fn linked_worktree_git_policy(
     workspace_root: &Path,
     worktree: &Path,
+    expected_marker: &Path,
 ) -> Result<SessionGitPolicy, ()> {
     let marker = worktree.join(".git");
     let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
@@ -706,7 +714,7 @@ fn linked_worktree_git_policy(
         return Err(());
     }
     let backlink = read_git_indirection(&git_dir.join("gitdir"), None, &git_dir)?;
-    if backlink != marker.canonicalize().map_err(|_| ())? {
+    if backlink != expected_marker {
         return Err(());
     }
     let subdirs = ["refs/heads/usagi", "logs/refs/heads/usagi"];
