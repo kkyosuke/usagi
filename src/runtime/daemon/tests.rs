@@ -8489,15 +8489,51 @@ fn session_git_policy_grants_every_child_repository_of_a_multi_repo_session() {
     .unwrap();
     assert!(session_git_policy(&workspace, &session).is_err());
 
-    // A standalone repository planted in place of the worktree is no authority.
+    // A symlinked marker is refused rather than followed.
     std::fs::remove_file(core_worktree.join(".git")).unwrap();
-    std::fs::create_dir(core_worktree.join(".git")).unwrap();
+    std::os::unix::fs::symlink(infra_worktree.join(".git"), core_worktree.join(".git")).unwrap();
     assert!(session_git_policy(&workspace, &session).is_err());
 
-    // A workspace whose only repositories have no session worktree, and one
-    // without any repository, need no grant outside the session root.
-    std::fs::remove_dir(core_worktree.join(".git")).unwrap();
-    std::fs::remove_file(infra_worktree.join(".git")).unwrap();
+    // A symlinked path component aliases another linked worktree of the same
+    // repository: every pointer check would pass for that worktree, so the
+    // alias itself is refused. Both a direct child and an intermediate
+    // component of the repository path are covered.
+    std::fs::remove_dir_all(&core_worktree).unwrap();
+    let elsewhere = fixture.path().join("elsewhere");
+    for (relative, admin, worktree, swapped) in [
+        ("core", &core_admin, &core_worktree, session.join("core")),
+        (
+            "group/infra",
+            &infra_admin,
+            &infra_worktree,
+            session.join("group"),
+        ),
+    ] {
+        let alias = elsewhere.join(relative);
+        std::fs::create_dir_all(&alias).unwrap();
+        std::fs::write(alias.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", alias.join(".git").display()),
+        )
+        .unwrap();
+        let aliased_parent = elsewhere.join(swapped.strip_prefix(&session).unwrap());
+        if swapped.exists() {
+            std::fs::remove_dir_all(&swapped).unwrap();
+        }
+        std::os::unix::fs::symlink(&aliased_parent, &swapped).unwrap();
+        assert!(worktree.join(".git").is_file());
+        assert!(
+            session_git_policy(&workspace, &session).is_err(),
+            "{relative} reached through a symlink must not be granted"
+        );
+        std::fs::remove_file(&swapped).unwrap();
+    }
+
+    // A standalone repository planted in the session, repositories without a
+    // session worktree, and a workspace without any repository need no grant
+    // outside the session root.
+    std::fs::create_dir_all(core_worktree.join(".git")).unwrap();
     assert!(session_git_policy(&workspace, &session).unwrap().is_none());
     let plain = fixture.path().join("plain");
     let plain_session = plain.join(".usagi/sessions/session");

@@ -1007,7 +1007,9 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   linked worktree を並べた通常の directory である。この場合は daemon が workspace root 配下から列挙した repository
   ごとに、対応する session 内 worktree へ同じ検証と同じ範囲の grant を適用して合算する。列挙の権威は session が
   書けない workspace root であり、session tree の内容ではない。session 内に worktree marker を持たない repository
-  （session 作成後に追加されたもの）は grant を持たず、marker があるのに検証を通らない場合は起動を拒否する。
+  （session 作成後に追加されたもの）と、その位置に置かれた standalone repository は grant を持たない。linked worktree の
+  marker は session root 配下の symlink を含まない path にあることを要求し、symlink 経由で別の worktree を指す場合と
+  検証を通らない場合は起動を拒否する。
   repository を 1 つも持たない workspace と、workspace root 自体が standalone Git repository である場合は追加 Git root を
   持たず、own worktree だけを書き込み可能にする。後者の `.git` directory は既に writable な worktree の内側にある。
   したがって sibling session の作業ファイル、root の tracked source、daemon durable state は path の表記や

@@ -647,8 +647,10 @@ pub(super) fn session_git_policy(
 /// The repository set comes from the workspace root, which the session cannot
 /// write, never from the agent-writable session tree. A child repository with
 /// no worktree marker in the session (cloned after the session was created)
-/// contributes no authority; a marker that is present must pass the same
-/// validation as a single-repository session or the launch is refused.
+/// contributes no authority, and neither does a standalone repository planted
+/// there. A linked-worktree marker must sit at its symlink-free path inside the
+/// session and pass the same validation as a single-repository session, or the
+/// launch is refused.
 fn multi_repo_session_git_policy(
     workspace_root: &Path,
     session_root: &Path,
@@ -660,6 +662,7 @@ fn multi_repo_session_git_policy(
         writable_roots: Vec::new(),
         read_only_roots: Vec::new(),
     };
+    let session_root = session_root.canonicalize().map_err(|_| ())?;
     for relative in repositories
         .iter()
         .filter(|relative| !relative.as_os_str().is_empty())
@@ -667,8 +670,17 @@ fn multi_repo_session_git_policy(
         let worktree = session_root.join(relative);
         match std::fs::symlink_metadata(worktree.join(".git")) {
             Ok(metadata) if metadata.file_type().is_file() => {}
+            // A standalone repository inside the writable session tree needs no
+            // grant outside it.
+            Ok(metadata) if metadata.file_type().is_dir() => continue,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             _ => return Err(()),
+        }
+        // Every component below the session root is agent-writable. A symlink
+        // there would alias the marker of another linked worktree of the same
+        // repository, whose backlink check then passes for the wrong worktree.
+        if worktree.canonicalize().map_err(|_| ())? != worktree {
+            return Err(());
         }
         let nested = linked_worktree_git_policy(&workspace_root.join(relative), &worktree)?;
         policy.writable_roots.extend(nested.writable_roots);
