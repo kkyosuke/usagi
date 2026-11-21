@@ -56,6 +56,8 @@ durable reducer と store は accepted event ごとに `state_revision` を増�
 session incarnation で fence する。IPC の create/remove は daemon が reservation を永続化してから worktree
 effect を実行し、同じ daemon generation・operation・session attempt・revision の completion だけを反映する。
 失敗した effect は safe failure として残り、client が local worktree 操作へ fallback しない。
+worktree 作成や setup 中に client が再接続して同じ operation ID を再送した場合、daemon は先行要求の完了を待ち、
+記録済みの結果を返す。待機中も別の operation ID の作成と session 一覧の取得は進行できる。
 
 create の重い Git worktree 構築（`git worktree add`）は**共有 session lock を解放した状態で実行する**。lock を握るのは fast な durable transition（reservation・completion の永続化）だけであり、その間に session 一覧・terminal poll・user-decision 一覧など他 connection の read が同じ lock 待ちで固まらない。remove はさらに一歩進めて、`Deleting` への遷移だけで受理を返し、worktree 撤去（`git worktree remove` と session tree の除去）を daemon 所有の worker へ渡す（[session teardown worker](#session-teardown-worker)）。したがって長い worktree 操作の最中も daemon は応答し続け、TUI の描画・入力ループが session 作成・削除で凍結しない。
 
@@ -132,6 +134,8 @@ Agent の起動指示は次の区分を案内する。
 | worktree 内の `.work/` など Git 対象外の作業領域 | 生ログ、途中経過、補助スクリプト、一時設定、キャッシュ。Agent が `.work/.gitignore` に `*` を書く |
 
 Agent は提示するファイルを保存した後、`artifacts/.index.json` を相対パスの JSON 配列として更新し、既存の提示対象を保持する。
+外部ツールの生成物も session 内へ実ファイルを保存する。Agent の起動指示は、完了報告前に提示ファイルと index を読み直して
+実在・可読性・登録を確認し、確認済みファイルへのリンクを報告に含めるよう求める。保存や登録に失敗したものは作成済みと報告しない。
 たとえば `["findings.md", "preview.html", "verification.txt"]` とすると、この3件だけを sidebar の件数・一覧・統合検索へ出す。
 `.index.json` 自体、未登録の素材・作業ファイル、存在しないパスは表示しない。重複は1件にまとめ、空の配列は表示対象なしとする。
 明示登録したファイルは拡張子を制限せず、ユーザーが指定したデータ形式も提示できる。

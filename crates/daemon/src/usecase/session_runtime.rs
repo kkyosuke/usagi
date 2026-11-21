@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -318,6 +318,7 @@ pub struct SessionRuntime {
     root_worktree_id: WorktreeId,
     generation: DaemonGeneration,
     store: DaemonLifecycleStore,
+    create_locks: BTreeMap<OperationId, Weak<Mutex<()>>>,
     git: SharedGit,
     io: Arc<dyn SessionWorktreeIo + Send + Sync>,
 }
@@ -643,6 +644,13 @@ fn perform_create_from(
     operation_id: &str,
     payload: &Value,
 ) -> Result<SessionReply, SessionRuntimeError> {
+    // A client can reconnect while its first connection is still building the
+    // worktree. Replay the durable outcome only after that writer finishes.
+    let id = OperationId::parse(operation_id).map_err(|_| SessionRuntimeError::InvalidOperation)?;
+    let create_lock = lock_runtime(runtime)?.create_lock(id);
+    let _create = create_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let pre_orphan = pre_inspect_create_orphan(runtime, git, payload)?;
     let step = lock_runtime(runtime)?.begin_create_with_orphan(
         origin,
@@ -1192,6 +1200,7 @@ impl SessionRuntime {
             root_worktree_id,
             generation,
             store,
+            create_locks: BTreeMap::new(),
             git: SharedGit(Arc::new(Mutex::new(Box::new(git)))),
             io: Arc::new(io),
         };
@@ -2330,6 +2339,16 @@ impl SessionRuntime {
             operation_id: operation.operation_id.to_string(),
             revision: operation.progress_revision,
             body: snapshot(state, self.root_worktree_id),
+        })
+    }
+
+    fn create_lock(&mut self, id: OperationId) -> Arc<Mutex<()>> {
+        self.create_locks.retain(|_, lock| lock.strong_count() > 0);
+        let entry = self.create_locks.entry(id).or_default();
+        entry.upgrade().unwrap_or_else(|| {
+            let lock = Arc::new(Mutex::new(()));
+            *entry = Arc::downgrade(&lock);
+            lock
         })
     }
 

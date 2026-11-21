@@ -329,9 +329,10 @@ fn defaults(root: &str, session: &str) -> RoleDefaults {
     }
 }
 
-fn read_optional(path: &Path) -> Result<Option<RoleCatalogFile>, RoleCatalogError> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
+fn read_bounded_source(path: &Path) -> Result<Option<String>, RoleCatalogError> {
+    use std::io::Read as _;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
             return Err(RoleCatalogError::Io {
@@ -340,13 +341,28 @@ fn read_optional(path: &Path) -> Result<Option<RoleCatalogFile>, RoleCatalogErro
             });
         }
     };
-    if metadata.len() > MAX_CATALOG_BYTES {
+    let mut bytes = Vec::new();
+    file.take(MAX_CATALOG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| RoleCatalogError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    if bytes.len() as u64 > MAX_CATALOG_BYTES {
         return Err(RoleCatalogError::TooLarge(path.to_owned()));
     }
-    let source = fs::read_to_string(path).map_err(|source| RoleCatalogError::Io {
-        path: path.to_owned(),
-        source,
-    })?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| RoleCatalogError::Io {
+            path: path.to_owned(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        })
+}
+
+fn read_optional(path: &Path) -> Result<Option<RoleCatalogFile>, RoleCatalogError> {
+    let Some(source) = read_bounded_source(path)? else {
+        return Ok(None);
+    };
     parse_source(path, &source).map(Some)
 }
 
@@ -389,22 +405,11 @@ fn parse_source(path: &Path, source: &str) -> Result<RoleCatalogFile, RoleCatalo
 ///
 /// Returns a catalog IO, size, schema, or semantic validation error.
 pub fn read_source(path: &Path) -> Result<String, RoleCatalogError> {
-    match fs::read_to_string(path) {
-        Ok(source) => {
-            if source.len() as u64 > MAX_CATALOG_BYTES {
-                return Err(RoleCatalogError::TooLarge(path.to_owned()));
-            }
-            parse_source(path, &source)?;
-            Ok(source)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok("version = 1\n".to_owned())
-        }
-        Err(source) => Err(RoleCatalogError::Io {
-            path: path.to_owned(),
-            source,
-        }),
-    }
+    let Some(source) = read_bounded_source(path)? else {
+        return Ok("version = 1\n".to_owned());
+    };
+    parse_source(path, &source)?;
+    Ok(source)
 }
 
 /// Validate and atomically replace one catalog layer without reserializing it.
@@ -965,6 +970,12 @@ instructions = "review"
             Err(RoleCatalogError::TooLarge(_))
         ));
 
+        fs::remove_file(home.join("roles.toml")).unwrap();
+        fs::write(home.join("roles.toml"), [0xff]).unwrap();
+        assert!(matches!(
+            load_effective(&home, root.path()),
+            Err(RoleCatalogError::Io { .. })
+        ));
         fs::remove_file(home.join("roles.toml")).unwrap();
         fs::create_dir(home.join("roles.toml")).unwrap();
         assert!(matches!(

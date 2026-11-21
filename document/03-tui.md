@@ -158,6 +158,11 @@ Home の最上段には project tab bar を常時 1 行表示する。deck が 1
 `… +N` として示す。描画と click hit-test は同じ canonical path 付き projection を使う。`+ Open` は左右 1 cell の padding を
 含む inline button で、`+`、label、左右の padding のどこを押しても同じ Add workspace overlay を開く。
 
+各 tab は `1 usagi (3)` のように名前の後ろへ session 件数を表示し、0 件も `(0)` と示す。
+件数は project に保持する session 一覧の全件で、root scope や Agent / terminal の数を含めず、lifecycle では絞らない。
+active project は一覧更新に追従し、inactive project は最後に取得した一覧の件数を保持して再選択時に更新する。
+件数部分も同じ project のクリック領域に含め、狭幅では tab 全体と一緒に省略する。
+
 | 入力 | 動作 |
 |---|---|
 | OpenWorkspace / `+ Open` click | Add workspace overlay。登録済み workspace を filter し、`Space` で複数選択、`Enter` で末尾へ追加する。`Tab` で Directory 入力へ切り替えると、未登録の既存ディレクトリを同じ open 経路で canonicalize・登録・追加する。表示中の open workspace は `Ctrl-X` で閉じる |
@@ -299,7 +304,7 @@ Current session は対象 project / session を絞ってから上限を適用す
 
 ## Memory の検索
 
-`Ctrl-O m` で現在の workspace の `.usagi/memory/` を検索する。
+`Ctrl-O m` で現在の workspace の Memory ストア（daemon data home の `agent-memory/<workspace-id>/.usagi/memory/`、未作成時は workspace の `.usagi/memory/`）を検索する。
 既存の Memory 検索と同じ大文字小文字を区別しない部分一致で、名前・タイトル・本文を対象にする。空の検索語では一覧を表示し、検索語は最大 256 文字。
 選択中 session の worktree や他の project のストアは含めない。検索画面で再度 `Ctrl-O m` を押すと検索語を保って再取得する。
 検索語の変更・画面を閉じる操作・project 切り替えでは、古い検索のストアロック待ちを取り消し、遅れて届いた結果を表示しない。
