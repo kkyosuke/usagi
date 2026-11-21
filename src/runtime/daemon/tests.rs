@@ -8419,6 +8419,7 @@ fn multi_repo_session_worktree(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One Multi-Repo grant contract, including every fail-closed edge.
 fn session_git_policy_grants_every_child_repository_of_a_multi_repo_session() {
     std::fs::create_dir_all("target").unwrap();
     let fixture = tempfile::tempdir_in("target").unwrap();
