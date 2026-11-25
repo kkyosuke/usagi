@@ -57,6 +57,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 小さい画面でも選択中の結果を優先して表示します。
 
 セッション削除時に片付けたいローカルブランチは `usagi-tmp/<セッション名>/<枝名>` で作れます。
+セッション内の Agent は追加のローカルブランチをすべてこの名前で作るように指示されます。
 たとえば `review` セッションなら `git switch -c usagi-tmp/review/experiment` です。通常の削除では未マージの作業を保護します。
 [セッション削除の仕様](document/05-daemon.md#session-teardown-worker)
 

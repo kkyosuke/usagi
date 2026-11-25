@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use usagi_core::domain::workspace_layout::session_temporary_branch_directory;
 use usagi_daemon::infrastructure::session_worktree::SystemSessionWorktreeIo;
 use usagi_daemon::usecase::session_runtime::SessionWorktreeIo as _;
 
@@ -52,7 +53,7 @@ pub(in crate::runtime::daemon) fn session_git_policy(
         };
     }
     let marker = marker.canonicalize().map_err(|_| ())?;
-    linked_worktree_git_policy(workspace_root, worktree, &marker).map(Some)
+    linked_worktree_git_policy(workspace_root, worktree, &marker, worktree).map(Some)
 }
 
 /// Union the per-repository grants of a Multi-Repo session.
@@ -98,8 +99,12 @@ fn multi_repo_session_git_policy(
         // re-resolved one, so a component swapped after the check above still
         // cannot name another worktree's admin directory.
         let marker = worktree.join(".git");
-        let nested =
-            linked_worktree_git_policy(&workspace_root.join(relative), &worktree, &marker)?;
+        let nested = linked_worktree_git_policy(
+            &workspace_root.join(relative),
+            &worktree,
+            &marker,
+            &session_root,
+        )?;
         policy.writable_roots.extend(nested.writable_roots);
         policy.read_only_roots.extend(nested.read_only_roots);
     }
@@ -112,6 +117,7 @@ fn linked_worktree_git_policy(
     workspace_root: &Path,
     worktree: &Path,
     expected_marker: &Path,
+    session_root: &Path,
 ) -> Result<SessionGitPolicy, ()> {
     let marker = worktree.join(".git");
     let git_dir = read_git_indirection(&marker, Some("gitdir:"), worktree)?;
@@ -131,12 +137,26 @@ fn linked_worktree_git_policy(
     let subdirs = ["refs/heads/usagi", "logs/refs/heads/usagi"];
     ensure_owned_subdirectories(&common, &subdirs).map_err(|_| ())?;
     let read_only_roots = vec![backlink, git_dir.join("commondir"), git_dir.join("gitdir")];
-    let writable_roots = vec![
+    let mut writable_roots = vec![
         git_dir,
         common.join("objects"),
         common.join("refs/heads/usagi"),
         common.join("logs/refs/heads/usagi"),
     ];
+    // Multi-repo worktrees use their parent session's name, independent of
+    // the child repository name or the branch currently checked out.
+    let session = session_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(())?;
+    let temporary = session_temporary_branch_directory(session);
+    let heads = format!("refs/heads/{temporary}");
+    let logs = format!("logs/refs/heads/{temporary}");
+    // A pre-existing ref may occupy the prefix. Git cannot create its children
+    // in that case, but the Agent can still work on the normal session branch.
+    if ensure_owned_subdirectories(&common, &[&heads, &logs]).is_ok() {
+        writable_roots.extend([common.join(heads), common.join(logs)]);
+    }
     for root in &writable_roots {
         validate_owned_directory(root).map_err(|_| ())?;
     }

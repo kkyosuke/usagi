@@ -22,6 +22,7 @@ use usagi_core::domain::session_lifecycle::{
     OperationJournal, OperationStatus, SessionBranchScope, SetupPlan, WorkspaceLifecycleState,
     validate_session_name,
 };
+use usagi_core::domain::workspace_layout::session_temporary_branch_directory;
 use usagi_core::infrastructure::git::worktree::repository_unresolved;
 use usagi_core::infrastructure::git::{GitRunner, delete_branch, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
@@ -1006,7 +1007,10 @@ fn delete_temporary_branches(
     session: &str,
     force: bool,
 ) -> Result<(), String> {
-    let prefix = format!("refs/heads/usagi-tmp/{session}/");
+    let prefix = format!(
+        "refs/heads/{}/",
+        session_temporary_branch_directory(session)
+    );
     let refs = git
         .run(repo, &["for-each-ref", "--format=%(refname)", &prefix])
         .map_err(|error| error.to_string())?;

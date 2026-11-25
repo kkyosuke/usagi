@@ -8280,6 +8280,14 @@ fn session_git_policy_anchors_authority_to_the_registered_worktree() {
             common.join("objects").canonicalize().unwrap(),
             common.join("refs/heads/usagi").canonicalize().unwrap(),
             common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+            common
+                .join("refs/heads/usagi-tmp/session")
+                .canonicalize()
+                .unwrap(),
+            common
+                .join("logs/refs/heads/usagi-tmp/session")
+                .canonicalize()
+                .unwrap(),
         ]
     );
     assert_eq!(
@@ -8308,6 +8316,13 @@ fn session_git_policy_anchors_authority_to_the_registered_worktree() {
         .unwrap()
         .unwrap();
     assert_eq!(recreated_policy.writable_roots, policy.writable_roots);
+    let prefix = common.join("refs/heads/usagi-tmp/session");
+    std::fs::remove_dir(&prefix).unwrap();
+    std::fs::write(&prefix, "occupied").unwrap();
+    let occupied = session_git_policy(&fixture.path().join("repo"), &worktree)
+        .unwrap()
+        .unwrap();
+    assert_eq!(occupied.writable_roots, policy.writable_roots[..4]);
 
     let standalone = tempfile::tempdir_in("target").unwrap();
     std::fs::create_dir(standalone.path().join(".git")).unwrap();
@@ -8443,6 +8458,14 @@ fn session_git_policy_grants_every_child_repository_of_a_multi_repo_session() {
             common.join("objects").canonicalize().unwrap(),
             common.join("refs/heads/usagi").canonicalize().unwrap(),
             common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+            common
+                .join("refs/heads/usagi-tmp/session")
+                .canonicalize()
+                .unwrap(),
+            common
+                .join("logs/refs/heads/usagi-tmp/session")
+                .canonicalize()
+                .unwrap(),
         ]
     };
     assert_eq!(
