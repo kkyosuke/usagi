@@ -5952,3 +5952,37 @@ fn temporary_branch_inventory_errors_stop_teardown() {
         );
     }
 }
+
+#[test]
+fn temporary_branch_inventory_deletes_each_exact_ref_and_propagates_git_refusals() {
+    let repo = Path::new("/repo");
+    let listed = || ScriptedGitResult::Output {
+        success: true,
+        stdout: "refs/heads/usagi-tmp/one/a\nrefs/heads/usagi-tmp/one/b\n",
+        stderr: "",
+    };
+    let deleted = || ScriptedGitResult::Output {
+        success: true,
+        stdout: "",
+        stderr: "",
+    };
+    let ok = ScriptedGit::new([listed(), deleted(), deleted()]);
+    delete_temporary_branches(&ok, repo, "one", false).unwrap();
+    assert!(ok.results.lock().unwrap().is_empty());
+
+    let busy = ScriptedGitResult::Output {
+        success: false,
+        stdout: "",
+        stderr: "branch is checked out",
+    };
+    let git = ScriptedGit::new([listed(), deleted(), busy]);
+    let error = delete_temporary_branches(&git, repo, "one", true).unwrap_err();
+    assert!(error.contains("branch is checked out"));
+
+    let gone = ScriptedGit::new([ScriptedGitResult::Output {
+        success: false,
+        stdout: "",
+        stderr: "fatal: not a git repository",
+    }]);
+    delete_temporary_branches(&gone, repo, "one", false).unwrap();
+}
