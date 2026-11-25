@@ -1279,7 +1279,7 @@ fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> 
                 &title,
                 52,
                 heading,
-                "Registry entries whose folder is gone are removed.",
+                "Remove missing projects from registration and history.",
             )
             .compact("y: remove   n/Esc: cancel"),
         );
@@ -2754,6 +2754,7 @@ fn refresh_entry_projects(
 }
 
 fn prune_recent_paths(recent: &mut Vec<Recent>, paths: &[PathBuf]) {
+    let mut groups = HashSet::new();
     *recent = recent
         .drain(..)
         .filter_map(|recent| match recent {
@@ -2775,6 +2776,8 @@ fn prune_recent_paths(recent: &mut Vec<Recent>, paths: &[PathBuf]) {
                 })
             }
         })
+        // Recent is newest first. Keep the newest of groups that now have the same members.
+        .filter(|entry| matches!(entry, Recent::Workspace(_)) || groups.insert(recent_paths(entry)))
         .collect();
 }
 
@@ -3173,9 +3176,9 @@ fn render_missing_workspace_prompt(
         )
     };
     let message = if prompt.paths.len() == 1 {
-        "Remove its registry entry? No workspace data is deleted."
+        "Remove its registration and history? Project files stay."
     } else {
-        "Remove their registry entries? No workspace data is deleted."
+        "Remove their registrations and history? Project files stay."
     };
     let mut view = ConfirmationView::confirmation("Workspace not found", 64, heading, message);
     view.confirm_label = "remove";

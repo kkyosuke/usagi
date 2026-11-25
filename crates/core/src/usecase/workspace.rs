@@ -13,7 +13,7 @@
 //! broken repository-local store degrades only that workspace's figures to zero;
 //! corruption of the global registry itself is still reported to the caller.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -163,10 +163,7 @@ pub fn forget_missing(
             .iter()
             .any(|g| g.paths.iter().any(|p| removed.contains(p)))
         {
-            for group in &mut groups {
-                group.paths.retain(|p| !removed.contains(p));
-            }
-            groups.retain(|g| !g.paths.is_empty());
+            retain_unite_members(&mut groups, |p| !removed.contains(p));
             tx.save_unites(&groups)?;
         }
         if let Some(mut last) = last
@@ -179,6 +176,16 @@ pub fn forget_missing(
         tx.save_workspaces(&registered)?;
         Ok(removed)
     })
+}
+
+/// Two distinct saved decks can become the same ordered deck after a member goes away.
+fn retain_unite_members(groups: &mut Vec<Unite>, keep: impl Fn(&std::path::PathBuf) -> bool) {
+    let mut seen = HashSet::new();
+    groups.sort_by_key(|group| std::cmp::Reverse(group.updated_at));
+    groups.retain_mut(|group| {
+        group.paths.retain(&keep);
+        !group.paths.is_empty() && seen.insert(group.paths.clone())
+    });
 }
 
 /// Build recent-list entries for all registered workspaces, ordered by
@@ -208,28 +215,24 @@ pub fn recent_for_workspaces(
         .into_iter()
         .map(|workspace| overview_for(storage, workspace))
         .collect::<Vec<_>>();
-    let mut unites = Vec::new();
-    // Unite storage is an optional enhancement to the workspace registry. A
-    // hand-edited, corrupt, or future-version file must not hide healthy single
-    // workspace recents.
-    for unite in storage.load_unites().unwrap_or_default() {
-        let members = unite
-            .paths
-            .iter()
-            .filter_map(|path| {
-                overviews
-                    .iter()
-                    .find(|overview| &overview.workspace.path == path)
-                    .cloned()
-            })
-            .collect::<Vec<_>>();
-        if !members.is_empty() {
-            unites.push(Recent::Unite(UniteOverview::with_updated_at(
-                members,
-                unite.updated_at,
-            )));
-        }
-    }
+    let by_path = overviews
+        .iter()
+        .map(|overview| (&overview.workspace.path, overview))
+        .collect::<HashMap<_, _>>();
+    // Unite storage is optional: a damaged file still leaves single-workspace recents usable.
+    let mut groups = storage.load_unites().unwrap_or_default();
+    retain_unite_members(&mut groups, |path| by_path.contains_key(path));
+    let unites = groups
+        .into_iter()
+        .map(|group| {
+            let members = group
+                .paths
+                .iter()
+                .map(|path| by_path[path].clone())
+                .collect();
+            Recent::Unite(UniteOverview::with_updated_at(members, group.updated_at))
+        })
+        .collect::<Vec<_>>();
     let mut recent = overviews
         .into_iter()
         .map(Recent::Workspace)
@@ -649,7 +652,12 @@ mod tests {
         storage
             .save_workspaces(&[keep.clone(), gone.clone()])
             .unwrap();
-        storage.save_unites(&[group]).unwrap();
+        storage
+            .save_unites(&[group, Unite::new(vec![keep.path.clone()], ts(4))])
+            .unwrap();
+        let projected = super::recent_for_workspaces(&storage, vec![keep.clone()]);
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].updated_at(), Some(ts(4)));
         storage.save_last_projects(&last).unwrap();
 
         let selected = std::slice::from_ref(&gone.path);
@@ -667,7 +675,7 @@ mod tests {
         let surviving = vec![keep.path.clone()];
         assert_eq!(
             storage.load_unites().unwrap(),
-            vec![Unite::new(surviving.clone(), ts(3))]
+            vec![Unite::new(surviving.clone(), ts(4))]
         );
         assert_eq!(
             storage.load_last_projects().unwrap(),

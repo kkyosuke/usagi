@@ -395,6 +395,11 @@ mod tests {
             .collect();
         let mut welcome = Welcome::new(vec![
             Recent::Unite(UniteOverview::new(members)),
+            Recent::Unite(UniteOverview::new(vec![WorkspaceOverview::new(
+                Workspace::new("beta", "/tmp/beta"),
+                0,
+                0,
+            )])),
             Recent::Unite(UniteOverview::new(Vec::new())),
         ]);
         welcome.remove_paths(&["/tmp/alpha".into()]);

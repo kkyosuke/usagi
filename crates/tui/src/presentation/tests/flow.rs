@@ -2718,7 +2718,43 @@ fn missing_project_row_announces_cleanup_and_enter_only_removes_the_selected_reg
 }
 
 #[test]
-fn missing_open_selection_confirms_registry_only_removal() {
+fn failed_missing_cleanup_returns_to_the_current_screen_with_the_error() {
+    let alpha = ws("alpha");
+    for keys in [
+        vec![Key::Char('o'), Key::Char('C'), Key::Char('y'), Key::Quit],
+        vec![Key::Char('o'), Key::Enter, Key::Char('y'), Key::Quit],
+        vec![Key::Char('r'), Key::Char('y'), Key::Quit],
+    ] {
+        let mut term = FakeTerminal::with_keys(&keys);
+        let mut loader = FakeLoader {
+            missing: vec![alpha.path.clone()],
+            cleanup_error: Some("history unreadable"),
+            ..FakeLoader::default()
+        };
+        assert_eq!(
+            run(
+                &mut term,
+                vec![alpha.clone()],
+                vec![recent("alpha")],
+                now(),
+                &mut loader
+            )
+            .unwrap(),
+            Exit::Quit
+        );
+        assert!(
+            term.frames
+                .last()
+                .unwrap()
+                .join("\n")
+                .contains("history unreadable")
+        );
+        assert_eq!(loader.cleanup_calls, 1);
+    }
+}
+
+#[test]
+fn missing_open_selection_confirms_removal_from_registration_and_history() {
     let alpha = ws("alpha");
     let mut term =
         FakeTerminal::with_keys(&[Key::Char('o'), Key::Enter, Key::Char('y'), Key::Quit]);
@@ -2751,7 +2787,7 @@ fn missing_open_selection_confirms_registry_only_removal() {
                 && frame.contains("/tmp/alpha")
                 && frame.contains("remove")
                 && frame.contains("cancel")
-                && frame.contains("No workspace data is deleted")
+                && frame.contains("registration and history")
         }),
         "missing-workspace prompt was not rendered: {frames:#?}"
     );

@@ -994,7 +994,7 @@ fn missing_workspace_prompt_summarizes_multiple_paths() {
     let rendered = strip_ansi(&frame.join("\n"));
 
     assert!(rendered.contains("2 workspace directories no longer exist"));
-    assert!(rendered.contains("Remove their registry entries?"));
+    assert!(rendered.contains("Remove their registrations and history?"));
 }
 
 #[test]

@@ -2572,17 +2572,18 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                 {
                     let paths = prompt.paths.clone();
                     missing_workspace_prompt = None;
-                    let removed = loader.cleanup_missing(Some(&paths))?;
-                    open.remove_paths(&removed);
-                    welcome.remove_paths(&removed);
-                    remove_registry_paths(&mut registry, &removed);
-                    let notice = if removed.is_empty() {
-                        "Workspace changed while confirming; nothing was removed. Try again."
-                            .to_owned()
-                    } else if removed.len() == 1 {
-                        "Workspace registration removed.".to_owned()
-                    } else {
-                        format!("{} workspace registrations removed.", removed.len())
+                    let notice = match loader.cleanup_missing(Some(&paths)) {
+                        Ok(removed) => {
+                            open.remove_paths(&removed);
+                            welcome.remove_paths(&removed);
+                            remove_registry_paths(&mut registry, &removed);
+                            match removed.len() {
+                                0 => "Workspace changed while confirming; nothing was removed. Try again.".to_owned(),
+                                1 => "Workspace registration removed.".to_owned(),
+                                count => format!("{count} workspace registrations removed."),
+                            }
+                        }
+                        Err(error) => format!("Could not remove project: {error}"),
                     };
                     if screen == Screen::Welcome {
                         welcome.set_notice(Some(notice));
@@ -2786,10 +2787,19 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     }
                 }
                 OpenStep::ConfirmCleanup => {
-                    let removed = loader.cleanup_missing(None)?;
-                    open.remove_paths(&removed);
-                    welcome.remove_paths(&removed);
-                    remove_registry_paths(&mut registry, &removed);
+                    open.cancel_cleanup();
+                    match loader.cleanup_missing(None) {
+                        Ok(removed) => {
+                            open.remove_paths(&removed);
+                            welcome.remove_paths(&removed);
+                            remove_registry_paths(&mut registry, &removed);
+                        }
+                        Err(error) => {
+                            open.set_notice(Some(format!(
+                                "Could not clean missing projects: {error}"
+                            )));
+                        }
+                    }
                 }
                 OpenStep::ConfirmUnregister(path) => {
                     let removed = loader.unregister(&[path])?;
