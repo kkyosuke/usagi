@@ -1900,7 +1900,7 @@ png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bund
 一覧の Tab は File Preview のテキスト本文を開き、本文の Tab は関連付けアプリで開く。
 本文の検索入力中は Tab で外部表示せず、Enter / Esc で検索入力を終えてから受け付ける。
 外部表示は専用 worker が検証済み file を、本人だけが読める OS temporary directory へコピーして開く。
-HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory の file も同じ配置へコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。
+公開ツールで登録した項目を選ぶと一覧に確認点を表示する。HTML / Markdown / SVG の外部表示は登録時に指定された素材だけを同じ相対配置へコピーする。従来のパス文字列だけの項目は相対参照を保つため同じ Artifact directory をコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。
 元の file の差し替えや session 削除で、外部アプリが別の path を開かないようにする。directory は `0700`、file は `0600` とする。
 1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
 アプリは helper 終了や TUI 終了後にも読み込むため、成功・未確認のコピーは OS の temporary 領域へ残す。

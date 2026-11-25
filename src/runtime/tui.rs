@@ -717,13 +717,14 @@ impl ProductionOverlayPort {
             result,
         } = completion;
         let event = match result {
-            Ok((files, changed, lines)) => BackendEvent::PreviewLoaded {
+            Ok((files, changed, lines, purposes)) => BackendEvent::PreviewLoaded {
                 target,
                 request_id,
                 path,
                 filter,
                 files,
                 changed,
+                purposes,
                 lines,
             },
             Err(error) => BackendEvent::PreviewError {

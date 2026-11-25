@@ -653,6 +653,7 @@ mod tests {
         let _ = update(
             state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: path.map(str::to_owned),
@@ -875,6 +876,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -924,6 +926,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target: Target::Session(session),
                 request_id,
                 path: None,
@@ -964,6 +967,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1007,6 +1011,7 @@ mod tests {
         let effects = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1020,6 +1025,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id: pane_request,
                 path: Some("src/empty.rs".into()),
@@ -1073,6 +1079,7 @@ mod tests {
         let effects = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1097,6 +1104,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id: pane_request,
                 path: Some("src/lib.rs".into()),

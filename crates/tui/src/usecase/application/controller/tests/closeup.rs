@@ -1128,6 +1128,7 @@ fn artifacts_finder_scopes_session_and_workspace_and_opens_selected_artifacts() 
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,

@@ -210,6 +210,45 @@ pub(super) fn dispatch_agent_tool(
                 "agent caller does not belong to this workspace",
             ));
         }
+        if action == DispatchToolAction::ArtifactPublish {
+            let scope = authenticated.terminal_scope;
+            drop(runtime);
+            let session_id = scope.session_id.ok_or_else(|| {
+                ProtocolError::new(
+                    ErrorCode::PermissionDenied,
+                    "artifact publishing requires a session",
+                )
+            })?;
+            let sessions = bound.sessions().lock().map_err(|_| {
+                ProtocolError::new(ErrorCode::Unavailable, "session owner unavailable")
+            })?;
+            let current = sessions
+                .resolve_scope(workspace, session_id, scope.worktree_id)
+                .map_err(|_| {
+                    ProtocolError::new(
+                        ErrorCode::OwnershipUnknown,
+                        "artifact session is unavailable",
+                    )
+                })?;
+            let spec = serde_json::from_value(payload).map_err(|_| {
+                ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid artifact_publish payload",
+                )
+            })?;
+            let path = usagi_core::infrastructure::artifacts::publish(
+                bound.tenant.root(),
+                &current.path,
+                spec,
+            )
+            .map_err(|error| {
+                ProtocolError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("could not publish artifact: {error}"),
+                )
+            })?;
+            return Ok((ResponseOutcome::Ok, serde_json::json!({"path":path})));
+        }
         let parent_dispatch_run = authenticated.run_id;
         let creator_continuation = authenticated.continuation;
         if matches!(

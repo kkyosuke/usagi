@@ -7481,6 +7481,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -7496,6 +7497,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: Some("README.md".into()),

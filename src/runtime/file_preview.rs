@@ -21,7 +21,12 @@ use usagi_tui::usecase::application::controller::PreviewFileFilter;
 /// `(files, changed, lines)` of one completed preview job. A document read
 /// populates only the lines; a listing populates the files and, for the All
 /// group, the changed files the finder rests on.
-pub(crate) type PreviewPayload = (Vec<String>, Vec<String>, Vec<String>);
+pub(crate) type PreviewPayload = (
+    Vec<String>,
+    Vec<String>,
+    Vec<String>,
+    std::collections::BTreeMap<String, String>,
+);
 
 /// Maximum number of repository paths offered to the fuzzy finder.
 pub(crate) const MAX_PREVIEW_FILES: usize = 20_000;
@@ -242,7 +247,27 @@ fn load_preview_with(
         {
             return Err(FilePreviewError::OutsideRoot);
         }
-        return read_file(root, path).map(|lines| (Vec::new(), Vec::new(), lines));
+        return read_file(root, path).map(|lines| {
+            (
+                Vec::new(),
+                Vec::new(),
+                lines,
+                std::collections::BTreeMap::new(),
+            )
+        });
+    }
+    if filter.is_artifacts() {
+        let reviews = usagi_core::infrastructure::artifacts::list_reviews(
+            root,
+            filter == PreviewFileFilter::AllArtifacts,
+        )
+        .map_err(|_| FilePreviewError::FilesUnavailable)?;
+        let files = reviews.keys().cloned().collect();
+        let purposes = reviews
+            .into_iter()
+            .filter_map(|(path, purpose)| purpose.map(|p| (path, p)))
+            .collect();
+        return Ok((files, Vec::new(), Vec::new(), purposes));
     }
     let files = list_files_with(root, filter, run)?;
     let changed = if matches!(filter, PreviewFileFilter::All) {
@@ -250,7 +275,12 @@ fn load_preview_with(
     } else {
         Vec::new()
     };
-    Ok((files, changed, Vec::new()))
+    Ok((
+        files,
+        changed,
+        Vec::new(),
+        std::collections::BTreeMap::new(),
+    ))
 }
 
 /// One private, disposable native-view snapshot. Its files are independent of
@@ -360,8 +390,14 @@ fn artifact_open_view_with(
     // relative references need the artifact tree; unrelated large artifacts
     // must not prevent opening a small standalone file.
     let entries = if matches!(extension.as_str(), "html" | "htm" | "md" | "svg") {
-        usagi_core::infrastructure::artifacts::files(&root.join(&artifact_root))
+        let directory = root.join(&artifact_root);
+        match usagi_core::infrastructure::artifacts::review_assets(&directory, &selected)
             .map_err(files_unavailable)?
+        {
+            Some(assets) => assets,
+            None => usagi_core::infrastructure::artifacts::files(&directory)
+                .map_err(files_unavailable)?,
+        }
     } else {
         Vec::new()
     };
@@ -635,7 +671,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or(ChildOutputObservation::ObservationFailed)
         };
-        let (files, changed, lines) =
+        let (files, changed, lines, _) =
             load_preview_with(Path::new("/repo"), None, PreviewFileFilter::All, &mut run).unwrap();
         assert_eq!(files, ["README.md", "src/lib.rs"]);
         assert_eq!(changed, ["src/lib.rs"]);
@@ -665,7 +701,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or(ChildOutputObservation::ObservationFailed)
         };
-        let (files, changed, _) = load_preview_with(
+        let (files, changed, _, _) = load_preview_with(
             Path::new("/repo"),
             None,
             PreviewFileFilter::Tracked,
@@ -805,7 +841,7 @@ mod tests {
             git(&["checkout", "--quiet", "--orphan", "orphan"]);
             fs::write(root.path().join("tracked"), "after").unwrap();
             for filter in [PreviewFileFilter::Changed, PreviewFileFilter::All] {
-                let (files, changed, _) = load_preview(root.path(), None, filter).unwrap();
+                let (files, changed, _, _) = load_preview(root.path(), None, filter).unwrap();
                 assert_eq!(files, ["tracked", "untracked"]);
                 if filter == PreviewFileFilter::All {
                     assert_eq!(changed, files);
@@ -844,7 +880,7 @@ mod tests {
         fs::write(root.path().join("tracked"), "changed").unwrap();
         fs::write(root.path().join("untracked"), "new").unwrap();
         for filter in [PreviewFileFilter::Changed, PreviewFileFilter::All] {
-            let (files, changed, _) = load_preview(root.path(), None, filter).unwrap();
+            let (files, changed, _, _) = load_preview(root.path(), None, filter).unwrap();
             assert_eq!(files, ["tracked", "untracked"]);
             if filter == PreviewFileFilter::All {
                 assert_eq!(changed, files);
@@ -1025,7 +1061,8 @@ mod tests {
             (
                 Vec::new(),
                 Vec::new(),
-                vec!["one".to_owned(), "two".to_owned()]
+                vec!["one".to_owned(), "two".to_owned()],
+                std::collections::BTreeMap::new()
             )
         );
         assert!(matches!(
@@ -1213,7 +1250,7 @@ mod tests {
             list_files(root.path(), PreviewFileFilter::AllArtifacts).unwrap(),
             [path]
         );
-        let (_, _, lines) =
+        let (_, _, lines, _) =
             load_preview(root.path(), Some(path), PreviewFileFilter::AllArtifacts).unwrap();
         assert_eq!(lines, [html]);
         let view = artifact_open_view(root.path(), path, PreviewFileFilter::AllArtifacts).unwrap();
@@ -1243,13 +1280,14 @@ mod tests {
         .unwrap();
         fs::write(session.join("artifacts/image.PNG"), [0, 1, 2]).unwrap();
         fs::write(session.join("artifacts/execute.sh"), "exit 1").unwrap();
-        let (files, changed, _) =
+        let (files, changed, _, _) =
             load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(changed, [] as [std::string::String; 0]);
-        let (all, _, _) = load_preview(temp.path(), None, PreviewFileFilter::AllArtifacts).unwrap();
+        let (all, _, _, _) =
+            load_preview(temp.path(), None, PreviewFileFilter::AllArtifacts).unwrap();
         assert_eq!(all.len(), 2);
-        let (_, _, lines) = load_preview(
+        let (_, _, lines, _) = load_preview(
             &session,
             Some("artifacts/report.md"),
             PreviewFileFilter::Artifacts,
@@ -1314,7 +1352,7 @@ mod tests {
             r#"["pages/report.html"]"#,
         )
         .unwrap();
-        let (listed, _, _) = load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
+        let (listed, _, _, _) = load_preview(&session, None, PreviewFileFilter::Artifacts).unwrap();
         assert_eq!(listed, ["artifacts/pages/report.html"]);
         let view = artifact_open_view(
             &session,
@@ -1360,6 +1398,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fs::read_to_string(view.path()).unwrap(), "retained");
+    }
+
+    #[test]
+    fn published_markdown_opens_with_only_its_declared_assets() {
+        let root = tempdir().unwrap();
+        let output = root.path().join("artifacts");
+        fs::create_dir_all(output.join("report/assets")).unwrap();
+        fs::write(output.join("report/spec.md"), "![chart](assets/chart.png)").unwrap();
+        fs::write(output.join("report/assets/chart.png"), "chart").unwrap();
+        File::create(output.join("unrelated.log"))
+            .unwrap()
+            .set_len(MAX_ARTIFACT_OPEN_BYTES + 1)
+            .unwrap();
+        fs::write(output.join(".index.json"), r#"[{"path":"report/spec.md","purpose":"Review the chart","assets":["assets/chart.png"]}]"#).unwrap();
+        let (_, _, _, purposes) =
+            load_preview(root.path(), None, PreviewFileFilter::Artifacts).unwrap();
+        assert_eq!(purposes["artifacts/report/spec.md"], "Review the chart");
+        let view = artifact_open_view(
+            root.path(),
+            "artifacts/report/spec.md",
+            PreviewFileFilter::Artifacts,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(view.path().with_file_name("assets/chart.png")).unwrap(),
+            b"chart"
+        );
+        assert!(!view.directory.path().join("unrelated.log").exists());
     }
 
     #[test]

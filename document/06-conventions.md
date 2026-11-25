@@ -60,6 +60,7 @@ coverage 例外、daemon E2E、背景 worker、release は該当する変更を�
 | `toml_edit` | Workspace Config から `.usagi/config.toml` の session setup command だけをコメント・順序を保持して更新 | 本依存 |
 | `sha2` | memory Markdown source set の deterministic fingerprint、build artifact / rollover operation identity、self-update の embedded installer identity | 本依存・build 依存 |
 | `anyhow` | infrastructure（永続化ストア）と MCP store adapter のエラー伝播 | 本依存 |
+| `rustix` | Artifact 公開時に、固定したディレクトリ記述子を基準にファイルを作成し、index を原子的に置換する | 本依存 |
 | `fs2` | ストア、daemon current locator、合成ルートの daemon 単一インスタンスの cross-process ロック（`flock` 相当）と、結合テストの重い E2E 直列化ロック | 本依存 |
 | `dirs` | 既定データディレクトリ（`~/.usagi`）の解決 | 本依存 |
 | `rayon` | markdown ファイルの並列スキャン | 本依存 |
