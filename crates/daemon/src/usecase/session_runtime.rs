@@ -22,6 +22,7 @@ use usagi_core::domain::session_lifecycle::{
     OperationJournal, OperationStatus, SessionBranchScope, SetupPlan, WorkspaceLifecycleState,
     validate_session_name,
 };
+use usagi_core::infrastructure::git::worktree::repository_unresolved;
 use usagi_core::infrastructure::git::{GitRunner, delete_branch, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
 use usagi_core::infrastructure::ipc::ErrorCode;
@@ -1010,6 +1011,9 @@ fn delete_temporary_branches(
         .run(repo, &["for-each-ref", "--format=%(refname)", &prefix])
         .map_err(|error| error.to_string())?;
     if !refs.success {
+        if repository_unresolved(&refs.stderr) {
+            return Ok(());
+        }
         return Err(format!(
             "git temporary branch inventory failed: {}",
             refs.stderr.trim()

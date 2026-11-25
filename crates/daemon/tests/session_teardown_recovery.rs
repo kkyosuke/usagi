@@ -128,6 +128,19 @@ fn retry_reclaims_the_registration_when_the_checkout_is_gone() {
 }
 
 #[test]
+fn stale_owner_gitfile_is_terminal_for_temporary_branch_cleanup() {
+    let fixture = Fixture::new();
+    let root = &fixture.teardown.repository_root;
+    // Simulate an owner checkout whose worktree metadata has already gone.
+    fs::remove_dir_all(root.join(".git")).unwrap();
+    fs::write(root.join(".git"), "gitdir: missing-owner-metadata\n").unwrap();
+    WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo)
+        .tear_down(&fixture.teardown)
+        .unwrap();
+    assert!(!fixture.teardown.session_root.exists());
+}
+
+#[test]
 fn registration_recovery_still_protects_unmerged_commits() {
     let mut fixture = Fixture::new();
     git_ok(
