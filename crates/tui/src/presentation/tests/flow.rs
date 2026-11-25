@@ -3399,6 +3399,7 @@ fn every_workspace_entry_returns_to_welcome_without_restarting() {
     let mut term = FakeTerminal::with_keys(&keys);
     let mut loader = FakeLoader {
         opened_at: Some(now() + Duration::hours(1)),
+        entry_registry: vec![ws("first"), ws("second")],
         ..FakeLoader::default()
     };
     let mut settings = WorkspaceBindingSettingsPort::default();
@@ -4054,18 +4055,51 @@ fn returning_from_a_directory_open_reloads_single_and_group_history() {
 fn failed_entry_history_refresh_keeps_existing_choices_and_reports_errors() {
     let mut welcome = Welcome::new(vec![recent("alpha")]);
     let mut open = open_from_registry(vec![ws("alpha")], welcome.all_recent());
+    let mut registry = open.workspaces();
     let mut loader = FakeLoader {
         recent_projects_error: Some("history unreadable"),
         ..FakeLoader::default()
     };
-    crate::presentation::refresh_entry_projects(&mut loader, &mut welcome, &mut open);
+    crate::presentation::refresh_entry_projects(
+        &mut loader,
+        &mut welcome,
+        &mut open,
+        &mut registry,
+    );
     assert!(welcome.notice().unwrap().contains("history unreadable"));
     assert_eq!(open.workspaces().len(), 1);
     assert_eq!(welcome.all_recent().len(), 1);
     loader.last_projects_error = Some("last set unreadable");
-    crate::presentation::refresh_entry_projects(&mut loader, &mut welcome, &mut open);
+    crate::presentation::refresh_entry_projects(
+        &mut loader,
+        &mut welcome,
+        &mut open,
+        &mut registry,
+    );
     assert!(welcome.notice().unwrap().contains("last set unreadable"));
     assert!(welcome.last_projects().is_none());
+}
+
+#[test]
+fn refreshing_entry_projects_replaces_stale_picker_and_deck_registrations() {
+    let mut welcome = Welcome::new(vec![recent("gone")]);
+    let mut registry = vec![ws("gone")];
+    let mut open = open_from_registry(registry.clone(), welcome.all_recent());
+    let mut loader = FakeLoader {
+        entry_registry: vec![ws("keep")],
+        ..FakeLoader::default()
+    };
+
+    crate::presentation::refresh_entry_projects(
+        &mut loader,
+        &mut welcome,
+        &mut open,
+        &mut registry,
+    );
+
+    assert_eq!(registry, loader.entry_registry);
+    assert_eq!(open.workspaces(), registry);
+    assert_eq!(welcome.all_recent(), loader.recent_projects);
 }
 
 #[test]

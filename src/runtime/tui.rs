@@ -3979,9 +3979,24 @@ fn classify_workspace_directory(
 ) -> std::io::Result<bool> {
     match metadata {
         Ok(metadata) => Ok(!metadata.is_dir()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(true)
+        }
         Err(error) => Err(error),
     }
+}
+
+/// Filter the picker snapshot without mutating registrations. An inconclusive
+/// metadata error leaves the project selectable so opening it can report why.
+fn visible_workspaces(storage: &Storage) -> std::io::Result<Vec<Workspace>> {
+    let mut registered = storage.load_workspaces().map_err(io_error)?;
+    registered.retain(|workspace| !workspace_directory_missing(&workspace.path).unwrap_or(false));
+    Ok(registered)
 }
 
 /// Classify what currently exists at `path` for New-project pre-validation.
@@ -4181,8 +4196,8 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         &mut self,
     ) -> std::io::Result<Option<usagi_core::domain::recent::LastProjectSet>> {
         let mut projects = self.storage.load_last_projects().map_err(io_error)?;
-        let registered = self.storage.load_workspaces().map_err(io_error)?;
         if let Some(last) = projects.as_mut() {
+            let registered = visible_workspaces(&self.storage)?;
             last.retain_paths(|path| registered.iter().any(|workspace| workspace.path == path));
         }
         Ok(projects)
@@ -4195,8 +4210,8 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         self.storage.save_last_projects(projects).map_err(io_error)
     }
 
-    fn recent_projects(&mut self) -> std::io::Result<Vec<Recent>> {
-        workspace_usecase::recent(&self.storage).map_err(io_error)
+    fn entry_projects(&mut self) -> std::io::Result<(Vec<Workspace>, Vec<Recent>)> {
+        load_welcome_screen_data(&self.storage)
     }
 
     fn record_unite(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
@@ -4212,9 +4227,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         thread::Builder::new()
             .name("workspace-registry-refresh".to_owned())
             .spawn(move || {
-                let result = Storage::new(storage_dir)
-                    .load_workspaces()
-                    .map_err(io_error);
+                let result = visible_workspaces(&Storage::new(storage_dir));
                 let _ = completion_tx.send(result);
             })
             .map_err(io_error)?;
@@ -4254,16 +4267,23 @@ impl WorkspaceLoader for FsWorkspaceLoader {
             .collect()
     }
 
-    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> std::io::Result<Vec<PathBuf>> {
-        // Re-check at effect time. A directory may have been restored while the
-        // confirmation modal was open; unreadable paths do not authorize a
-        // registry mutation.
-        let missing = self.missing_paths(
-            &workspaces
-                .iter()
-                .map(|workspace| workspace.path.clone())
-                .collect::<Vec<_>>(),
-        )?;
+    fn cleanup_missing(&mut self, paths: Option<&[PathBuf]>) -> std::io::Result<Vec<PathBuf>> {
+        // A bulk cleanup includes registrations hidden from the picker. Recheck
+        // at confirmation time in case a directory was restored.
+        let registered;
+        let candidates = if let Some(selected) = paths {
+            selected
+        } else {
+            registered = self
+                .storage
+                .load_workspaces()
+                .map_err(io_error)?
+                .into_iter()
+                .map(|workspace| workspace.path)
+                .collect::<Vec<_>>();
+            &registered
+        };
+        let missing = self.missing_paths(candidates)?;
         Ok(workspace_usecase::remove(&self.storage, &missing)
             .map_err(io_error)?
             .into_iter()
@@ -4382,19 +4402,15 @@ fn load_screen_graph_data(
 ) -> std::io::Result<(Vec<Workspace>, Vec<Recent>)> {
     match start {
         Start::Welcome => load_welcome_screen_data(storage),
-        Start::Config => Ok((
-            storage.load_workspaces().unwrap_or_default(),
-            workspace_usecase::recent(storage).unwrap_or_default(),
-        )),
+        Start::Config => Ok(load_welcome_screen_data(storage).unwrap_or_default()),
     }
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=welcome_start_loads_or_projects_storage_errors
 fn load_welcome_screen_data(storage: &Storage) -> std::io::Result<(Vec<Workspace>, Vec<Recent>)> {
-    Ok((
-        storage.load_workspaces().map_err(io_error)?,
-        workspace_usecase::recent(storage).map_err(io_error)?,
-    ))
+    let workspaces = visible_workspaces(storage)?;
+    let recent = workspace_usecase::recent_for_workspaces(storage, workspaces.clone());
+    Ok((workspaces, recent))
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
@@ -4536,7 +4552,7 @@ fn launch_screen_graph(
                 welcome::render(
                     0,
                     0,
-                    &Welcome::new(workspace_usecase::recent(&storage).map_err(io_error)?),
+                    &Welcome::new(load_welcome_screen_data(&storage)?.1),
                     now,
                 )
             }
@@ -4802,7 +4818,7 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
             };
             // `open` may register a directly addressed workspace, so read the
             // deck registry only after that operation has committed.
-            let registry = loader.storage.load_workspaces().map_err(io_error)?;
+            let registry = visible_workspaces(&loader.storage)?;
             // A direct workspace entry has no Welcome behind it, so leaving
             // continues into the entry screens in this same process rather
             // than ending it: `usagi open <path>` switches workspaces too (#556).
@@ -8517,6 +8533,48 @@ mod tests {
     }
 
     #[test]
+    fn missing_projects_stay_hidden_until_restored_or_explicitly_cleaned() {
+        use usagi_core::domain::recent::{Recent, Unite};
+        let temporary = tempfile::tempdir().unwrap();
+        let mut loader = FsWorkspaceLoader::new(Storage::new(temporary.path()));
+        let keep = Workspace::new("keep", temporary.path().join("keep"));
+        let gone = Workspace::new("gone", temporary.path().join("gone"));
+        std::fs::create_dir(&keep.path).unwrap();
+        let registered = vec![keep.clone(), gone.clone()];
+        loader.storage.save_workspaces(&registered).unwrap();
+        let group = Unite::new(
+            vec![gone.path.clone(), keep.path.clone()],
+            chrono::Utc::now(),
+        );
+        loader.storage.save_unites(&[group]).unwrap();
+
+        let (visible, recent) = loader.entry_projects().unwrap();
+        assert_eq!(visible, vec![keep.clone()]);
+        assert_eq!(recent.len(), 2);
+        for item in recent {
+            match item {
+                Recent::Workspace(single) => assert_eq!(single.workspace, keep),
+                Recent::Unite(group) => {
+                    assert_eq!(group.members().len(), 1);
+                    assert_eq!(group.members()[0].workspace, keep);
+                }
+            }
+        }
+        assert_eq!(loader.storage.load_workspaces().unwrap(), registered);
+        std::fs::create_dir(&gone.path).unwrap();
+        assert_eq!(loader.entry_projects().unwrap().0, registered);
+        assert_eq!(
+            loader
+                .cleanup_missing(Some(std::slice::from_ref(&gone.path)))
+                .unwrap(),
+            Vec::<std::path::PathBuf>::new()
+        );
+        std::fs::remove_dir(&gone.path).unwrap();
+        assert_eq!(loader.cleanup_missing(None).unwrap(), vec![gone.path]);
+        assert_eq!(loader.storage.load_workspaces().unwrap(), vec![keep]);
+    }
+
+    #[test]
     fn workspace_directory_validation_projects_metadata_errors() {
         let temporary = tempfile::tempdir().unwrap();
         let directory = temporary.path().join("workspace");
@@ -8536,6 +8594,7 @@ mod tests {
         let replacement_file = temporary.path().join("replacement");
         std::fs::write(&replacement_file, "not a directory").unwrap();
         assert!(workspace_directory_missing(&replacement_file).unwrap());
+        assert!(workspace_directory_missing(&replacement_file.join("child")).unwrap());
         assert_eq!(
             classify_workspace_directory(Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -8551,7 +8610,8 @@ mod tests {
     fn workspace_registry_refresh_observes_an_external_store_update() {
         let temporary = tempfile::tempdir().unwrap();
         let storage = Storage::new(temporary.path());
-        let alpha = Workspace::new("alpha", "/alpha");
+        let alpha = Workspace::new("alpha", temporary.path().join("alpha"));
+        std::fs::create_dir(&alpha.path).unwrap();
         storage
             .save_workspaces(std::slice::from_ref(&alpha))
             .unwrap();
@@ -8569,7 +8629,9 @@ mod tests {
         };
         assert_eq!(first, vec![alpha.clone()]);
 
-        let beta = Workspace::new("beta", "/beta");
+        let beta = Workspace::new("beta", temporary.path().join("beta"));
+        std::fs::create_dir(&beta.path).unwrap();
+        std::fs::remove_dir(&alpha.path).unwrap();
         storage
             .save_workspaces(&[alpha.clone(), beta.clone()])
             .unwrap();
@@ -8582,28 +8644,34 @@ mod tests {
             assert!(Instant::now() < deadline, "registry refresh did not finish");
             std::thread::yield_now();
         };
-        assert_eq!(second, vec![alpha, beta]);
+        assert_eq!(second, vec![beta]);
     }
 
     #[test]
     fn saved_project_loader_prunes_unregistered_members_without_rewriting_the_deck() {
-        use std::path::PathBuf;
         use usagi_core::domain::recent::LastProjectSet;
         let temporary = tempfile::tempdir().unwrap();
         let mut loader = FsWorkspaceLoader::new(Storage::new(temporary.path()));
         assert!(loader.last_projects().unwrap().is_none());
+        let alpha = Workspace::new("alpha", temporary.path().join("alpha"));
+        let deleted = Workspace::new("deleted", temporary.path().join("deleted"));
+        std::fs::create_dir(&alpha.path).unwrap();
         let saved = LastProjectSet {
-            paths: vec!["/alpha".into(), "/beta".into()],
-            active: "/beta".into(),
+            paths: vec![
+                deleted.path.clone(),
+                alpha.path.clone(),
+                temporary.path().join("unregistered"),
+            ],
+            active: deleted.path.clone(),
         };
         loader.record_last_projects(&saved).unwrap();
         loader
             .storage
-            .save_workspaces(&[Workspace::new("alpha", "/alpha")])
+            .save_workspaces(&[alpha.clone(), deleted])
             .unwrap();
         let retained = loader.last_projects().unwrap().unwrap();
-        assert_eq!(retained.paths, vec![PathBuf::from("/alpha")]);
-        assert_eq!(retained.active, PathBuf::from("/alpha"));
+        assert_eq!(retained.paths, vec![alpha.path.clone()]);
+        assert_eq!(retained.active, alpha.path);
         assert_eq!(loader.storage.load_last_projects().unwrap(), Some(saved));
         loader.storage.save_workspaces(&[]).unwrap();
         assert_eq!(

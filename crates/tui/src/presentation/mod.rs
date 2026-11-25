@@ -2721,10 +2721,12 @@ fn refresh_entry_projects(
     loader: &mut dyn WorkspaceLoader,
     welcome: &mut Welcome,
     open: &mut Open,
+    registry: &mut Vec<Workspace>,
 ) {
-    match loader.recent_projects() {
-        Ok(recent) => {
-            *open = open_from_registry(open.workspaces(), &recent);
+    match loader.entry_projects() {
+        Ok((workspaces, recent)) => {
+            *registry = workspaces;
+            *open = open_from_registry(registry.clone(), &recent);
             welcome.set_recent(recent);
         }
         Err(error) => welcome.set_notice(Some(format!("Could not read recent projects: {error}"))),
