@@ -96,6 +96,7 @@ pub enum OpenView {
 pub struct Open {
     workspaces: Vec<WorkspaceOverview>,
     history: Vec<Recent>,
+    missing_paths: HashSet<std::path::PathBuf>,
     view: OpenView,
     directory: TextInput,
     selected_index: usize,
@@ -145,6 +146,7 @@ impl Open {
         Self {
             workspaces,
             history: Vec::new(),
+            missing_paths: HashSet::new(),
             view: OpenView::Projects,
             directory: TextInput::new(),
             selected_index: 0,
@@ -156,6 +158,20 @@ impl Open {
             unregister_confirmation: ConfirmationModal::new(),
             notice: None,
         }
+    }
+
+    pub(crate) fn with_missing_paths(mut self, paths: HashSet<std::path::PathBuf>) -> Self {
+        self.missing_paths = paths;
+        self
+    }
+
+    pub(crate) fn selected_missing(&self) -> Option<&std::path::Path> {
+        if self.view != OpenView::Projects {
+            return None;
+        }
+        self.selected()
+            .map(|w| w.path.as_path())
+            .filter(|p| self.missing_paths.contains(*p))
     }
 
     #[must_use]
@@ -377,7 +393,7 @@ impl Open {
 
     /// Add or remove the selected workspace from the Unite set.
     pub fn toggle_unite_member(&mut self) {
-        if self.view != OpenView::Projects {
+        if self.view != OpenView::Projects || self.selected_missing().is_some() {
             return;
         }
         self.unite = true;
@@ -446,6 +462,7 @@ impl Open {
         self.workspaces
             .retain(|overview| !paths.iter().any(|path| path == &overview.workspace.path));
         self.unite_paths.retain(|path| !paths.contains(path));
+        self.missing_paths.retain(|path| !paths.contains(path));
         crate::presentation::prune_recent_paths(&mut self.history, paths);
         self.cleanup_confirming = false;
         self.unregistering_path = None;
@@ -639,8 +656,16 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> V
         OpenView::Recent => "Projects  [Recent]  Directory",
         OpenView::Directory => "Projects  Recent  [Directory]",
     };
+    let mut tabs = Role::Success.style().bold().paint(modes);
+    if !open.missing_paths.is_empty() {
+        tabs.push_str(
+            &Role::Warning
+                .style()
+                .paint(&format!("   ⚠ {} missing", open.missing_paths.len())),
+        );
+    }
     let mut lines = vec![
-        indent(&Role::Success.style().bold().paint(modes)),
+        indent(&tabs),
         indent(
             &Style::new()
                 .dim()
@@ -688,7 +713,16 @@ fn body_lines(width: usize, open: &Open, now: DateTime<Utc>, budget: usize) -> V
             "{marker}{}",
             workspace_name_row(&overview.workspace, i == open.selected_index())
         )));
-        lines.push(indent(&workspace_stats_row(overview, now)));
+        if open.missing_paths.contains(&overview.workspace.path) {
+            let label = if i == open.selected_index() {
+                "    ⚠ Folder missing · Enter to remove"
+            } else {
+                "    ⚠ Folder missing"
+            };
+            lines.push(indent(&Role::Warning.style().paint(label)));
+        } else {
+            lines.push(indent(&workspace_stats_row(overview, now)));
+        }
     }
     if let Some(below) = overflow_line("↓", filtered.len() - (start + capacity)) {
         lines.push(indent(&below));
@@ -726,7 +760,12 @@ fn notice_lines(width: usize, notice: Option<&str>) -> Vec<String> {
 /// ボディ（workspace 一覧＋通知）だけを組む。`now` は相対時刻に使うので呼び出し側が渡す。
 #[must_use]
 pub fn render(raw_height: usize, raw_width: usize, open: &Open, now: DateTime<Utc>) -> Vec<String> {
-    mascot_screen::render(raw_height, raw_width, TITLE, FOOTER, |width| {
+    let footer = if open.selected_missing().is_some() {
+        "Enter remove registration and history / ↑↓ select / Esc back"
+    } else {
+        FOOTER
+    };
+    mascot_screen::render(raw_height, raw_width, TITLE, footer, |width| {
         let available = mascot_screen::body_budget(raw_height, raw_width);
         let notice = notice_lines(width, open.notice());
         // 通知はボディの一部なので、一覧に残る行数から先に差し引く。

@@ -2654,6 +2654,70 @@ fn new_form_enter_clones_and_opens_the_workspace() {
 }
 
 #[test]
+fn missing_project_row_announces_cleanup_and_enter_only_removes_the_selected_registration() {
+    for (error, removed, expected) in [
+        (None, vec![PathBuf::from("/tmp/gone")], "Enter open"),
+        (None, Vec::new(), "Nothing was removed"),
+        (
+            Some("storage unavailable"),
+            Vec::new(),
+            "Could not remove project",
+        ),
+    ] {
+        let mut loader = FakeLoader {
+            cleanup_error: error,
+            cleanup_removed: removed,
+            entry_registry: vec![ws("available")],
+            ..FakeLoader::default()
+        };
+        let mut term = FakeTerminal::with_keys(&[
+            Key::Char('o'),
+            Key::Char(' '),
+            Key::Down,
+            Key::Char(' '),
+            Key::Enter,
+            Key::Quit,
+        ]);
+        let mut settings = WorkspaceBindingSettingsPort::default();
+        let mut factory = CountingBackendFactory::new();
+        run_screen_graph_with_backend_and_notice(
+            &mut term,
+            EntryProjects {
+                available: vec![ws("available")],
+                missing: vec![ws("gone")],
+                recent: Vec::new(),
+            },
+            now(),
+            Start::Welcome,
+            &mut loader,
+            &mut settings,
+            &mut factory,
+            AvailableAgentModels::all(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            loader.cleanup_candidates,
+            vec![vec![PathBuf::from("/tmp/gone")]]
+        );
+        assert_eq!(loader.opened, Vec::<PathBuf>::new());
+        assert!(
+            term.frames
+                .iter()
+                .any(|frame| frame.join("\n").contains("⚠ 1 missing"))
+        );
+        assert!(term.frames.iter().any(|frame| {
+            frame
+                .join("\n")
+                .contains("Folder missing · Enter to remove")
+        }));
+        let final_frame = term.frames.last().unwrap().join("\n");
+        assert!(final_frame.contains(expected), "{final_frame}");
+        assert_eq!(final_frame.contains("⚠ 1 missing"), error.is_some());
+    }
+}
+
+#[test]
 fn missing_open_selection_confirms_registry_only_removal() {
     let alpha = ws("alpha");
     let mut term =
@@ -2951,7 +3015,7 @@ fn open_list_keeps_registry_entries_the_recent_projection_does_not_carry() {
         ])),
     ];
 
-    let open = open_from_registry(registry, &projection);
+    let open = open_from_registry(registry, &projection, Vec::new());
 
     let names = open
         .workspaces()
@@ -3342,8 +3406,10 @@ fn a_notice_seeded_switcher_opens_with_the_reason_on_its_first_frame() {
     assert_eq!(
         run_screen_graph_with_backend_and_notice(
             &mut term,
-            Vec::new(),
-            vec![recent_at("first", now())],
+            EntryProjects {
+                recent: vec![recent_at("first", now())],
+                ..EntryProjects::default()
+            },
             now(),
             Start::Welcome,
             &mut loader,
@@ -4054,7 +4120,7 @@ fn returning_from_a_directory_open_reloads_single_and_group_history() {
 #[test]
 fn failed_entry_history_refresh_keeps_existing_choices_and_reports_errors() {
     let mut welcome = Welcome::new(vec![recent("alpha")]);
-    let mut open = open_from_registry(vec![ws("alpha")], welcome.all_recent());
+    let mut open = open_from_registry(vec![ws("alpha")], welcome.all_recent(), Vec::new());
     let mut registry = open.workspaces();
     let mut loader = FakeLoader {
         recent_projects_error: Some("history unreadable"),
@@ -4084,7 +4150,7 @@ fn failed_entry_history_refresh_keeps_existing_choices_and_reports_errors() {
 fn refreshing_entry_projects_replaces_stale_picker_and_deck_registrations() {
     let mut welcome = Welcome::new(vec![recent("gone")]);
     let mut registry = vec![ws("gone")];
-    let mut open = open_from_registry(registry.clone(), welcome.all_recent());
+    let mut open = open_from_registry(registry.clone(), welcome.all_recent(), Vec::new());
     let mut loader = FakeLoader {
         entry_registry: vec![ws("keep")],
         ..FakeLoader::default()

@@ -24,7 +24,6 @@ use usagi_core::domain::AppInfo;
 use usagi_core::domain::agent::ProviderResumeProjection;
 use usagi_core::domain::id::{RequestId, SessionId, UserDecisionId, WorkspaceId};
 use usagi_core::domain::note::Scratchpad;
-use usagi_core::domain::recent::Recent;
 use usagi_core::domain::session::{SessionOrigin, SessionRecord};
 use usagi_core::domain::session_lifecycle::{ManagedSession, SessionLifecycleProjection};
 use usagi_core::domain::settings::{
@@ -110,7 +109,7 @@ use usagi_tui::usecase::application::terminal_session::{
     TerminalAttach, TerminalChunk, TerminalError, TerminalInputOutcome, TerminalInputResolution,
     TerminalSubscription,
 };
-use usagi_tui::usecase::application::{self, EntryScreen, Key, Terminal};
+use usagi_tui::usecase::application::{self, EntryProjects, EntryScreen, Key, Terminal};
 use usagi_tui::usecase::application::{
     WorkspaceCreateCompletion, WorkspaceCreateEffect, WorkspaceLoader, WorkspaceSnapshot,
 };
@@ -3994,9 +3993,15 @@ fn classify_workspace_directory(
 /// Filter the picker snapshot without mutating registrations. An inconclusive
 /// metadata error leaves the project selectable so opening it can report why.
 fn visible_workspaces(storage: &Storage) -> std::io::Result<Vec<Workspace>> {
-    let mut registered = storage.load_workspaces().map_err(io_error)?;
-    registered.retain(|workspace| !workspace_directory_missing(&workspace.path).unwrap_or(false));
-    Ok(registered)
+    Ok(classify_registrations(storage)?.0)
+}
+
+fn classify_registrations(storage: &Storage) -> std::io::Result<(Vec<Workspace>, Vec<Workspace>)> {
+    Ok(storage
+        .load_workspaces()
+        .map_err(io_error)?
+        .into_iter()
+        .partition(|workspace| !workspace_directory_missing(&workspace.path).unwrap_or(false)))
 }
 
 /// Classify what currently exists at `path` for New-project pre-validation.
@@ -4210,7 +4215,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
         self.storage.save_last_projects(projects).map_err(io_error)
     }
 
-    fn entry_projects(&mut self) -> std::io::Result<(Vec<Workspace>, Vec<Recent>)> {
+    fn entry_projects(&mut self) -> std::io::Result<EntryProjects> {
         load_welcome_screen_data(&self.storage)
     }
 
@@ -4268,27 +4273,8 @@ impl WorkspaceLoader for FsWorkspaceLoader {
     }
 
     fn cleanup_missing(&mut self, paths: Option<&[PathBuf]>) -> std::io::Result<Vec<PathBuf>> {
-        // A bulk cleanup includes registrations hidden from the picker. Recheck
-        // at confirmation time in case a directory was restored.
-        let registered;
-        let candidates = if let Some(selected) = paths {
-            selected
-        } else {
-            registered = self
-                .storage
-                .load_workspaces()
-                .map_err(io_error)?
-                .into_iter()
-                .map(|workspace| workspace.path)
-                .collect::<Vec<_>>();
-            &registered
-        };
-        let missing = self.missing_paths(candidates)?;
-        Ok(workspace_usecase::remove(&self.storage, &missing)
-            .map_err(io_error)?
-            .into_iter()
-            .map(|workspace| workspace.path)
-            .collect())
+        workspace_usecase::forget_missing(&self.storage, paths, workspace_directory_missing)
+            .map_err(io_error)
     }
 
     fn unregister(&mut self, paths: &[PathBuf]) -> std::io::Result<Vec<PathBuf>> {
@@ -4396,10 +4382,7 @@ impl WorkspaceLoader for FsWorkspaceLoader {
 }
 
 #[coverage(off)] // coverage: reason=generic_monomorphization owner=tui expires=2027-01-31 tests=welcome_start_loads_or_projects_storage_errors
-fn load_screen_graph_data(
-    storage: &Storage,
-    start: Start,
-) -> std::io::Result<(Vec<Workspace>, Vec<Recent>)> {
+fn load_screen_graph_data(storage: &Storage, start: Start) -> std::io::Result<EntryProjects> {
     match start {
         Start::Welcome => load_welcome_screen_data(storage),
         Start::Config => Ok(load_welcome_screen_data(storage).unwrap_or_default()),
@@ -4407,10 +4390,14 @@ fn load_screen_graph_data(
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=welcome_start_loads_or_projects_storage_errors
-fn load_welcome_screen_data(storage: &Storage) -> std::io::Result<(Vec<Workspace>, Vec<Recent>)> {
-    let workspaces = visible_workspaces(storage)?;
-    let recent = workspace_usecase::recent_for_workspaces(storage, workspaces.clone());
-    Ok((workspaces, recent))
+fn load_welcome_screen_data(storage: &Storage) -> std::io::Result<EntryProjects> {
+    let (available, missing) = classify_registrations(storage)?;
+    let recent = workspace_usecase::recent_for_workspaces(storage, available.clone());
+    Ok(EntryProjects {
+        available,
+        missing,
+        recent,
+    })
 }
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=real_pty_entry_resize_quit_and_reattach_restore_terminal
@@ -4512,7 +4499,7 @@ fn launch_screen_graph(
     let now = Utc::now();
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         let storage = Storage::open_default().map_err(io_error)?;
-        let (workspaces, recent) = load_screen_graph_data(&storage, start)?;
+        let projects = load_screen_graph_data(&storage, start)?;
         let mut loader = FsWorkspaceLoader::new(storage);
         let mut settings = PersistentSettingsPort::open()?;
         // Capture once before raw mode and retain it across Config reopens and
@@ -4533,8 +4520,7 @@ fn launch_screen_graph(
             presentation::run_screen_graph(
                 terminal,
                 presentation::ScreenGraphRun::new(
-                    workspaces,
-                    recent,
+                    projects,
                     now,
                     start,
                     &mut loader,
@@ -4552,7 +4538,7 @@ fn launch_screen_graph(
                 welcome::render(
                     0,
                     0,
-                    &Welcome::new(load_welcome_screen_data(&storage)?.1),
+                    &Welcome::new(load_welcome_screen_data(&storage)?.recent),
                     now,
                 )
             }
@@ -4778,13 +4764,11 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     if error.kind() == std::io::ErrorKind::Interrupted {
-                        let (workspaces, recent) =
-                            load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                        let projects = load_screen_graph_data(&loader.storage, Start::Welcome)?;
                         return presentation::run_screen_graph(
                             terminal,
                             presentation::ScreenGraphRun::new(
-                                workspaces,
-                                recent,
+                                projects,
                                 Utc::now(),
                                 Start::Welcome,
                                 &mut loader,
@@ -4798,13 +4782,11 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                     let Some(notice) = application::open_failure_notice(&error) else {
                         return Err(error);
                     };
-                    let (workspaces, recent) =
-                        load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                    let projects = load_screen_graph_data(&loader.storage, Start::Welcome)?;
                     return presentation::run_screen_graph(
                         terminal,
                         presentation::ScreenGraphRun::new(
-                            workspaces,
-                            recent,
+                            projects,
                             Utc::now(),
                             Start::Welcome,
                             &mut loader,
@@ -4840,13 +4822,11 @@ fn launch_workspace(out: &mut dyn Write, path: &Path) -> std::io::Result<()> {
                 Exit::Welcome => {
                     // Read Recent now, not at launch: the workspace that was
                     // just left is the most recent one and belongs at the top.
-                    let (workspaces, recent) =
-                        load_screen_graph_data(&loader.storage, Start::Welcome)?;
+                    let projects = load_screen_graph_data(&loader.storage, Start::Welcome)?;
                     presentation::run_screen_graph(
                         terminal,
                         presentation::ScreenGraphRun::new(
-                            workspaces,
-                            recent,
+                            projects,
                             Utc::now(),
                             Start::Welcome,
                             &mut loader,
@@ -8512,23 +8492,29 @@ mod tests {
     #[test]
     fn welcome_start_loads_or_projects_storage_errors() {
         let healthy = tempfile::tempdir().unwrap();
-        let (workspaces, recent) =
+        let projects =
             load_screen_graph_data(&Storage::new(healthy.path()), Start::Welcome).unwrap();
         assert_eq!(
-            workspaces,
+            projects.available,
             [] as [usagi_core::domain::workspace::Workspace; 0]
         );
-        assert_eq!(recent, [] as [usagi_core::domain::recent::Recent; 0]);
+        assert_eq!(
+            projects.recent,
+            [] as [usagi_core::domain::recent::Recent; 0]
+        );
 
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("workspaces.json"), "{ broken").unwrap();
         let storage = Storage::new(home.path());
-        let (workspaces, recent) = load_screen_graph_data(&storage, Start::Config).unwrap();
+        let projects = load_screen_graph_data(&storage, Start::Config).unwrap();
         assert_eq!(
-            workspaces,
+            projects.available,
             [] as [usagi_core::domain::workspace::Workspace; 0]
         );
-        assert_eq!(recent, [] as [usagi_core::domain::recent::Recent; 0]);
+        assert_eq!(
+            projects.recent,
+            [] as [usagi_core::domain::recent::Recent; 0]
+        );
         assert!(load_screen_graph_data(&storage, Start::Welcome).is_err());
     }
 
@@ -8548,10 +8534,11 @@ mod tests {
         );
         loader.storage.save_unites(&[group]).unwrap();
 
-        let (visible, recent) = loader.entry_projects().unwrap();
-        assert_eq!(visible, vec![keep.clone()]);
-        assert_eq!(recent.len(), 2);
-        for item in recent {
+        let projects = loader.entry_projects().unwrap();
+        assert_eq!(projects.missing, vec![gone.clone()]);
+        assert_eq!(projects.available, vec![keep.clone()]);
+        assert_eq!(projects.recent.len(), 2);
+        for item in projects.recent {
             match item {
                 Recent::Workspace(single) => assert_eq!(single.workspace, keep),
                 Recent::Unite(group) => {
@@ -8562,7 +8549,7 @@ mod tests {
         }
         assert_eq!(loader.storage.load_workspaces().unwrap(), registered);
         std::fs::create_dir(&gone.path).unwrap();
-        assert_eq!(loader.entry_projects().unwrap().0, registered);
+        assert_eq!(loader.entry_projects().unwrap().available, registered);
         assert_eq!(
             loader
                 .cleanup_missing(Some(std::slice::from_ref(&gone.path)))

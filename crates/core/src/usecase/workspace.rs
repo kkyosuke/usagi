@@ -133,6 +133,54 @@ pub fn remove(
     })
 }
 
+/// Forget the selected registrations whose directories are still missing, including their
+/// saved group and resume history. A bulk cleanup supplies no path selection.
+///
+/// # Errors
+/// Returns classification or persistence failures. The registry is written last, so a
+/// failed history update leaves the registration available for a retry.
+pub fn forget_missing(
+    storage: &impl WorkspaceRepository,
+    selected: Option<&[std::path::PathBuf]>,
+    missing: impl Fn(&Path) -> std::io::Result<bool>,
+) -> Result<Vec<std::path::PathBuf>> {
+    storage.transact(|tx| {
+        let mut registered = tx.load_workspaces()?;
+        let mut removed = Vec::new();
+        for workspace in &registered {
+            if selected.is_none_or(|paths| paths.contains(&workspace.path))
+                && missing(&workspace.path)?
+            {
+                removed.push(workspace.path.clone());
+            }
+        }
+        if removed.is_empty() {
+            return Ok(removed);
+        }
+        let mut groups = tx.load_unites()?;
+        let last = tx.last_projects()?;
+        if groups
+            .iter()
+            .any(|g| g.paths.iter().any(|p| removed.contains(p)))
+        {
+            for group in &mut groups {
+                group.paths.retain(|p| !removed.contains(p));
+            }
+            groups.retain(|g| !g.paths.is_empty());
+            tx.save_unites(&groups)?;
+        }
+        if let Some(mut last) = last
+            && last.paths.iter().any(|p| removed.contains(p))
+        {
+            last.retain_paths(|p| !removed.iter().any(|removed| removed == p));
+            tx.replace_last_projects((!last.paths.is_empty()).then_some(&last))?;
+        }
+        registered.retain(|w| !removed.contains(&w.path));
+        tx.save_workspaces(&registered)?;
+        Ok(removed)
+    })
+}
+
 /// Build recent-list entries for all registered workspaces, ordered by
 /// `updated_at` descending.
 ///
@@ -585,6 +633,53 @@ mod tests {
         fs::write(storage.dir().join("workspaces.json"), "{ broken").unwrap();
 
         assert!(open(&storage, tmp.path(), ts(12)).is_err());
+    }
+
+    #[test]
+    fn forgetting_a_missing_project_prunes_stored_history_and_preserves_other_members() {
+        use crate::domain::recent::LastProjectSet;
+        let (_tmp, storage) = storage();
+        let keep = workspace("keep", "/keep", ts(1));
+        let gone = workspace("gone", "/gone", ts(2));
+        let group = Unite::new(vec![gone.path.clone(), keep.path.clone()], ts(3));
+        let last = LastProjectSet {
+            paths: group.paths.clone(),
+            active: gone.path.clone(),
+        };
+        storage
+            .save_workspaces(&[keep.clone(), gone.clone()])
+            .unwrap();
+        storage.save_unites(&[group]).unwrap();
+        storage.save_last_projects(&last).unwrap();
+
+        let selected = std::slice::from_ref(&gone.path);
+        assert!(
+            super::forget_missing(&storage, Some(selected), |_| Err(
+                std::io::ErrorKind::PermissionDenied.into()
+            ))
+            .is_err()
+        );
+        assert_eq!(storage.load_last_projects().unwrap(), Some(last));
+        assert_eq!(
+            super::forget_missing(&storage, Some(selected), |_| Ok(true)).unwrap(),
+            selected
+        );
+        let surviving = vec![keep.path.clone()];
+        assert_eq!(
+            storage.load_unites().unwrap(),
+            vec![Unite::new(surviving.clone(), ts(3))]
+        );
+        assert_eq!(
+            storage.load_last_projects().unwrap(),
+            Some(LastProjectSet {
+                paths: surviving,
+                active: keep.path.clone()
+            })
+        );
+        assert_eq!(storage.load_workspaces().unwrap(), vec![keep.clone()]);
+        super::forget_missing(&storage, None, |_| Ok(true)).unwrap();
+        assert_eq!(storage.load_last_projects().unwrap(), None);
+        assert_eq!(storage.load_unites().unwrap(), Vec::<Unite>::new());
     }
 
     #[test]

@@ -143,6 +143,20 @@ pub trait WorkspaceRegistryTransaction {
     ///
     /// Returns an error when Unite storage cannot be written.
     fn save_unites(&self, unites: &[Unite]) -> Result<()>;
+    /// Read the saved tab order under the registry lock.
+    ///
+    /// # Errors
+    /// Returns an error if the existing deck cannot be read.
+    fn last_projects(&self) -> Result<Option<crate::domain::recent::LastProjectSet>>;
+
+    /// Replace the saved deck, or clear it after its last member is removed.
+    ///
+    /// # Errors
+    /// Returns an error if the change cannot be persisted.
+    fn replace_last_projects(
+        &self,
+        projects: Option<&crate::domain::recent::LastProjectSet>,
+    ) -> Result<()>;
 }
 
 /// Persistence required by workspace registry and recent-list usecases.

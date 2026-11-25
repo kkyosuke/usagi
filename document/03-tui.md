@@ -58,7 +58,7 @@ lifecycle は [5. daemon](05-daemon.md) を参照する。全画面を横断し�
 ## 画面と入力
 
 Welcome はマスコットと控えめな緑のロゴ、`Open last projects`、`Open / add projects`、
-`Clone repository` をまとめ、全体の中心を画面の上から約 1/3 に置く。Config / Quit はメニューの直下、
+`Clone repository` をまとめる。Welcome・Open・New・Config はマスコットの位置を端末の高さで固定するため、絞り込みや通知によって行がずれることはない。Config / Quit はメニューの直下、
 操作ヒントだけを最下行に表示する。高さ 20 行未満ではマスコットと項目間の余白を省き、短い端末では操作項目を優先する。
 前回の作業があれば再開を初期選択にし、project 名を薄く 1 行で添える。件数・active project の補足行、
 Recent のカード、番号ショートカットは置かない。履歴がなければ Open を選ぶ。
@@ -71,9 +71,10 @@ Open / add projects は `Tab` で Projects / Recent / Directory を切り替え�
 Recent は単体 workspace と保存済み Unite deck の履歴を検索して開く。Directory は既存ディレクトリを入力し、
 共通の open 経路で canonicalize・登録して開く。入力エラーは画面上に表示し、入力を保持する。
 project を離れて Welcome に戻ると保存済み履歴を読み直すため、同じ起動中に追加した project やグループも Recent に現れる。
-ディレクトリの削除を確認できた project は、一覧の読み込み時に Projects、Recent、Home の `+ Open`、前回の再開候補から外す。
-グループは残った member の順序を保ち、空なら表示しない。登録と保存済み履歴は保持するため、ディレクトリを元に戻すと次の読み込みで再表示される。
-Projects の `C` で確認すると、非表示のものも含め、その時点でディレクトリが存在しない project の登録を解除する。
+ディレクトリの消失を確認できた登録は Projects に残し、タブ列に警告アイコンと件数、行には `⚠ Folder missing` を表示する。
+該当行を選んで `Enter` を押すと、その場所を再確認し、まだ見つからない場合にその登録と Unite・前回のタブ履歴から該当パスを取り除く。
+ほかの行のマークは削除対象に含めない。`C` で一括整理を確定した場合は、フォルダが消失した全登録を同様に整理する。
+Recent・Home の `+ Open`・再開候補には既存のメンバーを順序通り表示する。整理する前にフォルダを元に戻せば次の読み込みで通常の行に戻る。
 New と Config はそれぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
 
 前回の作業は user-data scope の `last-projects.json` に project の順序と active path を versioned/atomic に保存する。

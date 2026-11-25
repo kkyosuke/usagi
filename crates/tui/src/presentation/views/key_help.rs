@@ -134,7 +134,11 @@ impl Context {
                 ("Space", "mark project"),
                 ("Ctrl-X", "unregister selected"),
                 ("C", "clean missing registrations"),
-                ("Enter / Esc", "open / back"),
+                (
+                    "Enter",
+                    "open project or remove a missing registration and its history",
+                ),
+                ("Esc", "back"),
             ],
             Self::OpenUnregister | Self::MissingWorkspace => &[
                 ("← → / Tab", "choose remove or cancel"),

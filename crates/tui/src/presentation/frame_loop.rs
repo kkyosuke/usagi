@@ -16,10 +16,10 @@ use super::{
     MissingWorkspacePrompt, New, NewStep, Notice, ObservationLane, Open, OpenStep, OperationId,
     Overlay, OverlayIntent, PROJECT_BAR_ROWS, PaneLaunch, PaneTab, Path, PendingCreate,
     PendingWorkspaceCreate, PointerEvent, PointerKind, PrModalClickRoute, ProjectBarTarget,
-    ProjectedSession, REGISTRY_REFRESH_INTERVAL, Receiver, Recent, RestoreJobOutcome,
-    RestoreRetryState, Route, Screen, SessionBackendCompletion, SessionCommand, SessionCommandLane,
-    SessionId, SessionRefreshPort, SessionWorktreeHint, SettingsPort, Start, Style, TabSelection,
-    Target, Terminal, TerminalRef, TerminalViewProjection, Utc, Welcome, WelcomeStep, Workspace,
+    ProjectedSession, REGISTRY_REFRESH_INTERVAL, Receiver, RestoreJobOutcome, RestoreRetryState,
+    Route, Screen, SessionBackendCompletion, SessionCommand, SessionCommandLane, SessionId,
+    SessionRefreshPort, SessionWorktreeHint, SettingsPort, Start, Style, TabSelection, Target,
+    Terminal, TerminalRef, TerminalViewProjection, Utc, Welcome, WelcomeStep, Workspace,
     WorkspaceConfigContext, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceDeck,
     WorkspaceDrawerFocus, WorkspaceEntryPolicy, WorkspaceInputRoute, WorkspaceIoRuntime,
     WorkspaceLoader, WorkspaceRuntime, WorkspaceSnapshot, WorkspaceStep, WorkspaceView,
@@ -2440,8 +2440,7 @@ impl EntryFrameMaterial {
 /// Returns workspace loading, settings, or terminal IO failures.
 pub(crate) fn run_screen_graph_with_backend_and_notice(
     term: &mut dyn Terminal,
-    workspaces: Vec<Workspace>,
-    recent: Vec<Recent>,
+    projects: super::EntryProjects,
     now: DateTime<Utc>,
     start: Start,
     loader: &mut dyn WorkspaceLoader,
@@ -2450,8 +2449,8 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
     available_models: AvailableAgentModels,
     notice: Option<String>,
 ) -> io::Result<Exit> {
-    let mut registry = workspaces.clone();
-    let mut welcome = Welcome::new(recent);
+    let mut registry = projects.available;
+    let mut welcome = Welcome::new(projects.recent);
     welcome.set_notice(notice);
     match loader.last_projects() {
         Ok(Some(last)) => welcome.set_last_projects(Some(last)),
@@ -2461,7 +2460,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             welcome.set_notice(Some(format!("Could not read last projects: {error}")));
         }
     }
-    let mut open = open_from_registry(workspaces, welcome.all_recent());
+    let mut open = open_from_registry(registry.clone(), welcome.all_recent(), projects.missing);
     let mut new_form = New::default();
     let mut config_form = Config::load_with_available_models(settings, available_models);
     let mut screen = match start {
@@ -2764,6 +2763,27 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     }
                     super::refresh_entry_projects(loader, &mut welcome, &mut open, &mut registry);
                     screen = Screen::Welcome;
+                }
+                OpenStep::RemoveMissing(path) => {
+                    match loader.cleanup_missing(Some(std::slice::from_ref(&path))) {
+                        Ok(removed) if removed.is_empty() => {
+                            super::refresh_entry_projects(
+                                loader,
+                                &mut welcome,
+                                &mut open,
+                                &mut registry,
+                            );
+                            open.set_notice(Some("Project changed. Nothing was removed.".into()));
+                        }
+                        Ok(removed) => {
+                            open.remove_paths(&removed);
+                            welcome.remove_paths(&removed);
+                            remove_registry_paths(&mut registry, &removed);
+                        }
+                        Err(error) => {
+                            open.set_notice(Some(format!("Could not remove project: {error}")));
+                        }
+                    }
                 }
                 OpenStep::ConfirmCleanup => {
                     let removed = loader.cleanup_missing(None)?;
