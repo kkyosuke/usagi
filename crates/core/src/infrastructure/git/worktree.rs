@@ -293,9 +293,9 @@ fn line_enables_checkout_filter(line: &str) -> bool {
 /// through that stable repository before deleting its branch.
 #[must_use]
 pub fn repository_unresolved(stderr: &str) -> bool {
-    stderr
-        .trim_start()
-        .starts_with("fatal: not a git repository")
+    let message = stderr.trim_start();
+    message.starts_with("fatal: not a git repository")
+        || message.starts_with("fatal: gitfile does not point to a valid repository:")
 }
 
 /// Remove the worktree at `worktree` (with `--force` when `force`).
@@ -781,6 +781,17 @@ mod tests {
             "fatal: not a git repository: /repo/.git/worktrees/agy",
         )]);
         remove_worktree(&orphan, Path::new("/dest"), Path::new("/dest"), true).unwrap();
+
+        let stale_gitfile = FakeGitRunner::new(vec![fail(
+            "fatal: gitfile does not point to a valid repository: /repo/.git",
+        )]);
+        remove_worktree(
+            &stale_gitfile,
+            Path::new("/repo"),
+            Path::new("/dest"),
+            false,
+        )
+        .unwrap();
 
         let gone = FakeGitRunner::new(vec![fail(
             "fatal: not a git repository (or any of the parent directories): .git",
