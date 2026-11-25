@@ -56,6 +56,10 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 `Ctrl-O` → `Ctrl-F` で統合検索を開き、`Tab` で検索対象を切り替えられます。
 小さい画面でも選択中の結果を優先して表示します。
 
+セッション削除時に片付けたいローカルブランチは `usagi-tmp/<セッション名>/<枝名>` で作れます。
+たとえば `review` セッションなら `git switch -c usagi-tmp/review/experiment` です。通常の削除では未マージの作業を保護します。
+[セッション削除の仕様](document/05-daemon.md#session-teardown-worker)
+
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
 Agent は成果物の保存・一覧登録を確認してから、実ファイルへのリンクを報告するよう指示されます。
 session 削除の `--force` は、保管に失敗した成果物も破棄します。

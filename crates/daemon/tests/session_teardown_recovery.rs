@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use usagi_core::domain::id::{OperationId, SessionId};
+use usagi_core::domain::session_lifecycle::SessionBranchScope;
 use usagi_core::infrastructure::git::{GitRunner, list_worktrees};
 use usagi_daemon::infrastructure::session_worktree::{SystemGit, SystemSessionWorktreeIo};
 use usagi_daemon::usecase::session_runtime::{SessionWorktreeIo, WorktreeTeardown};
@@ -63,6 +64,7 @@ impl Fixture {
                 session_root: session,
                 force: false,
                 delete_branch: true,
+                branch_scope: SessionBranchScope::IncludeTemporary,
                 branch_name: None,
                 force_delete_branch: false,
                 merged_head_oid: None,
@@ -161,4 +163,74 @@ fn registration_failure_keeps_the_branch_until_retry_can_remove_it() {
 
     git_ok(repository, &["worktree", "unlock", "--", session]);
     fixture.assert_recovered();
+}
+
+#[test]
+fn teardown_removes_only_local_branches_in_the_session_temporary_namespace() {
+    let fixture = Fixture::new();
+    let repo = &fixture.teardown.repository_root;
+    let session = &fixture.teardown.session_root;
+    git_ok(session, &["switch", "-c", "usagi-tmp/refactor/checked-out"]);
+    git_ok(session, &["branch", "usagi-tmp/refactor/unused/nested"]);
+    git_ok(session, &["branch", "feature/keep"]);
+    git_ok(session, &["branch", "usagi-tmp/refactor-other/topic"]);
+    git_ok(session, &["tag", "usagi-tmp/refactor/checked-out"]);
+
+    fixture.assert_recovered();
+    let refs = SystemGit
+        .run(repo, &["for-each-ref", "--format=%(refname)"])
+        .unwrap()
+        .stdout;
+    assert!(!refs.contains("refs/heads/usagi-tmp/refactor/"));
+    for retained in [
+        "refs/heads/feature/keep",
+        "refs/heads/usagi-tmp/refactor-other/topic",
+        "refs/tags/usagi-tmp/refactor/checked-out",
+    ] {
+        assert!(refs.lines().any(|line| line == retained), "{refs}");
+    }
+}
+
+#[test]
+fn temporary_branch_retry_protects_unmerged_work_and_other_checkouts() {
+    let mut fixture = Fixture::new();
+    let branch = "usagi-tmp/refactor/wip";
+    let repo = &fixture.teardown.repository_root;
+    let session = &fixture.teardown.session_root;
+    git_ok(session, &["switch", "-c", branch]);
+    git_ok(session, &["commit", "--allow-empty", "-m", "wip"]);
+    fixture.teardown.merged_head_oid = Some(
+        SystemGit
+            .run(session, &["rev-parse", "HEAD"])
+            .unwrap()
+            .stdout
+            .trim()
+            .to_owned(),
+    );
+
+    let effect = WorktreeTeardown::new(SystemGit, SystemSessionWorktreeIo);
+    assert!(
+        effect
+            .tear_down(&fixture.teardown)
+            .unwrap_err()
+            .contains("not fully merged")
+    );
+    git_ok(repo, &["rev-parse", "--verify", branch]);
+    let sibling = fixture.teardown.session_container.join("refactor-other");
+    git_ok(&sibling, &["switch", branch]);
+    fixture.teardown.force = true;
+    fixture.teardown.force_delete_branch = true;
+    assert!(effect.tear_down(&fixture.teardown).is_err());
+    git_ok(repo, &["rev-parse", "--verify", branch]);
+    git_ok(&sibling, &["switch", "usagi/refactor-other"]);
+    fixture.assert_recovered();
+    assert!(
+        !SystemGit
+            .run(
+                repo,
+                &["show-ref", "--verify", &format!("refs/heads/{branch}")]
+            )
+            .unwrap()
+            .success
+    );
 }

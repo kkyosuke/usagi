@@ -807,6 +807,7 @@ fn confined_teardown() -> PendingTeardown {
         session_root: PathBuf::from("/repo/.usagi/sessions/one"),
         force: false,
         delete_branch: false,
+        branch_scope: SessionBranchScope::SessionOnly,
         branch_name: None,
         force_delete_branch: false,
         merged_head_oid: None,
@@ -947,6 +948,10 @@ fn merged_pr_head_is_durable_across_teardown_worker_handoff() {
     .unwrap();
 
     let pending = runtime.lock().unwrap().pending_teardowns().unwrap();
+    assert_eq!(
+        pending[0].branch_scope,
+        SessionBranchScope::IncludeTemporary
+    );
     assert_eq!(pending[0].merged_head_oid.as_deref(), Some(head.as_str()));
     let reopened = SessionRuntime::open(
         tmp.path().to_path_buf(),
@@ -3019,6 +3024,7 @@ fn pending_teardowns_skip_incomplete_delete_records() {
         targets: vec!["missing-operation".into()],
         force: false,
         delete_branch: false,
+        branch_scope: SessionBranchScope::SessionOnly,
         branch_name: None,
         force_delete_branch: false,
         merged_head_oid: None,
@@ -3896,6 +3902,7 @@ fn a_failed_branch_deletion_fails_the_compensating_teardown() {
     let error = WorktreeTeardown::new(BranchLockedGit, SystemSessionWorktreeIo)
         .tear_down(&PendingTeardown {
             delete_branch: true,
+            branch_scope: SessionBranchScope::SessionOnly,
             repository_root: tmp.path().to_path_buf(),
             data_home,
             session_container: tmp.path().join(STATE_DIR).join(SESSIONS_DIR),
@@ -3956,8 +3963,8 @@ fn perform_remove_accepts_without_touching_the_worktree_and_hands_it_to_the_work
     );
     assert_eq!(reports[0].effect_error, None);
     assert_eq!(reports[0].finalize_error, None);
-    // Checkout removal, owning-repository registration removal, branch deletion.
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    // Checkout removal, registration removal, temporary branch inventory, session branch deletion.
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
     assert!(!session_root.exists());
     assert_eq!(
         runtime.lock().unwrap().snapshot().unwrap()["sessions"]
@@ -4092,10 +4099,10 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
             ),
             &|| false,
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         let succeeded = perform_remove(&runtime, &signal, &operation, &request).unwrap();
         assert_eq!(succeeded.operation_id, operation);
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         drop(runtime);
 
         // A terminal successful outcome also survives restart without a
@@ -4114,7 +4121,7 @@ fn remove_force_is_part_of_the_durable_identity_before_and_after_restart() {
         ));
         let after_restart = perform_remove(&restarted, &signal, &operation, &request).unwrap();
         assert_eq!(after_restart.operation_id, operation);
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(
             perform_remove(
                 &restarted,
@@ -4525,6 +4532,7 @@ fn real_teardown_rejects_a_symlinked_session_ancestor_with_zero_effect() {
         session_root: container.join("one"),
         force: true,
         delete_branch: false,
+        branch_scope: SessionBranchScope::SessionOnly,
         branch_name: None,
         force_delete_branch: false,
         merged_head_oid: None,
@@ -4959,6 +4967,7 @@ fn production_logic_coverage_contract() {
                 session_root: PathBuf::from("/repo/.usagi/sessions/one"),
                 force: false,
                 delete_branch: false,
+                branch_scope: SessionBranchScope::SessionOnly,
                 branch_name: None,
                 force_delete_branch: false,
                 merged_head_oid: None,
@@ -5269,6 +5278,7 @@ fn shared_teardown_reports_storage_failure() {
         session_root: tmp.path().join("missing"),
         force: false,
         delete_branch: false,
+        branch_scope: SessionBranchScope::SessionOnly,
         branch_name: None,
         force_delete_branch: false,
         merged_head_oid: None,
@@ -5766,8 +5776,11 @@ impl SessionWorktreeIo for MultiRepoIo {
     fn path_occupied(&self, _: &Path) -> bool {
         false
     }
-    fn is_repo_root(&self, _: &Path) -> bool {
-        false
+    fn is_repo_root(&self, path: &Path) -> bool {
+        matches!(
+            path.file_name().and_then(std::ffi::OsStr::to_str),
+            Some("svc-a" | "svc-b")
+        )
     }
     fn is_linked_worktree(&self, _: &Path) -> bool {
         true
@@ -5824,22 +5837,24 @@ fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
 
     let mut teardown = confined_teardown();
     teardown.delete_branch = true;
+    teardown.branch_scope = SessionBranchScope::IncludeTemporary;
     let teardown_git = RecordingGit::new();
     let calls = Arc::clone(&teardown_git.calls);
     WorktreeTeardown::new(teardown_git, MultiRepoIo { fail_repos: false })
         .tear_down(&teardown)
         .unwrap();
     let recorded = calls.lock().unwrap();
-    assert!(
-        recorded
-            .iter()
-            .any(|(repo, _)| repo == Path::new("/repo/svc-a"))
-    );
-    assert!(
-        recorded
-            .iter()
-            .any(|(repo, _)| repo == Path::new("/repo/svc-b"))
-    );
+    for owner in ["/repo/svc-a", "/repo/svc-b"] {
+        assert!(recorded.iter().any(|(repo, args)| {
+            repo == Path::new(owner)
+                && args
+                    == &[
+                        "for-each-ref",
+                        "--format=%(refname)",
+                        "refs/heads/usagi-tmp/one/",
+                    ]
+        }));
+    }
     drop(recorded);
 
     assert!(
@@ -5898,4 +5913,42 @@ fn multi_repo_workspace_status_and_teardown_cover_all_nested_repositories() {
         ),
         Err(SessionRuntimeError::InvalidRequest)
     );
+}
+
+#[test]
+fn temporary_branch_inventory_errors_stop_teardown() {
+    for (result, diagnosis) in [
+        (ScriptedGitResult::Error, "injected Git IO failure"),
+        (
+            ScriptedGitResult::Output {
+                success: false,
+                stdout: "",
+                stderr: "locked",
+            },
+            "inventory failed: locked",
+        ),
+        (
+            ScriptedGitResult::Output {
+                success: true,
+                stdout: "refs/heads/main",
+                stderr: "",
+            },
+            "exact session temporary branch",
+        ),
+        (
+            ScriptedGitResult::Output {
+                success: true,
+                stdout: "refs/heads/usagi-tmp/one/�",
+                stderr: "",
+            },
+            "exact session temporary branch",
+        ),
+    ] {
+        let git = ScriptedGit::new(vec![result]);
+        assert!(
+            delete_temporary_branches(&git, Path::new("/repo"), "one", true)
+                .unwrap_err()
+                .contains(diagnosis)
+        );
+    }
 }

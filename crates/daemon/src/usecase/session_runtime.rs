@@ -19,7 +19,8 @@ use usagi_core::domain::id::{
 use usagi_core::domain::role::{EffectiveRoleCatalog, RoleId, RoleScope};
 use usagi_core::domain::session_lifecycle::{
     AgentPhase, DeletePlan, Failure, FailureStage, LifecycleEvent, ManagedSession,
-    OperationJournal, OperationStatus, SetupPlan, WorkspaceLifecycleState, validate_session_name,
+    OperationJournal, OperationStatus, SessionBranchScope, SetupPlan, WorkspaceLifecycleState,
+    validate_session_name,
 };
 use usagi_core::infrastructure::git::{GitRunner, delete_branch, remove_worktree};
 use usagi_core::infrastructure::gitignore::migrate_usagi_ignore_rules;
@@ -975,6 +976,9 @@ fn delete_teardown_branch(
         .map_err(|error| error.to_string())?;
     for relative in repositories {
         let repo = join_relative(&teardown.repository_root, &relative);
+        if teardown.branch_scope == SessionBranchScope::IncludeTemporary && io.is_repo_root(&repo) {
+            delete_temporary_branches(git, &repo, &teardown.name, teardown.force_delete_branch)?;
+        }
         for branch in &branches {
             let branch_ref = format!("refs/heads/{branch}");
             let squash_merged = teardown.merged_head_oid.as_deref().is_some_and(|expected| {
@@ -989,6 +993,36 @@ fn delete_teardown_branch(
             )
             .map_err(|error| error.to_string())?;
         }
+    }
+    Ok(())
+}
+
+/// The trailing slash makes the session name a complete ref component. Use
+/// full refs so a tag with the same short name cannot affect the inventory.
+fn delete_temporary_branches(
+    git: &dyn GitRunner,
+    repo: &Path,
+    session: &str,
+    force: bool,
+) -> Result<(), String> {
+    let prefix = format!("refs/heads/usagi-tmp/{session}/");
+    let refs = git
+        .run(repo, &["for-each-ref", "--format=%(refname)", &prefix])
+        .map_err(|error| error.to_string())?;
+    if !refs.success {
+        return Err(format!(
+            "git temporary branch inventory failed: {}",
+            refs.stderr.trim()
+        ));
+    }
+    for reference in refs.stdout.lines() {
+        // GitOutput decodes bytes lossily. Never substitute a different branch
+        // name when a repository contains a ref that cannot be represented.
+        if !reference.starts_with(&prefix) || reference.contains(char::REPLACEMENT_CHARACTER) {
+            return Err("could not identify an exact session temporary branch".to_owned());
+        }
+        let branch = &reference["refs/heads/".len()..];
+        delete_branch(git, repo, branch, force).map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -2089,7 +2123,7 @@ impl SessionRuntime {
         }
         let orphan_branch =
             self.orphan_branch_for_remove(session, &name, options.orphan.discards(), pre_orphan)?;
-        let delete_branch = true;
+        let branch_scope = removal_branch_scope(kind, session);
         let session_id = session.session_id;
         let operation = journal(operation_id, self.generation, semantic_key);
         let removing = self
@@ -2102,7 +2136,8 @@ impl SessionRuntime {
                     delete_plan: DeletePlan {
                         targets: vec![name.clone()],
                         force: options.force,
-                        delete_branch,
+                        delete_branch: true,
+                        branch_scope,
                         branch_name: orphan_branch.clone(),
                         force_delete_branch: options.force_delete_branch,
                         merged_head_oid: merged_head_oid.clone(),
@@ -2129,7 +2164,8 @@ impl SessionRuntime {
                 session_root: self.session_root(&name),
                 name,
                 force: options.force,
-                delete_branch,
+                delete_branch: true,
+                branch_scope,
                 branch_name: orphan_branch,
                 force_delete_branch: options.force_delete_branch,
                 merged_head_oid,
@@ -2220,6 +2256,7 @@ impl SessionRuntime {
                     name: session.name.clone(),
                     force: plan.force,
                     delete_branch: plan.delete_branch,
+                    branch_scope: plan.branch_scope,
                     branch_name: plan.branch_name.clone(),
                     force_delete_branch: plan.force_delete_branch,
                     merged_head_oid: plan.merged_head_oid.clone(),
@@ -2796,6 +2833,21 @@ fn purge_orphan(payload: &Value) -> Result<bool, SessionRuntimeError> {
     match payload.get("purge_orphan") {
         Some(value) => value.as_bool().ok_or(SessionRuntimeError::InvalidRequest),
         None => Ok(false),
+    }
+}
+
+/// A retry keeps the namespace its original operation admitted. Automatic
+/// rollback and integrity recovery only own their original branch targets.
+fn removal_branch_scope(kind: RemoveKind, session: &ManagedSession) -> SessionBranchScope {
+    if kind == RemoveKind::Compensating {
+        return SessionBranchScope::SessionOnly;
+    }
+    if let Some(plan) = &session.delete_plan {
+        return plan.branch_scope;
+    }
+    match session.failure.as_ref().map(|failure| &failure.stage) {
+        None | Some(FailureStage::Initialize) => SessionBranchScope::IncludeTemporary,
+        _ => SessionBranchScope::SessionOnly,
     }
 }
 

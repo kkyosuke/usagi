@@ -21,6 +21,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use usagi_core::domain::id::{OperationId, SessionId};
+use usagi_core::domain::session_lifecycle::SessionBranchScope;
 
 /// One unfinished teardown, derived from the durable lifecycle record.
 ///
@@ -41,6 +42,7 @@ pub struct PendingTeardown {
     /// durable delete plan so a resumed teardown undoes exactly as much as the
     /// admission promised.
     pub delete_branch: bool,
+    pub branch_scope: SessionBranchScope,
     /// Exact local branch to delete. Orphan recovery records the branch found
     /// in the linked worktree; ordinary sessions leave this unset and derive
     /// `usagi/<name>`.
@@ -188,6 +190,7 @@ mod tests {
             session_root: PathBuf::from("/repo/.usagi/sessions").join(name),
             force: false,
             delete_branch: false,
+            branch_scope: SessionBranchScope::SessionOnly,
             branch_name: None,
             force_delete_branch: false,
             merged_head_oid: None,
