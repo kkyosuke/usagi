@@ -210,11 +210,13 @@ pub trait WorkspaceLoader: Send {
     /// Returns an error if the optional resume store cannot be read.
     fn last_projects(&mut self) -> io::Result<Option<usagi_core::domain::recent::LastProjectSet>>;
 
-    /// Reload the committed single-project and group history after leaving a deck.
+    /// Reload selectable registrations and their single-project and group history together.
     ///
     /// # Errors
     /// Returns an error if the history projection cannot be read.
-    fn recent_projects(&mut self) -> io::Result<Vec<usagi_core::domain::recent::Recent>>;
+    fn entry_projects(
+        &mut self,
+    ) -> io::Result<(Vec<Workspace>, Vec<usagi_core::domain::recent::Recent>)>;
 
     /// Save tab order and the active project after a successful deck change.
     ///
@@ -253,12 +255,13 @@ pub trait WorkspaceLoader: Send {
 
     /// Remove entries that no longer point at directories and return the paths
     /// removed from the core-owned workspace registry. The caller has already
-    /// obtained explicit user confirmation before invoking this operation.
+    /// obtained explicit user confirmation for the selected paths or, for
+    /// bulk cleanup (`None`), all registrations including hidden ones.
     ///
     /// # Errors
     ///
     /// Returns an error when checking or mutating the registry fails.
-    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>>;
+    fn cleanup_missing(&mut self, paths: Option<&[PathBuf]>) -> io::Result<Vec<PathBuf>>;
 
     /// Remove exactly the confirmed paths from the global workspace registry.
     /// This never removes directories or workspace-local data.

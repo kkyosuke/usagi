@@ -147,7 +147,14 @@ pub fn remove(
 /// Returns an error when the global workspace registry cannot be read. Errors
 /// confined to an individual registered workspace are degraded to zero counts.
 pub fn recent(storage: &impl WorkspaceRepository) -> Result<Vec<Recent>> {
-    let mut workspaces = storage.load_workspaces()?;
+    Ok(recent_for_workspaces(storage, storage.load_workspaces()?))
+}
+
+/// Build the ordered single and Unite history from one caller-selected registry snapshot.
+pub fn recent_for_workspaces(
+    storage: &impl WorkspaceRepository,
+    mut workspaces: Vec<Workspace>,
+) -> Vec<Recent> {
     workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.updated_at));
     let overviews = workspaces
         .into_iter()
@@ -181,7 +188,7 @@ pub fn recent(storage: &impl WorkspaceRepository) -> Result<Vec<Recent>> {
         .chain(unites)
         .collect::<Vec<_>>();
     recent.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
-    Ok(recent)
+    recent
 }
 
 /// Touch one ordered project-tab set in user-data storage.

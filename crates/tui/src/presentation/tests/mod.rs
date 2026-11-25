@@ -2583,6 +2583,7 @@ struct FakeLoader {
     save_projects_error: Option<&'static str>,
     activation_failure_path: Option<PathBuf>,
     recent_projects: Vec<Recent>,
+    entry_registry: Vec<Workspace>,
     recent_projects_error: Option<&'static str>,
     operation_mode: FakeOperationMode,
     opened: Vec<PathBuf>,
@@ -2707,11 +2708,11 @@ impl WorkspaceLoader for FakeLoader {
         Ok(())
     }
 
-    fn recent_projects(&mut self) -> io::Result<Vec<Recent>> {
+    fn entry_projects(&mut self) -> io::Result<(Vec<Workspace>, Vec<Recent>)> {
         if let Some(error) = self.recent_projects_error {
             return Err(io::Error::other(error));
         }
-        Ok(self.recent_projects.clone())
+        Ok((self.entry_registry.clone(), self.recent_projects.clone()))
     }
 
     fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
@@ -2762,14 +2763,11 @@ impl WorkspaceLoader for FakeLoader {
             .collect())
     }
 
-    fn cleanup_missing(&mut self, workspaces: &[Workspace]) -> io::Result<Vec<PathBuf>> {
+    fn cleanup_missing(&mut self, paths: Option<&[PathBuf]>) -> io::Result<Vec<PathBuf>> {
         self.cleanup_calls += 1;
-        self.cleanup_candidates.push(
-            workspaces
-                .iter()
-                .map(|workspace| workspace.path.clone())
-                .collect(),
-        );
+        if let Some(paths) = paths {
+            self.cleanup_candidates.push(paths.to_vec());
+        }
         Ok(self.cleanup_removed.clone())
     }
 

@@ -71,7 +71,9 @@ Open / add projects は `Tab` で Projects / Recent / Directory を切り替え�
 Recent は単体 workspace と保存済み Unite deck の履歴を検索して開く。Directory は既存ディレクトリを入力し、
 共通の open 経路で canonicalize・登録して開く。入力エラーは画面上に表示し、入力を保持する。
 project を離れて Welcome に戻ると保存済み履歴を読み直すため、同じ起動中に追加した project やグループも Recent に現れる。
-登録解除ではグループの残存 member を保持し、空になった履歴だけを除く。
+ディレクトリの削除を確認できた project は、一覧の読み込み時に Projects、Recent、Home の `+ Open`、前回の再開候補から外す。
+グループは残った member の順序を保ち、空なら表示しない。登録と保存済み履歴は保持するため、ディレクトリを元に戻すと次の読み込みで再表示される。
+Projects の `C` で確認すると、非表示のものも含め、その時点でディレクトリが存在しない project の登録を解除する。
 New と Config はそれぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
 
 前回の作業は user-data scope の `last-projects.json` に project の順序と active path を versioned/atomic に保存する。
@@ -1903,7 +1905,7 @@ HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory
 1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
 アプリは helper 終了や TUI 終了後にも読み込むため、成功・未確認のコピーは OS の temporary 領域へ残す。
 未確認の helper やアプリは終了させず、自然終了を回収する。失敗が確認できたコピーは取り除く。
-本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には調査結果・HTML・画像を `artifacts/` へ保存する案内を表示する。
+本文から Esc で一覧へ、一覧から Esc で元画面へ戻る。空の一覧には確認用のファイルを `artifacts/.index.json` に登録する案内を表示する。
 
 Git の tracked / changed / ignore 判定を使わず、`artifacts/` の掲載対象ファイルを列挙する。横断一覧は
 workspace 直下の `artifacts/`、`.usagi/sessions/<name>/artifacts/` と `.usagi/artifacts/<name>/<snapshot-id>/` を対象とし、作成途中の保管先は表示しない。

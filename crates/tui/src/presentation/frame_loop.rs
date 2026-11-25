@@ -2517,7 +2517,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
             )? {
                 return Ok(exit);
             }
-            super::refresh_entry_projects(loader, &mut welcome, &mut open);
+            super::refresh_entry_projects(loader, &mut welcome, &mut open, &mut registry);
             screen = Screen::Welcome;
             drawn_material = None;
             continue;
@@ -2573,12 +2573,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                 {
                     let paths = prompt.paths.clone();
                     missing_workspace_prompt = None;
-                    let candidates = open
-                        .workspaces()
-                        .into_iter()
-                        .filter(|workspace| paths.contains(&workspace.path))
-                        .collect::<Vec<_>>();
-                    let removed = loader.cleanup_missing(&candidates)?;
+                    let removed = loader.cleanup_missing(Some(&paths))?;
                     open.remove_paths(&removed);
                     welcome.remove_paths(&removed);
                     remove_registry_paths(&mut registry, &removed);
@@ -2698,7 +2693,7 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
-                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open, &mut registry);
                     screen = Screen::Welcome;
                 }
             },
@@ -2767,11 +2762,11 @@ pub(crate) fn run_screen_graph_with_backend_and_notice(
                     )? {
                         return Ok(exit);
                     }
-                    super::refresh_entry_projects(loader, &mut welcome, &mut open);
+                    super::refresh_entry_projects(loader, &mut welcome, &mut open, &mut registry);
                     screen = Screen::Welcome;
                 }
                 OpenStep::ConfirmCleanup => {
-                    let removed = loader.cleanup_missing(&open.workspaces())?;
+                    let removed = loader.cleanup_missing(None)?;
                     open.remove_paths(&removed);
                     welcome.remove_paths(&removed);
                     remove_registry_paths(&mut registry, &removed);
