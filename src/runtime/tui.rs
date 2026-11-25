@@ -8558,6 +8558,22 @@ mod tests {
         );
         std::fs::remove_dir(&gone.path).unwrap();
         assert_eq!(loader.cleanup_missing(None).unwrap(), vec![gone.path]);
+        // A later cleanup may have no matching group at all.
+        let outside = Workspace::new("outside", temporary.path().join("outside"));
+        loader
+            .storage
+            .save_workspaces(&[keep.clone(), outside.clone()])
+            .unwrap();
+        assert_eq!(
+            loader
+                .cleanup_missing(Some(std::slice::from_ref(&outside.path)))
+                .unwrap(),
+            vec![outside.path]
+        );
+        assert_eq!(
+            loader.storage.load_unites().unwrap()[0].paths,
+            vec![keep.path.clone()]
+        );
         assert_eq!(loader.storage.load_workspaces().unwrap(), vec![keep]);
     }
 

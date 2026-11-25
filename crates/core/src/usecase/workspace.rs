@@ -691,6 +691,33 @@ mod tests {
     }
 
     #[test]
+    fn forgetting_a_project_outside_the_saved_deck_preserves_unrelated_history() {
+        use crate::domain::recent::LastProjectSet;
+        let (_tmp, storage) = storage();
+        let gone = workspace("gone", "/gone", ts(2));
+        let alpha = workspace("alpha", "/alpha", ts(1));
+        let beta = workspace("beta", "/beta", ts(1));
+        storage
+            .save_workspaces(&[alpha.clone(), beta.clone(), gone.clone()])
+            .unwrap();
+        let group = Unite::new(vec!["/alpha".into(), "/beta".into()], ts(1));
+        storage.save_unites(std::slice::from_ref(&group)).unwrap();
+        let deck = LastProjectSet {
+            paths: group.paths.clone(),
+            active: "/beta".into(),
+        };
+        storage.save_last_projects(&deck).unwrap();
+
+        assert_eq!(
+            super::forget_missing(&storage, None, |path| Ok(path == gone.path)).unwrap(),
+            vec![gone.path]
+        );
+        assert_eq!(storage.load_workspaces().unwrap(), vec![alpha, beta]);
+        assert_eq!(storage.load_unites().unwrap(), vec![group]);
+        assert_eq!(storage.load_last_projects().unwrap(), Some(deck));
+    }
+
+    #[test]
     fn remove_deletes_only_the_requested_registered_paths() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Storage::new(dir.path());
