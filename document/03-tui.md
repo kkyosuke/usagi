@@ -71,7 +71,9 @@ Open / add projects は `Tab` で Projects / Recent / Directory を切り替え�
 Recent は単体 workspace と保存済み Unite deck の履歴を検索して開く。Directory は既存ディレクトリを入力し、
 共通の open 経路で canonicalize・登録して開く。入力エラーは画面上に表示し、入力を保持する。
 project を離れて Welcome に戻ると保存済み履歴を読み直すため、同じ起動中に追加した project やグループも Recent に現れる。
-登録解除ではグループの残存 member を保持し、空になった履歴だけを除く。
+ディレクトリの削除を確認できた project は、一覧の読み込み時に Projects、Recent、Home の `+ Open`、前回の再開候補から外す。
+グループは残った member の順序を保ち、空なら表示しない。登録と保存済み履歴は保持するため、ディレクトリを元に戻すと次の読み込みで再表示される。
+Projects の `C` で確認すると、非表示のものも含め、その時点でディレクトリが存在しない project の登録を解除する。
 New と Config はそれぞれの backend port を通じて作成・保存し、失敗時は入力中の draft を保持する。
 
 前回の作業は user-data scope の `last-projects.json` に project の順序と active path を versioned/atomic に保存する。
