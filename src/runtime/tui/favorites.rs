@@ -64,10 +64,9 @@ impl SessionFavoritesWorker {
         + 'static,
     ) -> Self {
         Self::spawn(move |command, stopping, completions| {
-            let Command::Favorites(session) = command else {
-                unreachable!()
-            };
-            super::emit_session_favorites(runner(session, stopping), completions);
+            if let Command::Favorites(session) = command {
+                super::emit_session_favorites(runner(session, stopping), completions);
+            }
         })
     }
 

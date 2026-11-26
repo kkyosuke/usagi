@@ -2300,6 +2300,19 @@ fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
 }
 
 #[test]
+fn delayed_session_order_read_preserves_a_newer_manual_move() {
+    let [a, b, c] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(WorkspaceId::new(), vec![a, b, c]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(
+        update(&mut state, AppEvent::RestoreSessionOrder(vec![c, b, a])),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.sessions(), &[b, a, c]);
+    assert_eq!(state.session_order_revision(), 1);
+}
+
+#[test]
 fn session_reorder_is_inert_outside_switch_session_rows() {
     let workspace = WorkspaceId::new();
     let [a, b] = std::array::from_fn(|_| SessionId::new());
