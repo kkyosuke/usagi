@@ -59,14 +59,12 @@ impl SessionFavoritesWorker {
 
     #[cfg(test)]
     fn with_runner(
-        mut runner: impl FnMut(Option<SessionId>, &AtomicBool) -> anyhow::Result<BTreeSet<SessionId>>
+        mut runner: impl FnMut(Command, &AtomicBool) -> anyhow::Result<BTreeSet<SessionId>>
         + Send
         + 'static,
     ) -> Self {
         Self::spawn(move |command, stopping, completions| {
-            if let Command::Favorites(session) = command {
-                super::emit_session_favorites(runner(session, stopping), completions);
-            }
+            super::emit_session_favorites(runner(command, stopping), completions);
         })
     }
 
@@ -233,13 +231,13 @@ mod tests {
         let (release, ready) = mpsc::channel();
         let mut favorites = BTreeSet::new();
         let mut first = true;
-        let worker = SessionFavoritesWorker::with_runner(move |session, _| {
+        let worker = SessionFavoritesWorker::with_runner(move |command, _| {
             if first {
                 first = false;
                 started.send(()).unwrap();
                 ready.recv_timeout(Duration::from_secs(5)).unwrap();
             }
-            if let Some(session) = session
+            if let Command::Favorites(Some(session)) = command
                 && !favorites.remove(&session)
             {
                 favorites.insert(session);
@@ -332,9 +330,10 @@ mod tests {
         let held = StoreLock::acquire(&project_data_dir(workspace.path())).unwrap();
         let store = SessionFavoritesStore::new(workspace.path());
         let (started, waiting) = mpsc::channel();
-        let worker = SessionFavoritesWorker::with_runner(move |session, stopping| {
+        let session = SessionId::new();
+        let worker = SessionFavoritesWorker::with_runner(move |_, stopping| {
             let probes = Cell::new(0);
-            store.toggle_cancellable(session.unwrap(), || {
+            store.toggle_cancellable(session, || {
                 probes.set(probes.get() + 1);
                 if probes.get() == 2 {
                     started.send(()).unwrap();
@@ -343,7 +342,7 @@ mod tests {
             })
         });
         let (completions, events) = Completions::channel();
-        worker.dispatch(Some(SessionId::new()), completions);
+        worker.dispatch(Some(session), completions);
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
         let (finished, joined) = mpsc::channel();
         let shutdown = std::thread::spawn(move || {
