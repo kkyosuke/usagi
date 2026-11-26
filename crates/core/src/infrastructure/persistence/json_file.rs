@@ -767,6 +767,24 @@ pub fn write_versioned<T: Serialize + ?Sized>(dir: &Path, path: &Path, payload: 
     )
 }
 
+/// Apply the same size limit on a versioned write as its bounded reader.
+pub(crate) fn write_versioned_bounded<T: Serialize>(
+    dir: &Path,
+    path: &Path,
+    payload: &T,
+    max_bytes: usize,
+) -> Result<()> {
+    write_atomic_bounded(
+        dir,
+        path,
+        &VersionedRef {
+            version: FILE_FORMAT_VERSION,
+            inner: payload,
+        },
+        max_bytes,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -201,11 +201,15 @@ pub trait AgentPort {
 /// A scratchpad belongs to one target (workspace root or session); an
 /// environment belongs to one [`EnvScope`] (this workspace, or every workspace).
 pub trait TargetStorePort {
-    /// Read user favorites independently of session lifecycle state.
-    fn load_session_favorites(&mut self, completions: Completions) {
+    /// Read sidebar preferences independently of session lifecycle state.
+    fn load_session_preferences(&mut self, completions: Completions) {
         completions.emit(AppEvent::Backend(
             super::controller::BackendEvent::SessionFavorites(std::collections::BTreeSet::new()),
         ));
+    }
+    /// Save the sidebar order after an effective manual move.
+    fn save_session_order(&mut self, _order: Vec<SessionId>, completions: Completions) {
+        unavailable(&completions, "Session order could not be saved.");
     }
     /// Toggle a favorite, reporting a snapshot only after persistence succeeds.
     fn toggle_session_favorite(&mut self, _session: SessionId, completions: Completions) {
@@ -644,7 +648,12 @@ impl DaemonBackend {
             }),
             Effect::OpenExternalTerminal { target } => self.agent.open_external_terminal(target),
             Effect::SelectTab { direction } => self.agent.select_tab(direction),
-            Effect::LoadSessionFavorites => self.store.load_session_favorites(self.completions()),
+            Effect::SaveSessionOrder(order) => {
+                self.store.save_session_order(order, self.completions());
+            }
+            Effect::LoadSessionPreferences => {
+                self.store.load_session_preferences(self.completions());
+            }
             Effect::ToggleSessionFavorite { session } => {
                 self.store
                     .toggle_session_favorite(session, self.completions());
@@ -1406,13 +1415,18 @@ mod tests {
     #[test]
     fn session_favorites_dispatch_and_unavailable_adapter_are_explicit() {
         let mut backend = backend();
-        backend.dispatch(Effect::LoadSessionFavorites);
+        backend.dispatch(Effect::LoadSessionPreferences);
         assert_eq!(
             backend.drain_events(),
             vec![AppEvent::Backend(BackendEvent::SessionFavorites(
                 std::collections::BTreeSet::new()
             ))]
         );
+        backend.dispatch(Effect::SaveSessionOrder(vec![SessionId::new()]));
+        assert!(matches!(
+            backend.drain_events().as_slice(),
+            [AppEvent::Backend(BackendEvent::Notice(_))]
+        ));
         backend.dispatch(Effect::ToggleSessionFavorite {
             session: SessionId::new(),
         });

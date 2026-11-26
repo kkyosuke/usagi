@@ -1,5 +1,6 @@
-//! Ordered, bounded background persistence for session favorites.
+//! Ordered, bounded background persistence for sidebar preferences.
 
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,11 +13,16 @@ use usagi_core::infrastructure::store::session_favorites::SessionFavoritesStore;
 use usagi_tui::usecase::application::controller::{AppEvent, BackendEvent, Notice};
 use usagi_tui::usecase::application::daemon_backend::Completions;
 
-type Task = (Option<SessionId>, Completions);
+enum Command {
+    Favorites(Option<SessionId>),
+    SaveOrder(Vec<SessionId>),
+}
+
+type Task = (Command, Completions);
 
 /// One lane preserves toggle order and owns its thread until shutdown. A full
 /// queue reports failure rather than blocking the frame thread or dropping an
-/// accepted toggle. Closing the lane cancels queued work and reaps its worker.
+/// accepted toggle. Closing the lane flushes accepted moves and reaps its worker.
 pub(super) struct SessionFavoritesWorker {
     sender: Option<SyncSender<Task>>,
     worker: Option<JoinHandle<()>>,
@@ -26,17 +32,46 @@ pub(super) struct SessionFavoritesWorker {
 impl SessionFavoritesWorker {
     pub(super) fn new(workspace: &Path) -> Self {
         let store = SessionFavoritesStore::new(workspace);
-        Self::with_runner(move |session, stopping| match session {
-            Some(session) => store.toggle_cancellable(session, || stopping.load(Ordering::Acquire)),
-            None => store.load(),
+        Self::spawn(move |command, stopping, completions| match command {
+            Command::Favorites(session) => {
+                let result = match session {
+                    Some(id) => store.toggle_cancellable(id, || stopping.load(Ordering::Acquire)),
+                    None => store.load(),
+                };
+                super::emit_session_favorites(result, completions);
+                if session.is_none() {
+                    match store.load_order() {
+                        Ok(order) if !order.is_empty() => {
+                            completions.emit(AppEvent::RestoreSessionOrder(order));
+                        }
+                        Ok(_) => {}
+                        Err(_) => notice(completions, "Session order could not be loaded."),
+                    }
+                }
+            }
+            Command::SaveOrder(order) => {
+                if store.save_order(&order).is_err() {
+                    notice(completions, "Session order could not be saved.");
+                }
+            }
         })
     }
 
+    #[cfg(test)]
     fn with_runner(
-        runner: impl FnMut(Option<SessionId>, &AtomicBool) -> anyhow::Result<BTreeSet<SessionId>>
+        mut runner: impl FnMut(Option<SessionId>, &AtomicBool) -> anyhow::Result<BTreeSet<SessionId>>
         + Send
         + 'static,
     ) -> Self {
+        Self::spawn(move |command, stopping, completions| {
+            let Command::Favorites(session) = command else {
+                unreachable!()
+            };
+            super::emit_session_favorites(runner(session, stopping), completions);
+        })
+    }
+
+    fn spawn(runner: impl FnMut(Command, &AtomicBool, &Completions) + Send + 'static) -> Self {
         let (sender, receiver) = mpsc::sync_channel(16);
         let stopping = Arc::new(AtomicBool::new(false));
         let stop_worker = Arc::clone(&stopping);
@@ -66,11 +101,19 @@ impl SessionFavoritesWorker {
     }
 
     pub(super) fn dispatch(&self, session: Option<SessionId>, completions: Completions) {
+        self.enqueue(Command::Favorites(session), completions);
+    }
+
+    pub(super) fn save_order(&self, order: Vec<SessionId>, completions: Completions) {
+        self.enqueue(Command::SaveOrder(order), completions);
+    }
+
+    fn enqueue(&self, command: Command, completions: Completions) {
         let Some(sender) = &self.sender else {
             unavailable(&completions);
             return;
         };
-        if let Err(error) = sender.try_send((session, completions)) {
+        if let Err(error) = sender.try_send((command, completions)) {
             let (mpsc::TrySendError::Full((_, completions))
             | mpsc::TrySendError::Disconnected((_, completions))) = error;
             unavailable(&completions);
@@ -79,21 +122,29 @@ impl SessionFavoritesWorker {
 }
 
 fn unavailable(completions: &Completions) {
+    notice(
+        completions,
+        "Session preference queue is unavailable; retry.",
+    );
+}
+
+fn notice(completions: &Completions, message: &str) {
     completions.emit(AppEvent::Backend(BackendEvent::Notice(Notice::new(
-        "Session favorites queue is unavailable; retry.",
+        message,
     ))));
 }
 
 fn run(
     receiver: &Receiver<Task>,
     stopping: &AtomicBool,
-    mut runner: impl FnMut(Option<SessionId>, &AtomicBool) -> anyhow::Result<BTreeSet<SessionId>>,
+    mut runner: impl FnMut(Command, &AtomicBool, &Completions),
 ) {
-    while let Ok((session, completions)) = receiver.recv() {
-        if stopping.load(Ordering::Acquire) {
-            break;
+    while let Ok((command, completions)) = receiver.recv() {
+        // An accepted move must reach disk even when the next key closes the
+        // workspace. Order writes replace a private file without a lock wait.
+        if !stopping.load(Ordering::Acquire) || matches!(command, Command::SaveOrder(_)) {
+            runner(command, stopping, &completions);
         }
-        super::emit_session_favorites(runner(session, stopping), &completions);
     }
 }
 

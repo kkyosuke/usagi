@@ -415,8 +415,12 @@ impl EnvironmentStorePort for SettingsEnvironmentStore {
 
 #[coverage(off)] // coverage: reason=real_io owner=tui expires=2027-01-31 tests=repo_environment_store_persistence_contract
 impl BackendTargetStorePort for RepoEnvironmentStore {
-    fn load_session_favorites(&mut self, completions: Completions) {
+    fn load_session_preferences(&mut self, completions: Completions) {
         self.favorites.dispatch(None, completions);
+    }
+
+    fn save_session_order(&mut self, order: Vec<SessionId>, completions: Completions) {
+        self.favorites.save_order(order, completions);
     }
 
     fn toggle_session_favorite(
@@ -1338,7 +1342,8 @@ impl ControllerBackendFactory for ProductionBackendFactory {
             },
             clipboard: PlatformClipboard,
         }));
-        backend.dispatch(usagi_tui::usecase::application::controller::Effect::LoadSessionFavorites);
+        backend
+            .dispatch(usagi_tui::usecase::application::controller::Effect::LoadSessionPreferences);
         let (restore_connection, restore_publisher) =
             DaemonRestoreConnectionPort::channel(data_dir.clone());
         ControllerBackendComposition {
@@ -8944,7 +8949,7 @@ mod tests {
             data.path().to_path_buf(),
         );
         let (completions, receiver) = Completions::channel();
-        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        BackendTargetStorePort::load_session_preferences(&mut store, completions);
         assert_eq!(
             receiver.recv().unwrap(),
             AppEvent::Backend(BackendEvent::SessionFavorites(
@@ -8960,7 +8965,7 @@ mod tests {
         ));
         assert_eq!(receiver.recv().unwrap(), expected);
         let (completions, receiver) = Completions::channel();
-        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        BackendTargetStorePort::load_session_preferences(&mut store, completions);
         assert_eq!(receiver.recv().unwrap(), expected);
         let path = usagi_core::infrastructure::paths::project_data_dir(workspace.path())
             .join("session-favorites.json");
@@ -8972,11 +8977,81 @@ mod tests {
             AppEvent::Backend(BackendEvent::Notice(_))
         ));
         let (completions, receiver) = Completions::channel();
-        BackendTargetStorePort::load_session_favorites(&mut store, completions);
+        BackendTargetStorePort::load_session_preferences(&mut store, completions);
         assert!(matches!(
             receiver.recv().unwrap(),
             AppEvent::Backend(BackendEvent::Notice(_))
         ));
+    }
+
+    #[test]
+    fn manual_session_order_survives_immediate_close_and_reopen() {
+        use usagi_tui::usecase::application::controller::{AppKey, AppState, Effect, update};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let open = || {
+            RepoEnvironmentStore::new(
+                workspace.path(),
+                SettingsEnvironmentStore::new(data.path().to_owned(), workspace.path()),
+                data.path().to_owned(),
+            )
+        };
+        let workspace_id = WorkspaceId::new();
+        let [a, b, c, new] = std::array::from_fn(|_| SessionId::new());
+        let mut state = AppState::home(workspace_id, vec![a, b, c]);
+        let mut store = open();
+        for _ in 0..2 {
+            let effects = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+            let [Effect::SaveSessionOrder(order)] = effects.as_slice() else {
+                panic!("an effective move must request persistence");
+            };
+            let (sink, _) = Completions::channel();
+            store.save_session_order(order.clone(), sink);
+        }
+        drop(store);
+
+        let mut store = open();
+        let mut reopened = AppState::home(workspace_id, vec![new, a, c]);
+        let (sink, events) = Completions::channel();
+        store.load_session_preferences(sink);
+        for event in events {
+            assert_eq!(update(&mut reopened, event), [] as [Effect; 0]);
+        }
+        assert_eq!(reopened.sessions(), &[c, a, new]);
+        // A delayed startup read cannot undo a subsequent manual move.
+        let _ = update(&mut reopened, AppEvent::Key(AppKey::Char('P')));
+        let after_move = reopened.sessions().to_vec();
+        let _ = update(
+            &mut reopened,
+            AppEvent::RestoreSessionOrder(vec![a, c, new]),
+        );
+        assert_eq!(reopened.sessions(), after_move);
+    }
+
+    #[test]
+    fn unreadable_session_order_reports_load_and_save_failures_without_replacing_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = usagi_core::infrastructure::paths::project_data_dir(workspace.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session-order.json");
+        std::fs::write(&path, "broken").unwrap();
+        let worker = super::favorites::SessionFavoritesWorker::new(workspace.path());
+        let (sink, events) = Completions::channel();
+        worker.dispatch(None, sink);
+        assert!(matches!(
+            events.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AppEvent::Backend(BackendEvent::SessionFavorites(_))
+        ));
+        let (sink, write_events) = Completions::channel();
+        worker.save_order(vec![SessionId::new()], sink);
+        for events in [events, write_events] {
+            assert!(matches!(
+                events.recv_timeout(Duration::from_secs(5)).unwrap(),
+                AppEvent::Backend(BackendEvent::Notice(_))
+            ));
+        }
+        assert_eq!(std::fs::read(path).unwrap(), b"broken");
     }
 
     #[test]

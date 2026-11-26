@@ -145,7 +145,7 @@ Config / Quit はメニューの直下、操作ヒントは画面最下部に表
 `o` の Open / add projects では登録済み project・Recent・Directory を切り替え、複数 project の選択や既存ディレクトリの追加ができます。
 削除したディレクトリは一覧と再開候補から自動で外れ、元の場所に復元すると再び表示されます。
 Clone は `e`、全体の Config は `c` から開きます。
-サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。
+サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。ワークスペースを開き直しても、その順序を引き継ぎます。
 [Session Garden](document/assets/session-garden.gif) では、[Agent の状態に沿って動くうさぎ](document/03-tui.md#区画とうさぎ)と庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
 
 削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。

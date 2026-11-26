@@ -2266,7 +2266,7 @@ fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
     assert_eq!(state.session_order_revision(), 0);
     assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::Char('N'))),
-        [] as [Effect; 0]
+        vec![Effect::SaveSessionOrder(vec![b, a, c])]
     );
     assert_eq!(state.sessions(), &[b, a, c]);
     assert_eq!(state.selected(), Selection::Target(Target::Session(a)));
