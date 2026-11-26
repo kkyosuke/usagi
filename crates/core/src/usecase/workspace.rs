@@ -638,6 +638,8 @@ mod tests {
         assert!(open(&storage, tmp.path(), ts(12)).is_err());
     }
 
+    const MISSING_DIRECTORY: fn(&Path) -> std::io::Result<bool> = |_| Ok(true);
+
     #[test]
     fn forgetting_a_missing_project_prunes_stored_history_and_preserves_other_members() {
         use crate::domain::recent::LastProjectSet;
@@ -669,7 +671,7 @@ mod tests {
         );
         assert_eq!(storage.load_last_projects().unwrap(), Some(last));
         assert_eq!(
-            super::forget_missing(&storage, Some(selected), |_| Ok(true)).unwrap(),
+            super::forget_missing(&storage, Some(selected), MISSING_DIRECTORY).unwrap(),
             selected
         );
         let surviving = vec![keep.path.clone()];
@@ -685,7 +687,7 @@ mod tests {
             })
         );
         assert_eq!(storage.load_workspaces().unwrap(), vec![keep.clone()]);
-        super::forget_missing(&storage, None, |_| Ok(true)).unwrap();
+        super::forget_missing(&storage, None, MISSING_DIRECTORY).unwrap();
         assert_eq!(storage.load_last_projects().unwrap(), None);
         assert_eq!(storage.load_unites().unwrap(), Vec::<Unite>::new());
     }
@@ -708,9 +710,14 @@ mod tests {
         };
         storage.save_last_projects(&deck).unwrap();
 
+        let selected = Some(std::slice::from_ref(&gone.path));
         assert_eq!(
-            super::forget_missing(&storage, None, |path| Ok(path == gone.path)).unwrap(),
-            vec![gone.path]
+            super::forget_missing(&storage, selected, MISSING_DIRECTORY).unwrap(),
+            vec![gone.path.clone()]
+        );
+        assert_eq!(
+            super::forget_missing(&storage, selected, MISSING_DIRECTORY).unwrap(),
+            Vec::<PathBuf>::new()
         );
         assert_eq!(storage.load_workspaces().unwrap(), vec![alpha, beta]);
         assert_eq!(storage.load_unites().unwrap(), vec![group]);
