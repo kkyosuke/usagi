@@ -1286,24 +1286,21 @@ impl DispatchStore {
             .filter(|run| registry.results.contains_key(&run.run_id))
             .collect::<Vec<_>>();
         completed.sort_unstable_by_key(|run| std::cmp::Reverse((run.ended_at, run.run_id)));
-        let scoped = registry
-            .bindings
-            .into_iter()
-            .filter_map(|binding| {
-                Some((
-                    binding.run_id,
-                    binding
-                        .worker
-                        .session_id
-                        .filter(|session| sessions.contains(session))?,
-                ))
-            })
-            .collect::<BTreeMap<_, _>>();
+        let mut owners = BTreeMap::new();
+        for binding in registry.bindings {
+            // Match binding(run_id), including when an old file has a duplicate
+            // from a different workspace or a different root/session scope.
+            owners
+                .entry(binding.run_id)
+                .or_insert(binding.worker.session_id);
+        }
         Ok(completed
             .into_iter()
             .filter_map(|run| {
                 Some((
-                    *scoped.get(&run.run_id)?,
+                    owners
+                        .get(&run.run_id)?
+                        .filter(|id| sessions.contains(id))?,
                     run.run_id,
                     registry.results.remove(&run.run_id)?,
                 ))
@@ -2452,6 +2449,51 @@ mod tests {
         assert!(
             snapshot.failed_runs.contains(&failed),
             "a later read cannot mutate an existing request's observation"
+        );
+    }
+
+    #[test]
+    fn result_projection_uses_the_original_binding_before_applying_workspace_scope() {
+        use crate::domain::attention::PrimaryResult;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, worker, caller) = ids();
+        let other = SessionId::new();
+        let run = OperationId::new();
+        let mut registry = Registry::default();
+        let primary = PrimaryResult::Artifact("report.md".into());
+        registry.results.insert(run, primary.clone());
+        registry.runs.push(DispatchRun {
+            run_id: run,
+            agent_id: worker,
+            prompt: String::new(),
+            started_at: now(),
+            ended_at: Some(now()),
+            status: RunStatus::Completed,
+        });
+        for owner in [session, other] {
+            registry.bindings.push(DispatchBinding {
+                run_id: run,
+                caller: caller.clone(),
+                worker: WorkerRef {
+                    session_id: Some(owner),
+                    agent_id: worker,
+                },
+            });
+        }
+        json_file::write_atomic(tmp.path(), &store.registry_path(), &registry).unwrap();
+        assert_eq!(
+            store
+                .session_results(&BTreeSet::from([session, other]))
+                .unwrap(),
+            [(session, run, primary)]
+        );
+        assert_eq!(
+            store
+                .session_results(&BTreeSet::from([other]))
+                .unwrap()
+                .len(),
+            0
         );
     }
 

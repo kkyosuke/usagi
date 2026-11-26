@@ -462,6 +462,15 @@ mod tests {
     }
 
     #[test]
+    fn changes_empty_state_explains_what_will_appear() {
+        let list = AttentionList {
+            view: InboxView::Changes,
+            ..AttentionList::default()
+        };
+        assert!(empty_message(&list, false).contains("No new questions"));
+    }
+
+    #[test]
     fn rendered_tabs_and_rows_share_bounded_click_geometry() {
         let deck = populated();
         for height in [5, 12, 13, 14, 18, 24, 40] {

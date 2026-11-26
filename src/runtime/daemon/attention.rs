@@ -414,6 +414,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["report.md", "https://github.com/a/b/pull/2"]
         );
+        std::fs::write(dir.join(".index.json"), "invalid").unwrap();
+        let mut broken = WorkspaceAttention {
+            workspace,
+            items: vec![],
+        };
+        add_results(
+            &mut broken,
+            root.path(),
+            std::slice::from_ref(&entry),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(broken.items.len(), 2);
         let question = session_item(&entry, AttentionKind::Blocked, "needs action");
         snapshot.items = vec![question; ATTENTION_ITEMS_MAX - 1];
         add_results(&mut snapshot, root.path(), &[entry], &store).unwrap();

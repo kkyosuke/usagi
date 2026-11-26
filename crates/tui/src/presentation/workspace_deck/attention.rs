@@ -32,6 +32,7 @@ pub(super) struct AttentionList {
 }
 
 struct Row {
+    session: Option<SessionId>,
     identity: (WorkspaceId, String),
     context: String,
     reason: String,
@@ -79,6 +80,7 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
                     destination: destination.clone(),
                 };
                 rows.push(Row {
+                    session: item.session,
                     identity: (slot.workspace_id, item.key.clone()),
                     context: format!("{} / {}", project, sanitize_presentation_line(&item.label)),
                     reason: sanitize_presentation_line(&item.reason),
@@ -141,18 +143,13 @@ fn group_sessions(mut rows: Vec<Row>) -> Vec<Row> {
     let mut grouped = Vec::<Row>::new();
     let mut positions = std::collections::HashMap::new();
     for row in rows {
-        let OverlayIntent::AttentionVisit {
-            workspace, session, ..
-        } = &row.intent
-        else {
-            unreachable!()
-        };
-        if let Some(&index) = positions.get(&(*workspace, *session)) {
+        let session = (row.identity.0, row.session);
+        if let Some(&index) = positions.get(&session) {
             let first: &mut Row = &mut grouped[index];
             first.reason.push_str(" · ");
             first.reason.push_str(&row.reason);
         } else {
-            positions.insert((*workspace, *session), grouped.len());
+            positions.insert(session, grouped.len());
             grouped.push(row);
         }
     }
@@ -548,6 +545,49 @@ mod tests {
             }
             assert_eq!(dir.path().read_dir().unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn change_review_handles_an_empty_or_unreadable_checkpoint_and_artifact_targets() {
+        let mut deck = deck();
+        let workspace = deck.slots[0].workspace_id;
+        let temp = tempfile::tempdir().unwrap();
+        deck.begin_attention_check(false);
+        deck.set_attention_cache(Some(temp.path().to_owned()));
+        deck.begin_attention_check(false);
+        let bad = temp.path().join(format!("{workspace}.json"));
+        std::fs::write(&bad, "not a checkpoint").unwrap();
+        deck.begin_attention_check(true);
+        assert!(deck.notice.as_deref().unwrap().contains("previous check"));
+        std::fs::remove_file(bad).unwrap();
+        let mut file = item("artifact:test", AttentionKind::System);
+        file.target = Some(AttentionTarget::Result {
+            primary: PrimaryResult::Artifact("answer.md".into()),
+        });
+        update(&mut deck, 0, vec![file.clone()]);
+        assert_eq!(
+            rows(&deck.slots, "", InboxView::Changes)[0].action,
+            "New artifact"
+        );
+        let mut list = AttentionList::default();
+        for _ in 0..3 {
+            list.handle(&Key::Tab, &deck.slots);
+        }
+        assert_eq!(list.view, InboxView::Actions);
+        file.session = None;
+        assert!(!valid_snapshot(
+            workspace,
+            &WorkspaceAttention {
+                workspace,
+                items: vec![file]
+            }
+        ));
+        let mut unavailable = temp.path().join("missing");
+        unavailable.push("cache");
+        std::os::unix::fs::symlink("absent-target", temp.path().join("missing")).unwrap();
+        deck.set_attention_cache(Some(unavailable));
+        deck.begin_attention_check(true);
+        assert!(deck.notice.as_deref().unwrap().contains("save"));
     }
 
     #[test]

@@ -517,6 +517,9 @@ mod tests {
             [] as [std::string::String; 0]
         );
         std::fs::remove_file(artifacts.join(".index.json")).unwrap();
+        std::os::unix::fs::symlink("a.md", artifacts.join(".index.json")).unwrap();
+        assert!(super::indexed_session_files(root, "task", 10).is_err());
+        std::fs::remove_file(artifacts.join(".index.json")).unwrap();
         std::fs::create_dir(artifacts.join(".index.json")).unwrap();
         assert!(super::indexed_session_files(root, "task", 10).is_err());
     }
