@@ -37,8 +37,42 @@ impl AttentionKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AttentionTarget {
+    Result { primary: PrimaryResult },
     Decision { decision_id: UserDecisionId },
     PullRequest { identity: PrIdentity },
+}
+
+/// User-facing result attached to an explicitly completed agent run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimaryResult {
+    Artifact(String),
+    PullRequest(PrIdentity),
+}
+
+impl PrimaryResult {
+    pub fn from_report(result: &super::agent::StructuredResult) -> Option<Self> {
+        if let Some(path) = &result.artifact {
+            return Self::valid_artifact(path).then(|| Self::Artifact(path.clone()));
+        }
+        result
+            .pr
+            .as_deref()
+            .and_then(super::pr_inventory::canonicalize)
+            .map(Self::PullRequest)
+    }
+
+    #[must_use]
+    pub fn valid_artifact(path: &str) -> bool {
+        path != ".index.json"
+            && path != ".gitignore"
+            && !path.is_empty()
+            && path.len() <= 512
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != "." && part != "..")
+            && super::presentation_text::presentation_text_is_safe(path)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +100,36 @@ pub struct WorkspaceAttention {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn report_result_prefers_the_designated_file_and_validates_legacy_prs() {
+        use super::super::agent::StructuredResult;
+        let mut report = StructuredResult::default();
+        assert_eq!(PrimaryResult::from_report(&report), None);
+        report.pr = Some("https://github.com/example/repo/pull/2".into());
+        assert!(matches!(
+            PrimaryResult::from_report(&report),
+            Some(PrimaryResult::PullRequest(_))
+        ));
+        for path in [
+            "../escape",
+            "/etc/passwd",
+            "a//b",
+            ".",
+            ".index.json",
+            ".gitignore",
+            "",
+            "a/./b",
+            "a\nb",
+        ] {
+            assert!(!PrimaryResult::valid_artifact(path));
+        }
+        report.artifact = Some("docs/検証.md".into());
+        assert_eq!(
+            PrimaryResult::from_report(&report),
+            Some(PrimaryResult::Artifact("docs/検証.md".into()))
+        );
+    }
+
     #[test]
     fn old_snapshots_remain_readable_and_exact_targets_round_trip() {
         let mut item: AttentionItem = serde_json::from_value(serde_json::json!({

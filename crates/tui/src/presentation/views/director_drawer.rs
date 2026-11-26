@@ -452,7 +452,7 @@ fn empty_conversation_rows(rows: &mut Vec<String>, content_capacity: usize) {
         rows.push(
             Style::new()
                 .dim()
-                .paint("Conversation inventory is not connected."),
+                .paint("Delegate work in a separate session from the Director Console."),
         );
     }
     if content_capacity <= before + 2 {
@@ -838,7 +838,7 @@ mod tests {
 
         assert!(body.contains("live output without inventory"));
         assert!(!body.contains("No conversations yet"));
-        assert!(!body.contains("Conversation inventory is not connected."));
+        assert!(!body.contains("Delegate work in a separate session from the Director Console."));
     }
 
     #[test]

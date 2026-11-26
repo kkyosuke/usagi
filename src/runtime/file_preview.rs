@@ -386,20 +386,24 @@ fn artifact_open_view_with(
         .components()
         .skip(prefix_len)
         .collect::<PathBuf>();
-    // Standalone images/PDFs/text need only the selected file. Documents with
-    // relative references need the artifact tree; unrelated large artifacts
-    // must not prevent opening a small standalone file.
     let entries = if matches!(extension.as_str(), "html" | "htm" | "md" | "svg") {
-        let directory = root.join(&artifact_root);
-        match usagi_core::infrastructure::artifacts::review_assets(&directory, &selected)
-            .map_err(files_unavailable)?
-        {
-            Some(assets) => assets,
-            None => usagi_core::infrastructure::artifacts::files(&directory)
-                .map_err(files_unavailable)?,
-        }
-    } else {
+        usagi_core::infrastructure::artifacts::published_document_files(
+            &source_directory,
+            &artifact_root,
+            &selected,
+        )
+        .map_err(files_unavailable)?
+        .ok_or(FilePreviewError::FileUnavailable)?
+    } else if usagi_core::infrastructure::artifacts::published_selection(
+        &source_directory,
+        &artifact_root,
+        &selected,
+    )
+    .map_err(files_unavailable)?
+    {
         Vec::new()
+    } else {
+        return Err(FilePreviewError::FileUnavailable);
     };
     let directory = create().map_err(file_unavailable)?;
     let mut remaining = MAX_ARTIFACT_OPEN_BYTES;
@@ -597,6 +601,39 @@ mod tests {
         Ok(files)
     }
 
+    #[test]
+    fn result_open_respects_the_current_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("artifacts");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("report.md"), "completed").unwrap();
+        fs::write(directory.join("detail.json"), "{}").unwrap();
+        let open = |path| artifact_open_view(root.path(), path, PreviewFileFilter::Artifacts);
+        assert!(open("artifacts/report.md").is_ok());
+        assert!(matches!(
+            open("artifacts/detail.json"),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        let index = directory.join(".index.json");
+        fs::write(&index, r#"["detail.json"]"#).unwrap();
+        assert!(open("artifacts/detail.json").is_ok());
+        assert!(matches!(
+            open("artifacts/report.md"),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        fs::remove_file(&index).unwrap();
+        fs::create_dir(&index).unwrap();
+        assert!(matches!(
+            open("artifacts/report.md"),
+            Err(FilePreviewError::FilesUnavailable)
+        ));
+        fs::remove_dir(&index).unwrap();
+        std::os::unix::fs::symlink("report.md", index).unwrap();
+        assert!(matches!(
+            open("artifacts/report.md"),
+            Err(FilePreviewError::FilesUnavailable)
+        ));
+    }
     #[test]
     fn listing_sorts_deduplicates_and_rejects_unsafe_paths() {
         assert_eq!(
@@ -1429,26 +1466,22 @@ mod tests {
     }
 
     #[test]
-    fn an_old_publication_can_still_open_after_an_index_refresh() {
+    fn a_superseded_publication_keeps_its_link_but_cannot_be_opened_from_a_stale_selection() {
         let root = tempdir().unwrap();
         let bundle = format!("review-{}", "0".repeat(64));
-        let directory = root.path().join("artifacts").join(&bundle);
-        fs::create_dir_all(directory.join("assets")).unwrap();
-        fs::write(directory.join("spec.md"), "![chart](assets/chart.png)").unwrap();
-        fs::write(directory.join("assets/chart.png"), "original chart").unwrap();
-        fs::write(root.path().join("artifacts/.index.json"), "[]").unwrap();
-        File::create(root.path().join("artifacts/unrelated.log"))
-            .unwrap()
-            .set_len(MAX_ARTIFACT_OPEN_BYTES + 1)
-            .unwrap();
-        let old_path = format!("artifacts/{bundle}/spec.md");
-        let view =
-            artifact_open_view(root.path(), &old_path, PreviewFileFilter::Artifacts).unwrap();
+        let path = format!("artifacts/{bundle}/spec.md");
+        let output = root.path().join("artifacts");
+        fs::create_dir_all(output.join(&bundle)).unwrap();
+        fs::write(root.path().join(&path), "original spec").unwrap();
+        fs::write(output.join(".index.json"), "[]").unwrap();
+        assert!(matches!(
+            artifact_open_view(root.path(), &path, PreviewFileFilter::Artifacts),
+            Err(FilePreviewError::FileUnavailable)
+        ));
         assert_eq!(
-            fs::read(view.path().with_file_name("assets/chart.png")).unwrap(),
-            b"original chart"
+            fs::read_to_string(root.path().join(&path)).unwrap(),
+            "original spec"
         );
-        assert!(!view.directory.path().join("unrelated.log").exists());
     }
 
     #[test]

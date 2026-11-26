@@ -3147,10 +3147,13 @@ fn production_dispatch_worker_complete_reaches_the_caller_inbox() {
         "codex",
         r#"#!/bin/sh
 if [ "$1" = login ] && [ "$2" = status ]; then exit 0; fi
+mkdir -p artifacts
+printf '%s\n' 'fixture green' > artifacts/verification.txt
+printf '%s\n' '["verification.txt"]' > artifacts/.index.json
 printf '%s\n%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"fixture-worker","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"verification":"fixture green"}}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_complete","arguments":{"summary":"fixture completed","result":{"artifact":"verification.txt","verification":"fixture green"}}}}' \
   | "$USAGI_E2E_USAGI" mcp >> "$USAGI_MCP_FIXTURE_LOG"
 "#,
     );
@@ -3234,6 +3237,15 @@ printf '%s\n%s\n%s\n' \
     assert_eq!(message["result"]["commits"], json!([]));
     assert_eq!(message["result"]["changed_files"], json!([]));
     assert_eq!(message["result"]["verification"], "fixture green");
+    assert_eq!(message["result"]["artifact"], "verification.txt");
+    assert_eq!(
+        std::fs::read_to_string(
+            mcp.workspace()
+                .join(".usagi/sessions/mcp-worker/artifacts/verification.txt")
+        )
+        .unwrap(),
+        "fixture green\n"
+    );
     let page = tool_text(&mcp.tool("agent_inbox", &json!({"unread_only":true,"limit":1})));
     let next_cursor = page["next_cursor"].as_u64().unwrap();
     let ack = mcp.tool("agent_inbox_ack", &json!({"cursor":next_cursor}));

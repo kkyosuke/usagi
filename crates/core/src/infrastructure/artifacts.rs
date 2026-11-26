@@ -229,6 +229,43 @@ fn valid_purpose(purpose: &str) -> bool {
         && purpose.chars().all(presentation_character_is_safe)
 }
 
+/// Read only explicitly published paths. Pin the workspace directory and refuse
+/// symlink traversal through the session container or any artifact directory.
+///
+/// # Errors
+/// Returns an error for an inaccessible, unsafe or malformed artifact index.
+pub fn indexed_session_files(
+    workspace: &Path,
+    session: &str,
+    limit: usize,
+) -> io::Result<Vec<String>> {
+    if session.is_empty() || session == "." || session == ".." || session.contains('/') {
+        return Err(invalid());
+    }
+    let prefix = Path::new(STATE_DIR)
+        .join(SESSIONS_DIR)
+        .join(session)
+        .join(ARTIFACTS_DIR);
+    let mut index = match open_relative(workspace, &prefix.join(ARTIFACT_INDEX)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    if !index.metadata()?.is_file() {
+        return Err(invalid());
+    }
+    let mut paths = Vec::new();
+    for relative in read_index(&mut index)?.into_keys().take(limit) {
+        let Ok(file) = open_relative(workspace, &prefix.join(&relative)) else {
+            continue;
+        };
+        if file.metadata()?.is_file() {
+            paths.push(relative.to_string_lossy().into_owned());
+        }
+    }
+    Ok(paths)
+}
+
 fn read_index(input: &mut dyn Read) -> io::Result<Index> {
     let mut bytes = Vec::new();
     input.take(MAX_INDEX_BYTES + 1).read_to_end(&mut bytes)?;
@@ -257,40 +294,6 @@ fn read_index(input: &mut dyn Read) -> io::Result<Index> {
         result.insert(path.to_owned(), entry);
     }
     Ok(result)
-}
-
-/// Resolve explicitly declared assets relative to their artifact root. Legacy entries
-/// return None so their previously supported relative links continue to work.
-///
-/// # Errors
-/// Rejects invalid indexes.
-pub fn review_assets(root: &Path, selected: &Path) -> io::Result<Option<Vec<PathBuf>>> {
-    let parent = selected.parent().ok_or_else(invalid)?;
-    let Some(mut index) = load_index(root)? else {
-        return Ok(None);
-    };
-    match index.remove(selected) {
-        Some(Entry::Review(review)) => {
-            Ok(Some(review.assets.iter().map(|p| parent.join(p)).collect()))
-        }
-        None if parent.components().count() == 1
-            && parent
-                .to_str()
-                .is_some_and(crate::domain::workspace_layout::is_artifact_bundle) =>
-        {
-            // Republishing replaces the index entry, but a previously selected version
-            // still lives in its own directory containing only that version's assets.
-            let pinned = open_relative(root, parent)?;
-            Ok(Some(
-                directory_inventory(&pinned)?
-                    .files
-                    .into_iter()
-                    .map(|p| parent.join(p))
-                    .collect(),
-            ))
-        }
-        _ => Ok(None),
-    }
 }
 
 fn displayable_path(path: &Path) -> bool {
@@ -329,13 +332,61 @@ fn legacy_deliverable(path: &Path) -> bool {
         })
 }
 
+/// Recheck a selection against the manifest in the pinned workspace or session
+/// just before constructing a native viewer copy. Supporting files need not be
+/// listed; only the document the human opens must be a published entry point.
+///
+/// # Errors
+/// Returns an error if the manifest cannot be safely opened or decoded.
+pub fn published_selection(root: &File, directory: &Path, selected: &Path) -> io::Result<bool> {
+    Ok(selected_entry(root, directory, selected)?.is_some())
+}
+
+/// Resolve the supporting files for a currently published document in one
+/// manifest read. Legacy documents keep their original relative references.
+///
+/// # Errors
+/// Rejects unreadable manifests and unsafe directories.
+pub fn published_document_files(
+    root: &File,
+    directory: &Path,
+    selected: &Path,
+) -> io::Result<Option<Vec<PathBuf>>> {
+    let pinned = open_from_directory(root.try_clone()?, directory)?;
+    match selected_entry(&pinned, Path::new(""), selected)? {
+        Some(Entry::Path(_)) => Ok(Some(
+            directory_inventory(&pinned)?.files.into_iter().collect(),
+        )),
+        Some(Entry::Review(review)) => {
+            let parent = selected.parent().ok_or_else(invalid)?;
+            Ok(Some(review.assets.iter().map(|p| parent.join(p)).collect()))
+        }
+        None => Ok(None),
+    }
+}
+
+fn selected_entry(root: &File, directory: &Path, selected: &Path) -> io::Result<Option<Entry>> {
+    match open_from_directory(root.try_clone()?, &directory.join(ARTIFACT_INDEX)) {
+        Ok(mut file) if file.metadata()?.is_file() => Ok(read_index(&mut file)?.remove(selected)),
+        Ok(_) => Err(invalid()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(legacy_deliverable(selected).then(|| Entry::Path(selected.to_owned())))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 // Open through directory descriptors so swapped intermediate symlinks cannot
 // redirect an archive read out of the session while teardown is in progress.
 fn open_relative(root: &Path, relative: &Path) -> io::Result<File> {
-    let mut directory = OpenOptions::new()
+    let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root)?;
+    open_from_directory(directory, relative)
+}
+
+fn open_from_directory(mut directory: File, relative: &Path) -> io::Result<File> {
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {
         let Component::Normal(name) = component else {
@@ -582,6 +633,43 @@ pub fn contains(relative: &str, all: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn indexed_session_files_use_the_pinned_workspace_and_only_offer_existing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let artifacts = root.join(".usagi/sessions/task/artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        assert!(super::indexed_session_files(root, "../task", 1).is_err());
+        assert!(super::indexed_session_files(root, "", 1).is_err());
+        assert_eq!(
+            super::indexed_session_files(root, "task", 20).unwrap(),
+            [] as [std::string::String; 0]
+        );
+        std::fs::write(
+            artifacts.join(".index.json"),
+            r#"["a.md",{"path":"spec.md","purpose":"Review the API","assets":["chart.svg"]},"folder","gone.txt","unsafe.txt"]"#,
+        )
+        .unwrap();
+        std::fs::create_dir(artifacts.join("folder")).unwrap();
+        std::fs::write(artifacts.join("a.md"), "report").unwrap();
+        std::fs::write(artifacts.join("spec.md"), "spec").unwrap();
+        std::fs::write(artifacts.join("chart.svg"), "image").unwrap();
+        std::os::unix::fs::symlink(root, artifacts.join("unsafe.txt")).unwrap();
+        assert_eq!(
+            super::indexed_session_files(root, "task", 10).unwrap(),
+            ["a.md", "spec.md"]
+        );
+        assert_eq!(
+            super::indexed_session_files(root, "task", 0).unwrap(),
+            [] as [std::string::String; 0]
+        );
+        std::fs::remove_file(artifacts.join(".index.json")).unwrap();
+        std::os::unix::fs::symlink("a.md", artifacts.join(".index.json")).unwrap();
+        assert!(super::indexed_session_files(root, "task", 10).is_err());
+        std::fs::remove_file(artifacts.join(".index.json")).unwrap();
+        std::fs::create_dir(artifacts.join(".index.json")).unwrap();
+        assert!(super::indexed_session_files(root, "task", 10).is_err());
+    }
     use super::*;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;

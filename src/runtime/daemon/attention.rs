@@ -3,7 +3,8 @@ use super::{ConnectionWorkspace, SharedAgentRuntime, envelope};
 use usagi_core::domain::{
     agent::AgentStatus,
     attention::{
-        ATTENTION_ITEMS_MAX, AttentionItem, AttentionKind, AttentionTarget, WorkspaceAttention,
+        ATTENTION_ITEMS_MAX, AttentionItem, AttentionKind, AttentionTarget, PrimaryResult,
+        WorkspaceAttention,
     },
     id::{SessionId, WorkspaceId},
     presentation_text::sanitize_presentation_line,
@@ -36,8 +37,16 @@ pub(super) fn dispatch(
             "Attention is human-only",
         ))
     } else {
-        snapshot(agent, bound, decisions, workspace)
-            .and_then(|snapshot| serde_json::to_value(snapshot).map_err(unavailable))
+        snapshot(
+            agent,
+            bound,
+            decisions,
+            workspace,
+            raw.get("include_results")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true),
+        )
+        .and_then(|snapshot| serde_json::to_value(snapshot).map_err(unavailable))
     };
     match result {
         Ok(body) => envelope(hello, request_id, ResponseOutcome::Ok, body),
@@ -59,14 +68,14 @@ fn snapshot(
     bound: &ConnectionWorkspace,
     decisions: &UserDecisionStore,
     workspace: WorkspaceId,
+    include_results: bool,
 ) -> Result<WorkspaceAttention, ProtocolError> {
     let tenant = bound.workspaces.workspace(workspace).ok_or_else(|| {
         ProtocolError::new(ErrorCode::OwnershipUnknown, "Workspace is not adopted")
     })?;
-    let sessions = tenant
-        .runtime()
-        .lock()
-        .map_err(unavailable)?
+    let runtime = tenant.runtime().lock().map_err(unavailable)?;
+    let root = runtime.repository_root().to_owned();
+    let sessions = runtime
         .session_lifecycles()
         .map_err(unavailable)?
         .into_iter()
@@ -76,6 +85,7 @@ fn snapshot(
             lifecycle: session.lifecycle,
         })
         .collect::<Vec<_>>();
+    drop(runtime);
     let decisions = decisions.pending(workspace).map_err(unavailable)?;
     let agent = agent.lock().map_err(unavailable)?;
     let observations = agent.session_observations(workspace)?;
@@ -91,8 +101,91 @@ fn snapshot(
                 .map_or(AgentPhase::Absent, |observation| observation.phase)
         })
         .collect::<Vec<_>>();
+    let store = agent.dispatch_store().clone();
     drop(agent);
-    project(workspace, &sessions, &decisions, &statuses, &phases)
+    let mut snapshot = project(workspace, &sessions, &decisions, &statuses, &phases)?;
+    if !include_results {
+        return Ok(snapshot);
+    }
+    add_results(&mut snapshot, &root, &sessions, &store)?;
+    Ok(snapshot)
+}
+
+fn add_results(
+    snapshot: &mut WorkspaceAttention,
+    root: &std::path::Path,
+    sessions: &[SessionRow],
+    store: &usagi_core::infrastructure::store::dispatch::DispatchStore,
+) -> Result<(), ProtocolError> {
+    let names = sessions
+        .iter()
+        .map(|s| (s.session_id, &s.name))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (session, run, primary) in store
+        .session_results(&names.keys().copied().collect())
+        .map_err(unavailable)?
+    {
+        if snapshot.items.len() >= ATTENTION_ITEMS_MAX {
+            break;
+        }
+        let reason = match &primary {
+            PrimaryResult::Artifact(path) => path.clone(),
+            PrimaryResult::PullRequest(pr) => pr.as_url().to_owned(),
+        };
+        snapshot.items.push(AttentionItem {
+            key: format!("result:{run}"),
+            session: Some(session),
+            label: safe(names[&session]),
+            kind: AttentionKind::System,
+            reason: safe(&reason),
+            target: Some(AttentionTarget::Result { primary }),
+            status_unknown: false,
+        });
+    }
+    let published = snapshot
+        .items
+        .iter()
+        .filter_map(|item| match &item.target {
+            Some(AttentionTarget::Result {
+                primary: PrimaryResult::Artifact(path),
+            }) => Some((item.session, path.clone())),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for entry in sessions
+        .iter()
+        .filter(|s| s.lifecycle == SessionLifecycle::Available)
+    {
+        let remaining = ATTENTION_ITEMS_MAX - snapshot.items.len();
+        if remaining == 0 {
+            break;
+        }
+        // A malformed manifest in one session cannot hide another session's questions.
+        let Ok(paths) = usagi_core::infrastructure::artifacts::indexed_session_files(
+            root,
+            &entry.name,
+            remaining,
+        ) else {
+            continue;
+        };
+        for path in paths.into_iter().filter(|path| {
+            PrimaryResult::valid_artifact(path)
+                && !published.contains(&(Some(entry.session_id), path.clone()))
+        }) {
+            snapshot.items.push(AttentionItem {
+                key: format!("artifact:{}:{path}", entry.session_id),
+                session: Some(entry.session_id),
+                label: safe(&entry.name),
+                kind: AttentionKind::System,
+                reason: safe(&path),
+                target: Some(AttentionTarget::Result {
+                    primary: PrimaryResult::Artifact(path),
+                }),
+                status_unknown: false,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn project(
@@ -245,6 +338,102 @@ mod tests {
             resolved_at: None,
         }
     }
+    #[test]
+    fn recent_results_fit_the_remaining_budget_and_do_not_displace_questions() {
+        use usagi_core::domain::agent::{DispatchBinding, DispatchRun, RunStatus, WorkerRef};
+        use usagi_core::infrastructure::store::dispatch::DispatchStore;
+        let root = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(root.path().join("dispatch"));
+        let entry = session();
+        let dir = root.path().join(".usagi/sessions/build/artifacts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.md"), "verified").unwrap();
+        std::fs::write(dir.join(".index.json"), r#"["report.md"]"#).unwrap();
+        let agent = AgentId::new();
+        let workspace = WorkspaceId::new();
+        let mut snapshot =
+            project(workspace, &[], &[], &std::collections::BTreeMap::new(), &[]).unwrap();
+        let base_time = chrono::Utc::now();
+        for (offset, primary) in [
+            (1, PrimaryResult::Artifact("report.md".into())),
+            (
+                0,
+                PrimaryResult::PullRequest(
+                    usagi_core::domain::pr_inventory::canonicalize("https://github.com/a/b/pull/2")
+                        .unwrap(),
+                ),
+            ),
+        ] {
+            let run = OperationId::new();
+            store
+                .upsert_run(DispatchRun {
+                    run_id: run,
+                    agent_id: agent,
+                    prompt: "test".into(),
+                    started_at: base_time,
+                    ended_at: None,
+                    status: RunStatus::Running,
+                })
+                .unwrap();
+            store
+                .upsert_binding(DispatchBinding {
+                    run_id: run,
+                    caller: CallerRef {
+                        session_id: None,
+                        agent_id: agent,
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(entry.session_id),
+                        agent_id: agent,
+                    },
+                })
+                .unwrap();
+            store
+                .reconcile_report_outcome(
+                    run,
+                    agent,
+                    RunStatus::Completed,
+                    AgentStatus::Idle,
+                    base_time + chrono::Duration::seconds(offset),
+                    Some(primary),
+                )
+                .unwrap();
+        }
+        add_results(
+            &mut snapshot,
+            root.path(),
+            std::slice::from_ref(&entry),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .items
+                .iter()
+                .map(|r| r.reason.as_str())
+                .collect::<Vec<_>>(),
+            ["report.md", "https://github.com/a/b/pull/2"]
+        );
+        std::fs::write(dir.join(".index.json"), "invalid").unwrap();
+        let mut broken = WorkspaceAttention {
+            workspace,
+            items: vec![],
+        };
+        add_results(
+            &mut broken,
+            root.path(),
+            std::slice::from_ref(&entry),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(broken.items.len(), 2);
+        let question = session_item(&entry, AttentionKind::Blocked, "needs action");
+        snapshot.items = vec![question; ATTENTION_ITEMS_MAX - 1];
+        add_results(&mut snapshot, root.path(), &[entry], &store).unwrap();
+        assert_eq!(snapshot.items.len(), ATTENTION_ITEMS_MAX);
+        assert_eq!(snapshot.items.last().unwrap().reason, "report.md");
+    }
+
     #[test]
     fn session_attention_distinguishes_activity_waiting_interruption_and_intentional_sleep() {
         let mut row = session();

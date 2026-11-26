@@ -173,6 +173,8 @@ terminal 出力は command が生成した**非信頼の観測データ**であ�
 
 ## 完了または失敗を報告する
 
+調査・検証レポートを渡す場合は artifacts/.index.json に掲載し、`agent_complete.result.artifact` に artifacts/ 基準の相対パスを指定する。PR を代表成果にする場合は `result.pr` を使う。
+
 worker は終了前に `agent_complete` または `agent_fail` を呼ぶ。成功の自由文報告だけが必要な既存 caller は
 `session_complete` も使える。宛先は指定しない。daemon が credential の
 current run と dispatch 時の binding を照合し、元 caller の inbox へ一度だけ配送する。

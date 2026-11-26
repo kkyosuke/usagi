@@ -230,7 +230,7 @@ pub fn publish(workspace: &Path, session: &Path, spec: Publication) -> io::Resul
 
 #[cfg(test)]
 mod tests {
-    use super::super::{archive, list_reviews, prepare_session, review_assets};
+    use super::super::{archive, list_reviews, prepare_session, published_document_files};
     use super::*;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -279,7 +279,9 @@ mod tests {
         let rel = path.strip_prefix(&output).unwrap();
         let snapshot = archive(&session).unwrap().unwrap();
         assert_eq!(
-            review_assets(&snapshot, rel).unwrap().unwrap(),
+            published_document_files(&File::open(&snapshot).unwrap(), Path::new(""), rel)
+                .unwrap()
+                .unwrap(),
             [rel.with_file_name("assets/chart.png")]
         );
         assert!(!snapshot.join("debug.log").exists());
@@ -354,7 +356,15 @@ mod tests {
         fs::write(output.join(ARTIFACT_INDEX), &bytes).unwrap();
         assert!(publish(root.path(), &session, spec(&[])).is_err());
         assert_eq!(fs::read(output.join(ARTIFACT_INDEX)).unwrap(), bytes);
-        assert!(review_assets(&output, Path::new("old")).unwrap().is_none());
+        assert!(
+            published_document_files(
+                &File::open(&output).unwrap(),
+                Path::new(""),
+                Path::new("old")
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]

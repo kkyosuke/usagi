@@ -2252,7 +2252,10 @@ impl usagi_tui::usecase::application::runtime_ports::GardenInventoryPort
         .map_err(|_| "Workspace attention is unavailable".to_owned())?;
         let reply = client
             .request(
-                usagi_core::infrastructure::ipc::DaemonRequest::WorkspaceAttention { workspace },
+                usagi_core::infrastructure::ipc::DaemonRequest::WorkspaceAttention {
+                    workspace,
+                    include_results: true,
+                },
             )
             .map_err(|_| "Workspace attention is unavailable".to_owned())?;
         let (DaemonReply::Accepted { body, .. } | DaemonReply::Ok(body)) = reply;

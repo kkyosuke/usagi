@@ -698,9 +698,11 @@ Agent history / exit history / dismissal の allocator・retention・GC は
 provider-native identity、prompt、path は map に含めない。この request は mutation を持たないため、fresh connection で
 安全に retry できる。
 
-`workspace_attention { workspace: WorkspaceId }` は local TUI 用の read-only request で、daemon が既に adopt している
+`workspace_attention { workspace: WorkspaceId, include_results?: bool }` は local TUI 用の read-only request で、daemon が既に adopt している
 workspace のみを参照する。応答の `WorkspaceAttention` は exact workspace identity と、stable key・optional SessionId・
-label・分類・短い理由を持つ一覧である。decision 本文、回答、provider identity、path は含めない。
+label・分類・短い理由を持つ一覧である。decision 本文、回答、provider identity、絶対パスは含めない。
+`include_results` の既定は false。true のときはセッションの掲載済み成果物と完了報告の代表成果を、質問・停止の枠を確保した後に返す。
+成果は `kind: result` の target に artifact 相対パスまたは canonical GitHub PR を持つ。
 質問は任意の `target`（`kind: decision` と `decision_id`）を持ち、TUI は個別項目を開く際にこの stable identity を使う。
 観測対象は usagi の質問と session / Agent の状態で、PR inventory は参照しない。
 旧応答の `review` 分類、`kind: pull_request` と canonical PR `identity`、PR 状態の未確認を示す `status_unknown` は

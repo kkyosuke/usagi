@@ -122,7 +122,11 @@ pub enum DaemonRequest {
     /// instead of treating a coarse live PTY as proof that dispatch is running.
     AgentWorkspaceObservation { workspace: WorkspaceId },
     /// Human-only read of attention in an already adopted workspace.
-    WorkspaceAttention { workspace: WorkspaceId },
+    WorkspaceAttention {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        include_results: bool,
+    },
     /// Human-only bounded search of retained terminal screens; no attachment or input.
     SearchTerminalOutput {
         workspace: WorkspaceId,
