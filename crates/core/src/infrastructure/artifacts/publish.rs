@@ -3,12 +3,12 @@
 
 use super::{
     ARTIFACT_INDEX, ARTIFACTS_DIR, Entry, Index, MAX_ENTRIES, MAX_INDEX_BYTES, Review,
-    directory_files, displayable_path, invalid, legacy_deliverable, read_index, valid_path,
+    directory_inventory, displayable_path, invalid, legacy_deliverable, read_index, valid_path,
     valid_purpose,
 };
 use rustix::fs::{AtFlags, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -37,7 +37,8 @@ fn subdir(parent: &File, path: &Path, create: bool) -> io::Result<File> {
     for part in path {
         if create {
             match mkdirat(&dir, part, Mode::RWXU) {
-                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                Ok(()) => dir.sync_all()?,
+                Err(rustix::io::Errno::EXIST) => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -84,7 +85,10 @@ fn load_files(work: &File, input_spec: &Publication) -> io::Result<BTreeMap<Path
         .source
         .strip_prefix(".work")
         .map_err(|_| invalid())?;
-    if !valid_path(source) || !valid_purpose(&input_spec.purpose) || input_spec.assets.len() > 256 {
+    if !valid_path(source)
+        || !valid_purpose(&input_spec.purpose)
+        || input_spec.assets.len() > super::MAX_ASSETS
+    {
         return Err(invalid());
     }
     let folder = subdir(work, source.parent().ok_or_else(invalid)?, false)?;
@@ -92,7 +96,8 @@ fn load_files(work: &File, input_spec: &Publication) -> io::Result<BTreeMap<Path
     let mut files = BTreeMap::new();
     let mut remaining = MAX_BYTES;
     for path in std::iter::once(entry).chain(input_spec.assets.iter().map(PathBuf::as_path)) {
-        if !valid_path(path) || path.iter().count() > super::MAX_DEPTH || files.contains_key(path) {
+        if !valid_path(path) || path.iter().count() >= super::MAX_DEPTH || files.contains_key(path)
+        {
             return Err(invalid());
         }
         let file = input(&folder, path)?;
@@ -108,6 +113,30 @@ fn load_files(work: &File, input_spec: &Publication) -> io::Result<BTreeMap<Path
     Ok(files)
 }
 
+/// Account for directories and the index as well as user files, using the
+/// same physical traversal budget as listing and archiving.
+fn check_capacity(
+    inventory: &super::Inventory,
+    bundle: &Path,
+    files: &BTreeMap<PathBuf, Vec<u8>>,
+) -> io::Result<()> {
+    let mut additions = BTreeSet::from([PathBuf::from(ARTIFACT_INDEX)]);
+    for path in files.keys() {
+        additions.extend(
+            bundle
+                .join(path)
+                .ancestors()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(Path::to_owned),
+        );
+    }
+    additions.retain(|p| !inventory.files.contains(p) && !inventory.directories.contains(p));
+    if inventory.visited + additions.len() > MAX_ENTRIES {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 fn bundle(files: &BTreeMap<PathBuf, Vec<u8>>, source: &Path) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(source.as_os_str().as_encoded_bytes());
@@ -118,7 +147,7 @@ fn bundle(files: &BTreeMap<PathBuf, Vec<u8>>, source: &Path) -> PathBuf {
         digest.update((bytes.len() as u64).to_be_bytes());
         digest.update(bytes);
     }
-    let mut name = String::from("review-");
+    let mut name = String::from(crate::domain::workspace_layout::ARTIFACT_BUNDLE_PREFIX);
     for byte in digest.finalize() {
         write!(name, "{byte:02x}").expect("writing to a String");
     }
@@ -150,10 +179,14 @@ pub fn publish(workspace: &Path, session: &Path, spec: Publication) -> io::Resul
     let files = load_files(&work, &spec)?;
     let output = subdir(&pinned, Path::new(ARTIFACTS_DIR), false)?;
     fs2::FileExt::try_lock_exclusive(&output)?;
+    let inventory = directory_inventory(&output)?;
+    let dirname = bundle(&files, &spec.source);
+    check_capacity(&inventory, &dirname, &files)?;
     let mut index: Index = match input(&output, Path::new(ARTIFACT_INDEX)) {
         Ok(mut file) => read_index(&mut file)?,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let existing = directory_files(&output)?
+            let existing = inventory
+                .files
                 .into_iter()
                 .filter(|path| displayable_path(path) && legacy_deliverable(path))
                 .map(|path| (path.clone(), Entry::Path(path)))
@@ -165,7 +198,6 @@ pub fn publish(workspace: &Path, session: &Path, spec: Publication) -> io::Resul
         }
         Err(error) => return Err(error),
     };
-    let dirname = bundle(&files, &spec.source);
     let entry = dirname.join(spec.source.file_name().ok_or_else(invalid)?);
     index.retain(
         |_, item| !matches!(item, Entry::Review(r) if r.source.as_ref() == Some(&spec.source)),
@@ -256,6 +288,46 @@ mod tests {
         assert_ne!(revision, path);
         assert_eq!(list_reviews(&session, false).unwrap().len(), 2);
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn publisher_reserves_space_for_the_bundle_directory_and_accepts_the_last_available_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join(".usagi/sessions/capacity");
+        fs::create_dir_all(&session).unwrap();
+        prepare_session(&session).unwrap();
+        let output = session.join(ARTIFACTS_DIR);
+        fs::write(session.join(".work/spec.md"), "spec").unwrap();
+        // The initial index and ignore file already consume two physical entries.
+        for i in 0..MAX_ENTRIES - 3 {
+            File::create(output.join(i.to_string())).unwrap();
+        }
+        assert!(publish(root.path(), &session, spec(&[])).is_err());
+        assert_eq!(fs::read(output.join(ARTIFACT_INDEX)).unwrap(), b"[]\n");
+        fs::remove_file(output.join("0")).unwrap();
+        let path = publish(root.path(), &session, spec(&[])).unwrap();
+        assert_eq!(publish(root.path(), &session, spec(&[])).unwrap(), path);
+        assert_eq!(list_reviews(&session, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn registered_asset_depth_includes_its_published_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let session = root.path().join(".usagi/sessions/depth");
+        fs::create_dir_all(&session).unwrap();
+        prepare_session(&session).unwrap();
+        let work = session.join(".work");
+        fs::write(work.join("spec.md"), "spec").unwrap();
+        let directory = vec!["d"; super::super::MAX_DEPTH - 2].join("/");
+        fs::create_dir_all(work.join(&directory).join("last")).unwrap();
+        let accepted = format!("{directory}/image.png");
+        let excessive = format!("{directory}/last/image.png");
+        fs::write(work.join(&accepted), "chart").unwrap();
+        fs::write(work.join(&excessive), "chart").unwrap();
+        publish(root.path(), &session, spec(&[&accepted])).unwrap();
+        assert!(publish(root.path(), &session, spec(&[&excessive])).is_err());
+        assert_eq!(list_reviews(&session, false).unwrap().len(), 1);
+        assert!(archive(&session).unwrap().is_some());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Archives are independent of session worktrees and never removed by session
 //! teardown. Failed snapshots leave the original artifacts intact.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod publish;
 pub use publish::{Publication, publish};
@@ -25,6 +25,7 @@ pub const ARTIFACT_INDEX: &str = ".index.json";
 const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 const MAX_DEPTH: usize = 64;
+const MAX_ASSETS: usize = 256;
 
 fn invalid() -> io::Error {
     io::Error::other(
@@ -85,14 +86,16 @@ pub fn prepare_session(session: &Path) -> io::Result<()> {
     write_new(&session.join(ARTIFACTS_DIR).join(ARTIFACT_INDEX), b"[]\n")
 }
 
+#[derive(Default)]
+struct Inventory {
+    files: BTreeSet<PathBuf>,
+    directories: BTreeSet<PathBuf>,
+    visited: usize,
+}
+
 /// Walk bounded, regular artifact files only. Symlinks and special files are
 /// refused instead of dereferenced or silently lost during archiving.
-fn walk(
-    directory: &File,
-    relative: &Path,
-    files: &mut Vec<PathBuf>,
-    visited: &mut usize,
-) -> io::Result<()> {
+fn walk(directory: &File, relative: &Path, inventory: &mut Inventory) -> io::Result<()> {
     use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat};
     if relative.components().count() > MAX_DEPTH {
         return Err(invalid());
@@ -103,8 +106,8 @@ fn walk(
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
-        *visited += 1;
-        if *visited > MAX_ENTRIES {
+        inventory.visited += 1;
+        if inventory.visited > MAX_ENTRIES {
             return Err(invalid());
         }
         if relative.as_os_str().is_empty() && name.to_bytes() == b".gitignore" {
@@ -116,19 +119,21 @@ fn walk(
             FileType::Directory => {
                 let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
                 let child = File::from(openat(directory, name, flags, Mode::empty())?);
-                walk(&child, &path, files, visited)?;
+                walk(&child, &path, inventory)?;
+                inventory.directories.insert(path);
             }
-            FileType::RegularFile if path.components().count() <= MAX_DEPTH => files.push(path),
+            FileType::RegularFile if path.components().count() <= MAX_DEPTH => {
+                inventory.files.insert(path);
+            }
             _ => return Err(invalid()),
         }
     }
     Ok(())
 }
 
-fn directory_files(directory: &File) -> io::Result<Vec<PathBuf>> {
-    let mut result = Vec::new();
-    walk(directory, Path::new(""), &mut result, &mut 0)?;
-    result.sort();
+fn directory_inventory(directory: &File) -> io::Result<Inventory> {
+    let mut result = Inventory::default();
+    walk(directory, Path::new(""), &mut result)?;
     Ok(result)
 }
 
@@ -138,7 +143,7 @@ fn directory_files(directory: &File) -> io::Result<Vec<PathBuf>> {
 /// Refuses links, special entries, inaccessible files, and traversal limits.
 pub fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
     match open_relative(root, Path::new("")) {
-        Ok(directory) => directory_files(&directory),
+        Ok(directory) => Ok(directory_inventory(&directory)?.files.into_iter().collect()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error),
     }
@@ -240,7 +245,12 @@ fn read_index(input: &mut dyn Read) -> io::Result<Index> {
         }
         if let Entry::Review(review) = &entry
             && (!valid_purpose(&review.purpose)
-                || review.assets.iter().any(|asset| !valid_path(asset)))
+                || path.components().count() > MAX_DEPTH
+                || review.assets.len() > MAX_ASSETS
+                || review.assets.iter().any(|asset| {
+                    !valid_path(asset)
+                        || path.components().count() - 1 + asset.components().count() > MAX_DEPTH
+                }))
         {
             return Err(invalid());
         }
@@ -255,17 +265,32 @@ fn read_index(input: &mut dyn Read) -> io::Result<Index> {
 /// # Errors
 /// Rejects invalid indexes.
 pub fn review_assets(root: &Path, selected: &Path) -> io::Result<Option<Vec<PathBuf>>> {
-    let Some(Entry::Review(review)) = load_index(root)?.and_then(|mut i| i.remove(selected)) else {
+    let parent = selected.parent().ok_or_else(invalid)?;
+    let Some(mut index) = load_index(root)? else {
         return Ok(None);
     };
-    let parent = selected.parent().ok_or_else(invalid)?;
-    Ok(Some(
-        review
-            .assets
-            .iter()
-            .map(|asset| parent.join(asset))
-            .collect(),
-    ))
+    match index.remove(selected) {
+        Some(Entry::Review(review)) => {
+            Ok(Some(review.assets.iter().map(|p| parent.join(p)).collect()))
+        }
+        None if parent.components().count() == 1
+            && parent
+                .to_str()
+                .is_some_and(crate::domain::workspace_layout::is_artifact_bundle) =>
+        {
+            // Republishing replaces the index entry, but a previously selected version
+            // still lives in its own directory containing only that version's assets.
+            let pinned = open_relative(root, parent)?;
+            Ok(Some(
+                directory_inventory(&pinned)?
+                    .files
+                    .into_iter()
+                    .map(|p| parent.join(p))
+                    .collect(),
+            ))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn displayable_path(path: &Path) -> bool {
@@ -346,9 +371,10 @@ fn open_relative(root: &Path, relative: &Path) -> io::Result<File> {
 pub fn archive(session: &Path) -> io::Result<Option<PathBuf>> {
     let source = session.join(ARTIFACTS_DIR);
     let entries = files(&source)?;
-    if entries
-        .iter()
-        .all(|entry| entry == Path::new(ARTIFACT_INDEX))
+    if entries.is_empty()
+        || (entries.as_slice() == [Path::new(ARTIFACT_INDEX)]
+            && load_index(&source)
+                .is_ok_and(|index| index.is_some_and(|entries| entries.is_empty())))
     {
         return Ok(None);
     }
@@ -786,6 +812,21 @@ mod tests {
     }
 
     #[test]
+    fn teardown_preserves_user_index_data_when_no_document_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = session(temp.path(), "index-only");
+        let index = session.join(ARTIFACTS_DIR).join(ARTIFACT_INDEX);
+        for content in [r#"["missing.md"]"#, "incomplete index"] {
+            fs::write(&index, content).unwrap();
+            let snapshot = archive(&session).unwrap().unwrap();
+            assert_eq!(
+                fs::read_to_string(snapshot.join(ARTIFACT_INDEX)).unwrap(),
+                content
+            );
+        }
+    }
+
+    #[test]
     fn artifacts_survive_removal_and_same_named_sessions_never_overwrite_archives() {
         let temp = tempfile::tempdir().unwrap();
         let first = session(temp.path(), "first");
@@ -1004,8 +1045,10 @@ mod tests {
             walk(
                 &File::open(temp.path()).unwrap(),
                 Path::new(""),
-                &mut Vec::new(),
-                &mut { MAX_ENTRIES }
+                &mut Inventory {
+                    visited: MAX_ENTRIES,
+                    ..Inventory::default()
+                }
             )
             .is_err()
         );
@@ -1014,8 +1057,7 @@ mod tests {
             walk(
                 &File::open(temp.path()).unwrap(),
                 &deep,
-                &mut Vec::new(),
-                &mut 0
+                &mut Inventory::default()
             )
             .is_err()
         );

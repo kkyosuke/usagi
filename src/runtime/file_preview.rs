@@ -1429,6 +1429,51 @@ mod tests {
     }
 
     #[test]
+    fn an_old_publication_can_still_open_after_an_index_refresh() {
+        let root = tempdir().unwrap();
+        let bundle = format!("review-{}", "0".repeat(64));
+        let directory = root.path().join("artifacts").join(&bundle);
+        fs::create_dir_all(directory.join("assets")).unwrap();
+        fs::write(directory.join("spec.md"), "![chart](assets/chart.png)").unwrap();
+        fs::write(directory.join("assets/chart.png"), "original chart").unwrap();
+        fs::write(root.path().join("artifacts/.index.json"), "[]").unwrap();
+        File::create(root.path().join("artifacts/unrelated.log"))
+            .unwrap()
+            .set_len(MAX_ARTIFACT_OPEN_BYTES + 1)
+            .unwrap();
+        let old_path = format!("artifacts/{bundle}/spec.md");
+        let view =
+            artifact_open_view(root.path(), &old_path, PreviewFileFilter::Artifacts).unwrap();
+        assert_eq!(
+            fs::read(view.path().with_file_name("assets/chart.png")).unwrap(),
+            b"original chart"
+        );
+        assert!(!view.directory.path().join("unrelated.log").exists());
+    }
+
+    #[test]
+    fn handwritten_asset_declarations_obey_the_same_depth_and_count_limits() {
+        let root = tempdir().unwrap();
+        let output = root.path().join("artifacts");
+        fs::create_dir_all(output.join("report")).unwrap();
+        fs::write(output.join("report/spec.md"), "spec").unwrap();
+        let excessive = vec!["nested"; 64].join("/");
+        for assets in [vec!["asset".to_owned(); 257], vec![excessive]] {
+            let index = serde_json::json!([{"path":"report/spec.md", "purpose":"Review", "assets": assets}]);
+            fs::write(output.join(".index.json"), index.to_string()).unwrap();
+            assert!(load_preview(root.path(), None, PreviewFileFilter::Artifacts).is_err());
+            assert!(matches!(
+                artifact_open_view(
+                    root.path(),
+                    "artifacts/report/spec.md",
+                    PreviewFileFilter::Artifacts
+                ),
+                Err(FilePreviewError::FilesUnavailable)
+            ));
+        }
+    }
+
+    #[test]
     fn native_snapshot_failures_leave_sources_and_never_open_unsafe_assets() {
         let temp = tempdir().unwrap();
         fs::create_dir(temp.path().join("artifacts")).unwrap();

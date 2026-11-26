@@ -47,9 +47,7 @@ fn row(path: &str, filter: PreviewFileFilter, selected: bool, inner: usize) -> S
     let name = name
         .split_once('/')
         .filter(|(directory, _)| {
-            directory
-                .strip_prefix("review-")
-                .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit()))
+            usagi_core::domain::workspace_layout::is_artifact_bundle(directory)
         })
         .map_or(name, |(_, filename)| filename);
     let name = Role::Accent.style().bold().paint(name);
