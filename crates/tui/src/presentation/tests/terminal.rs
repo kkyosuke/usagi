@@ -4034,6 +4034,16 @@ fn the_resume_chord_drives_the_selected_history_tab_through_the_live_surface() {
 }
 
 #[test]
+fn inventory_without_terminal_search_reports_unavailable() {
+    let mut inventory: Box<dyn crate::presentation::GardenInventoryPort> =
+        Box::new(CountingBackendFactory::new().port());
+    let error = inventory
+        .search_terminal_output(WorkspaceId::new(), "error", None)
+        .unwrap_err();
+    assert_eq!(error, "Terminal output search is unavailable");
+}
+
+#[test]
 fn branch_catalog_worker_does_not_keep_the_resident_catalog_alive() {
     let drops = Arc::new(AtomicUsize::new(0));
     let catalog: Box<dyn crate::presentation::SessionCatalogPort> =

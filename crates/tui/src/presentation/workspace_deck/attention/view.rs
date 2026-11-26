@@ -34,12 +34,12 @@ fn tabs(
         summary.action_total(),
         summary.updates
     );
-    let actions = if widgets::display_width(&full) > inner {
+    let actions = if inner < 55 || widgets::display_width(&full) + 23 > inner {
         "Actions"
     } else {
         "Action needed"
     };
-    let mut line = String::from("  ");
+    let mut line = String::from(if inner < 45 { "" } else { "  " });
     let mut hits = Vec::new();
     for (view, label, role) in [
         (
@@ -56,6 +56,11 @@ fn tabs(
             format!("Updates ({})", summary.updates),
             Role::Info,
         ),
+        (
+            InboxView::Changes,
+            if inner < 55 { "Δ" } else { "Since last check" }.to_owned(),
+            Role::Info,
+        ),
     ] {
         let button = InlineButton::new(&label);
         let start = widgets::display_width(&line);
@@ -68,7 +73,7 @@ fn tabs(
         };
         line.push_str(&button.render(button.width(), style).line);
         hits.push((view, start..start + button.width()));
-        line.push_str("  ");
+        line.push_str(if inner < 45 { " " } else { "  " });
     }
     (line, hits)
 }
@@ -234,6 +239,7 @@ fn empty_message(list: &AttentionList, unknown: bool) -> &'static str {
         InboxView::Actions if unknown => "No confirmed actions. Some statuses are still unknown.",
         InboxView::Actions => "No action needed. Ongoing work is in Updates.",
         InboxView::Updates => "No progress updates to show.",
+        InboxView::Changes => "No new questions, stopped tasks or results.",
     }
 }
 
@@ -267,6 +273,8 @@ fn layout(
     if !compact {
         header.push(modal::caption(if list.view == InboxView::Actions {
             "Questions and stopped tasks that need your action in usagi."
+        } else if list.showing_changes() {
+            "Changes since you last checked. Enter opens the selected item."
         } else if summary.has_unknown() {
             "Progress and status updates."
         } else {
@@ -322,6 +330,15 @@ fn layout(
     }
     append_footer(&mut layout, list);
     layout
+}
+
+pub(in crate::presentation::workspace_deck) fn can_record_check(
+    list: &AttentionList,
+    slots: &[WorkspaceSlot],
+    height: usize,
+    width: usize,
+) -> bool {
+    list.filter.is_empty() && !layout(slots, list, None, height, width).tabs.is_empty()
 }
 
 pub(in crate::presentation::workspace_deck) fn render(
@@ -442,6 +459,15 @@ mod tests {
         update(&mut deck, 0, entries);
         update(&mut deck, 1, vec![]);
         deck
+    }
+
+    #[test]
+    fn changes_empty_state_explains_what_will_appear() {
+        let list = AttentionList {
+            view: InboxView::Changes,
+            ..AttentionList::default()
+        };
+        assert!(empty_message(&list, false).contains("No new questions"));
     }
 
     #[test]

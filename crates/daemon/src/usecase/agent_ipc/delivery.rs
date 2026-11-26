@@ -324,7 +324,7 @@ impl AgentRuntime {
             .iter()
             .find(|message| message.run_id == candidate.operation_id)
         {
-            self.reconcile_report_status(&binding, committed.kind)?;
+            self.reconcile_report_status(&binding, committed.kind, committed.result.as_ref())?;
             return Ok(false);
         }
         self.dispatch
@@ -335,13 +335,13 @@ impl AgentRuntime {
                     from: binding.worker.clone(),
                     kind,
                     summary,
-                    result,
+                    result: result.clone(),
                     created_at: Utc::now(),
                     read: false,
                 },
             )
             .map_err(map_dispatch_storage_error)?;
-        self.reconcile_report_status(&binding, kind)?;
+        self.reconcile_report_status(&binding, kind, result.as_ref())?;
         Ok(true)
     }
 
@@ -355,6 +355,7 @@ impl AgentRuntime {
         &self,
         binding: &DispatchBinding,
         kind: InboxKind,
+        result: Option<&usagi_core::domain::agent::StructuredResult>,
     ) -> Result<(), ProtocolError> {
         let (run_status, agent_status) = match kind {
             InboxKind::Completed => (RunStatus::Completed, AgentStatus::Idle),
@@ -368,6 +369,9 @@ impl AgentRuntime {
                 run_status,
                 agent_status,
                 Utc::now(),
+                result
+                    .filter(|_| kind == InboxKind::Completed)
+                    .and_then(usagi_core::domain::attention::PrimaryResult::from_report),
             )
             .map_err(map_dispatch_storage_error)?;
         Ok(())

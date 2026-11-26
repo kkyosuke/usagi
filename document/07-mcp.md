@@ -393,7 +393,9 @@ inbox の完了報告は維持して retryable error を返す。同じ report �
 保存された outcome から run / agent status を冪等に収束させ、`Completed` result だけを読み直して投影するため、失敗への反転や別 URL への差し替えを許さず回復できる。late report と
 `agent_fail` は inventory を変更しない。payload の caller 名や cwd から identity を補完しない。
 
-`agent_complete` の任意の `result` は、`pr` / `commits` / `changed_files` /
+`result.artifact` に artifacts/ を基準とした掲載ファイルの相対パスを指定すると、完了報告の代表成果として TUI から開ける。省略したときは有効な `result.pr` が代表成果になる。
+
+`agent_complete` の任意の `result` は、`artifact` / `pr` / `commits` / `changed_files` /
 `verification` をすべて省略できる。省略した `commits` / `changed_files` は空配列として保存するため、
 `{"verification":"cargo test"}` だけの報告も受理する。配列への `null` や型が異なる値は拒否する。
 

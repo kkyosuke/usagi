@@ -12236,6 +12236,21 @@ fn workspace_attention_is_read_only_and_rejects_agent_credentials_and_unknown_te
             ..
         }
     ));
+    let artifacts = root.join(".usagi/sessions/observed/artifacts");
+    std::fs::create_dir_all(&artifacts).unwrap();
+    std::fs::write(artifacts.join("report.md"), "answer").unwrap();
+    std::fs::write(artifacts.join(".index.json"), r#"["report.md"]"#).unwrap();
+    let reply = call(workspace, &serde_json::json!({"include_results":true}));
+    let EnvelopeKind::Response { body, .. } = reply.kind else {
+        panic!("response expected")
+    };
+    let snapshot: WorkspaceAttention = serde_json::from_value(body).unwrap();
+    assert!(
+        snapshot
+            .items
+            .iter()
+            .any(|row| row.reason == "report.md" && !row.kind.needs_action())
+    );
     assert_eq!(sessions.lock().unwrap().snapshot().unwrap(), created);
     for raw in [
         serde_json::json!({"caller_context":{}}),

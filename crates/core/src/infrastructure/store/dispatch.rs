@@ -175,6 +175,8 @@ enum InboxLine {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Registry {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    results: BTreeMap<OperationId, crate::domain::attention::PrimaryResult>,
     agents: Vec<Agent>,
     runs: Vec<DispatchRun>,
     bindings: Vec<DispatchBinding>,
@@ -381,6 +383,7 @@ pub enum CredentialProvenance {
 impl Registry {
     fn remove_run_at(&mut self, index: usize) {
         let dropped = self.runs.remove(index).run_id;
+        self.results.remove(&dropped);
         self.bindings.retain(|binding| binding.run_id != dropped);
         self.admissions
             .retain(|admission| admission.operation_id != dropped);
@@ -1262,6 +1265,49 @@ impl DispatchStore {
         })
     }
 
+    /// Read published results for the exact live session identities in a human snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if the bounded dispatch registry is unreadable.
+    pub fn session_results(
+        &self,
+        sessions: &BTreeSet<SessionId>,
+    ) -> Result<
+        Vec<(
+            SessionId,
+            OperationId,
+            crate::domain::attention::PrimaryResult,
+        )>,
+    > {
+        let mut registry = self.load_registry()?;
+        let mut completed = registry
+            .runs
+            .into_iter()
+            .filter(|run| registry.results.contains_key(&run.run_id))
+            .collect::<Vec<_>>();
+        completed.sort_unstable_by_key(|run| std::cmp::Reverse((run.ended_at, run.run_id)));
+        let mut owners = BTreeMap::new();
+        for binding in registry.bindings {
+            // Match binding(run_id), including when an old file has a duplicate
+            // from a different workspace or a different root/session scope.
+            owners
+                .entry(binding.run_id)
+                .or_insert(binding.worker.session_id);
+        }
+        Ok(completed
+            .into_iter()
+            .filter_map(|run| {
+                Some((
+                    owners
+                        .get(&run.run_id)?
+                        .filter(|id| sessions.contains(id))?,
+                    run.run_id,
+                    registry.results.remove(&run.run_id)?,
+                ))
+            })
+            .collect())
+    }
+
     /// Reads one run by its durable operation identity.
     ///
     /// # Errors
@@ -1522,6 +1568,7 @@ impl DispatchStore {
         run_status: RunStatus,
         agent_status: AgentStatus,
         ended_at: DateTime<Utc>,
+        primary: Option<crate::domain::attention::PrimaryResult>,
     ) -> Result<bool> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
@@ -1531,6 +1578,9 @@ impl DispatchStore {
         {
             run.status = run_status;
             run.ended_at = Some(ended_at);
+            if let Some(primary) = primary {
+                registry.results.insert(run_id, primary);
+            }
             changed = true;
         }
         if let Some(agent) = registry
@@ -2229,6 +2279,7 @@ mod tests {
             kind: InboxKind::Completed,
             summary: "done".into(),
             result: Some(StructuredResult {
+                artifact: None,
                 pr: Some("#321".into()),
                 commits: vec!["abc".into()],
                 changed_files: vec!["file".into()],
@@ -2402,6 +2453,51 @@ mod tests {
     }
 
     #[test]
+    fn result_projection_uses_the_original_binding_before_applying_workspace_scope() {
+        use crate::domain::attention::PrimaryResult;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(tmp.path());
+        let (session, worker, caller) = ids();
+        let other = SessionId::new();
+        let run = OperationId::new();
+        let mut registry = Registry::default();
+        let primary = PrimaryResult::Artifact("report.md".into());
+        registry.results.insert(run, primary.clone());
+        registry.runs.push(DispatchRun {
+            run_id: run,
+            agent_id: worker,
+            prompt: String::new(),
+            started_at: now(),
+            ended_at: Some(now()),
+            status: RunStatus::Completed,
+        });
+        for owner in [session, other] {
+            registry.bindings.push(DispatchBinding {
+                run_id: run,
+                caller: caller.clone(),
+                worker: WorkerRef {
+                    session_id: Some(owner),
+                    agent_id: worker,
+                },
+            });
+        }
+        json_file::write_atomic(tmp.path(), &store.registry_path(), &registry).unwrap();
+        assert_eq!(
+            store
+                .session_results(&BTreeSet::from([session, other]))
+                .unwrap(),
+            [(session, run, primary)]
+        );
+        assert_eq!(
+            store
+                .session_results(&BTreeSet::from([other]))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
     fn runtime_projection_propagates_corrupt_and_oversized_registry_failures() {
         let tmp = tempfile::tempdir().unwrap();
         let store = DispatchStore::new(tmp.path());
@@ -2494,6 +2590,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap()
         );
@@ -2509,6 +2606,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap(),
             "an already converged retry must not rewrite the registry"
@@ -2525,6 +2623,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap(),
             "the successor run fences its Agent state from the old report"
@@ -2544,6 +2643,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap(),
             "the old run still converges without clearing its successor"
