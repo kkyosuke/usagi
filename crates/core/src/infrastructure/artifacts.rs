@@ -503,9 +503,10 @@ mod tests {
         );
         std::fs::write(
             artifacts.join(".index.json"),
-            r#"["a.md","gone.txt","unsafe.txt"]"#,
+            r#"["a.md","folder","gone.txt","unsafe.txt"]"#,
         )
         .unwrap();
+        std::fs::create_dir(artifacts.join("folder")).unwrap();
         std::fs::write(artifacts.join("a.md"), "report").unwrap();
         std::os::unix::fs::symlink(root, artifacts.join("unsafe.txt")).unwrap();
         assert_eq!(
