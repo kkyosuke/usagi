@@ -332,6 +332,15 @@ fn layout(
     layout
 }
 
+pub(in crate::presentation::workspace_deck) fn can_record_check(
+    list: &AttentionList,
+    slots: &[WorkspaceSlot],
+    height: usize,
+    width: usize,
+) -> bool {
+    list.filter.is_empty() && !layout(slots, list, None, height, width).tabs.is_empty()
+}
+
 pub(in crate::presentation::workspace_deck) fn render(
     deck: &WorkspaceDeck,
     list: &AttentionList,

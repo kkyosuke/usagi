@@ -3,7 +3,7 @@ mod checkpoint;
 mod view;
 pub(super) use checkpoint::Checkpoint;
 
-pub(super) use view::{handle_input, render};
+pub(super) use view::{can_record_check, handle_input, render};
 
 use super::{
     AttentionDestination, DeckOverlay, HashSet, Key, OverlayIntent, Path, PathBuf, Role, SessionId,
@@ -184,11 +184,13 @@ impl AttentionList {
 
     pub(super) fn handle(&mut self, key: &Key, slots: &[WorkspaceSlot]) -> OverlayIntent {
         let next_view = match key {
-            Key::Left => Some(InboxView::Actions),
-            Key::Right => Some(if self.view == InboxView::Updates {
-                InboxView::Changes
-            } else {
-                InboxView::Updates
+            Key::Left => Some(match self.view {
+                InboxView::Changes => InboxView::Updates,
+                InboxView::Updates | InboxView::Actions => InboxView::Actions,
+            }),
+            Key::Right => Some(match self.view {
+                InboxView::Actions => InboxView::Updates,
+                InboxView::Updates | InboxView::Changes => InboxView::Changes,
             }),
             Key::Tab => Some(match self.view {
                 InboxView::Actions => InboxView::Updates,
@@ -514,6 +516,38 @@ mod tests {
     pub(super) fn update(deck: &mut WorkspaceDeck, index: usize, items: Vec<AttentionItem>) {
         let workspace = deck.slots[index].workspace_id;
         deck.apply_attention(workspace, Ok(WorkspaceAttention { workspace, items }));
+    }
+
+    #[test]
+    fn left_and_right_follow_adjacent_tabs_and_stop_at_the_edges() {
+        let mut list = AttentionList::default();
+        for (key, expected) in [
+            (Key::Left, InboxView::Actions),
+            (Key::Right, InboxView::Updates),
+            (Key::Right, InboxView::Changes),
+            (Key::Right, InboxView::Changes),
+            (Key::Left, InboxView::Updates),
+            (Key::Left, InboxView::Actions),
+        ] {
+            list.handle(&key, &[]);
+            assert_eq!(list.view, expected);
+        }
+    }
+
+    #[test]
+    fn entering_changes_with_a_hidden_list_keeps_the_previous_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deck = deck();
+        deck.set_attention_cache(Some(dir.path().to_owned()));
+        update(&mut deck, 0, vec![item("result", AttentionKind::Blocked)]);
+        for (key, height) in [(Key::Char('x'), 24), (Key::Other, 3)] {
+            deck.open_attention();
+            deck.handle_overlay_key_at(&key, height, 100);
+            for _ in 0..2 {
+                deck.handle_overlay_key_at(&Key::Tab, height, 100);
+            }
+            assert_eq!(dir.path().read_dir().unwrap().count(), 0);
+        }
     }
 
     #[test]
@@ -945,7 +979,7 @@ mod tests {
 
         deck.handle_overlay_key(&Key::Paste("Session is being created".into()));
         assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
-        deck.handle_overlay_key(&Key::Right);
+        deck.handle_overlay_key(&Key::Left);
         assert!(matches!(
             deck.handle_overlay_key(&Key::Enter),
             OverlayIntent::AttentionVisit {

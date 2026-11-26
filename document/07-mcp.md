@@ -395,7 +395,7 @@ inbox の完了報告は維持して retryable error を返す。同じ report �
 
 `result.artifact` に artifacts/ を基準とした掲載ファイルの相対パスを指定すると、完了報告の代表成果として TUI から開ける。省略したときは有効な `result.pr` が代表成果になる。
 
-`agent_complete` の任意の `result` は、`pr` / `commits` / `changed_files` /
+`agent_complete` の任意の `result` は、`artifact` / `pr` / `commits` / `changed_files` /
 `verification` をすべて省略できる。省略した `commits` / `changed_files` は空配列として保存するため、
 `{"verification":"cargo test"}` だけの報告も受理する。配列への `null` や型が異なる値は拒否する。
 

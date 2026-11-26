@@ -1280,18 +1280,32 @@ impl DispatchStore {
         )>,
     > {
         let mut registry = self.load_registry()?;
-        Ok(registry
+        let mut completed = registry
+            .runs
+            .into_iter()
+            .filter(|run| registry.results.contains_key(&run.run_id))
+            .collect::<Vec<_>>();
+        completed.sort_unstable_by_key(|run| std::cmp::Reverse((run.ended_at, run.run_id)));
+        let scoped = registry
             .bindings
             .into_iter()
             .filter_map(|binding| {
-                let session = binding
-                    .worker
-                    .session_id
-                    .filter(|id| sessions.contains(id))?;
                 Some((
-                    session,
                     binding.run_id,
-                    registry.results.remove(&binding.run_id)?,
+                    binding
+                        .worker
+                        .session_id
+                        .filter(|session| sessions.contains(session))?,
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        Ok(completed
+            .into_iter()
+            .filter_map(|run| {
+                Some((
+                    *scoped.get(&run.run_id)?,
+                    run.run_id,
+                    registry.results.remove(&run.run_id)?,
                 ))
             })
             .collect())

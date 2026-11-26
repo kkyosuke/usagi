@@ -339,6 +339,89 @@ mod tests {
         }
     }
     #[test]
+    fn recent_results_fit_the_remaining_budget_and_do_not_displace_questions() {
+        use usagi_core::domain::agent::{DispatchBinding, DispatchRun, RunStatus, WorkerRef};
+        use usagi_core::infrastructure::store::dispatch::DispatchStore;
+        let root = tempfile::tempdir().unwrap();
+        let store = DispatchStore::new(root.path().join("dispatch"));
+        let entry = session();
+        let dir = root.path().join(".usagi/sessions/build/artifacts");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.md"), "verified").unwrap();
+        std::fs::write(dir.join(".index.json"), r#"["report.md"]"#).unwrap();
+        let agent = AgentId::new();
+        let workspace = WorkspaceId::new();
+        let mut snapshot =
+            project(workspace, &[], &[], &std::collections::BTreeMap::new(), &[]).unwrap();
+        let base_time = chrono::Utc::now();
+        for (offset, primary) in [
+            (1, PrimaryResult::Artifact("report.md".into())),
+            (
+                0,
+                PrimaryResult::PullRequest(
+                    usagi_core::domain::pr_inventory::canonicalize("https://github.com/a/b/pull/2")
+                        .unwrap(),
+                ),
+            ),
+        ] {
+            let run = OperationId::new();
+            store
+                .upsert_run(DispatchRun {
+                    run_id: run,
+                    agent_id: agent,
+                    prompt: "test".into(),
+                    started_at: base_time,
+                    ended_at: None,
+                    status: RunStatus::Running,
+                })
+                .unwrap();
+            store
+                .upsert_binding(DispatchBinding {
+                    run_id: run,
+                    caller: CallerRef {
+                        session_id: None,
+                        agent_id: agent,
+                    },
+                    worker: WorkerRef {
+                        session_id: Some(entry.session_id),
+                        agent_id: agent,
+                    },
+                })
+                .unwrap();
+            store
+                .reconcile_report_outcome(
+                    run,
+                    agent,
+                    RunStatus::Completed,
+                    AgentStatus::Idle,
+                    base_time + chrono::Duration::seconds(offset),
+                    Some(primary),
+                )
+                .unwrap();
+        }
+        add_results(
+            &mut snapshot,
+            root.path(),
+            std::slice::from_ref(&entry),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot
+                .items
+                .iter()
+                .map(|r| r.reason.as_str())
+                .collect::<Vec<_>>(),
+            ["report.md", "https://github.com/a/b/pull/2"]
+        );
+        let question = session_item(&entry, AttentionKind::Blocked, "needs action");
+        snapshot.items = vec![question; ATTENTION_ITEMS_MAX - 1];
+        add_results(&mut snapshot, root.path(), &[entry], &store).unwrap();
+        assert_eq!(snapshot.items.len(), ATTENTION_ITEMS_MAX);
+        assert_eq!(snapshot.items.last().unwrap().reason, "report.md");
+    }
+
+    #[test]
     fn session_attention_distinguishes_activity_waiting_interruption_and_intentional_sleep() {
         let mut row = session();
         for phase in [

@@ -30,7 +30,7 @@ impl WorkspaceDeck {
     pub(crate) fn set_attention_cache(&mut self, path: Option<PathBuf>) {
         self.attention_cache = path;
     }
-    pub(in crate::presentation::workspace_deck) fn begin_attention_check(&mut self) {
+    pub(in crate::presentation::workspace_deck) fn begin_attention_check(&mut self, record: bool) {
         let Some(dir) = &self.attention_cache else {
             return;
         };
@@ -44,7 +44,10 @@ impl WorkspaceDeck {
             let Some(snapshot) = slot.attention.as_ref().filter(|_| !slot.attention_stale) else {
                 continue;
             };
-            if json_file::write_atomic_cache(dir, &path, &Checkpoint::capture(snapshot)).is_err() {
+            if record
+                && json_file::write_atomic_cache(dir, &path, &Checkpoint::capture(snapshot))
+                    .is_err()
+            {
                 self.notice = Some("Could not save this check.".into());
             }
         }

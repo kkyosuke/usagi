@@ -356,6 +356,15 @@ fn artifact_open_view_with(
         .components()
         .skip(prefix_len)
         .collect::<PathBuf>();
+    if !usagi_core::infrastructure::artifacts::published_selection(
+        &source_directory,
+        &artifact_root,
+        &selected,
+    )
+    .map_err(files_unavailable)?
+    {
+        return Err(FilePreviewError::FileUnavailable);
+    }
     // Standalone images/PDFs/text need only the selected file. Documents with
     // relative references need the artifact tree; unrelated large artifacts
     // must not prevent opening a small standalone file.
@@ -561,6 +570,39 @@ mod tests {
         Ok(files)
     }
 
+    #[test]
+    fn result_open_respects_the_current_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("artifacts");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("report.md"), "completed").unwrap();
+        fs::write(directory.join("detail.json"), "{}").unwrap();
+        let open = |path| artifact_open_view(root.path(), path, PreviewFileFilter::Artifacts);
+        assert!(open("artifacts/report.md").is_ok());
+        assert!(matches!(
+            open("artifacts/detail.json"),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        let index = directory.join(".index.json");
+        fs::write(&index, r#"["detail.json"]"#).unwrap();
+        assert!(open("artifacts/detail.json").is_ok());
+        assert!(matches!(
+            open("artifacts/report.md"),
+            Err(FilePreviewError::FileUnavailable)
+        ));
+        fs::remove_file(&index).unwrap();
+        fs::create_dir(&index).unwrap();
+        assert!(matches!(
+            open("artifacts/report.md"),
+            Err(FilePreviewError::FilesUnavailable)
+        ));
+        fs::remove_dir(&index).unwrap();
+        std::os::unix::fs::symlink("report.md", index).unwrap();
+        assert!(matches!(
+            open("artifacts/report.md"),
+            Err(FilePreviewError::FilesUnavailable)
+        ));
+    }
     #[test]
     fn listing_sorts_deduplicates_and_rejects_unsafe_paths() {
         assert_eq!(

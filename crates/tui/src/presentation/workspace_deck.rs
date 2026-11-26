@@ -544,7 +544,8 @@ impl WorkspaceDeck {
             let entered_changes = !was_changes && list.showing_changes();
             self.notice = None;
             if entered_changes {
-                self.begin_attention_check();
+                let record = attention::can_record_check(list, &self.slots, height, width);
+                self.begin_attention_check(record);
             }
             intent
         } else {

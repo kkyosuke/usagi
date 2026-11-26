@@ -240,13 +240,32 @@ fn legacy_deliverable(path: &Path) -> bool {
         })
 }
 
+/// Recheck a selection against the manifest in the pinned workspace or session
+/// just before constructing a native viewer copy. Supporting files need not be
+/// listed; only the document the human opens must be a published entry point.
+///
+/// # Errors
+/// Returns an error if the manifest cannot be safely opened or decoded.
+pub fn published_selection(root: &File, directory: &Path, selected: &Path) -> io::Result<bool> {
+    match open_from_directory(root.try_clone()?, &directory.join(ARTIFACT_INDEX)) {
+        Ok(mut file) if file.metadata()?.is_file() => Ok(read_index(&mut file)?.contains(selected)),
+        Ok(_) => Err(invalid()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(legacy_deliverable(selected)),
+        Err(error) => Err(error),
+    }
+}
+
 // Open through directory descriptors so swapped intermediate symlinks cannot
 // redirect an archive read out of the session while teardown is in progress.
 fn open_relative(root: &Path, relative: &Path) -> io::Result<File> {
-    let mut directory = OpenOptions::new()
+    let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(root)?;
+    open_from_directory(directory, relative)
+}
+
+fn open_from_directory(mut directory: File, relative: &Path) -> io::Result<File> {
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {
         let Component::Normal(name) = component else {
