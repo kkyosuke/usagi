@@ -188,6 +188,9 @@ pub struct DispatchBinding {
 /// A structured completion payload supplied by a worker.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StructuredResult {
+    /// First deliverable to open, relative to the session's artifacts directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
     pub pr: Option<String>,
     #[serde(default)]
     pub commits: Vec<String>,
@@ -1114,6 +1117,7 @@ mod tests {
             kind: InboxKind::Completed,
             summary: "done".into(),
             result: Some(StructuredResult {
+                artifact: None,
                 pr: Some("#321".into()),
                 commits: vec!["abc".into()],
                 changed_files: vec!["crates/core/src/domain/agent/mod.rs".into()],

@@ -34,12 +34,12 @@ fn tabs(
         summary.action_total(),
         summary.updates
     );
-    let actions = if widgets::display_width(&full) > inner {
+    let actions = if inner < 55 || widgets::display_width(&full) + 23 > inner {
         "Actions"
     } else {
         "Action needed"
     };
-    let mut line = String::from("  ");
+    let mut line = String::from(if inner < 45 { "" } else { "  " });
     let mut hits = Vec::new();
     for (view, label, role) in [
         (
@@ -56,6 +56,11 @@ fn tabs(
             format!("Updates ({})", summary.updates),
             Role::Info,
         ),
+        (
+            InboxView::Changes,
+            if inner < 55 { "Δ" } else { "Since last check" }.to_owned(),
+            Role::Info,
+        ),
     ] {
         let button = InlineButton::new(&label);
         let start = widgets::display_width(&line);
@@ -68,7 +73,7 @@ fn tabs(
         };
         line.push_str(&button.render(button.width(), style).line);
         hits.push((view, start..start + button.width()));
-        line.push_str("  ");
+        line.push_str(if inner < 45 { " " } else { "  " });
     }
     (line, hits)
 }
@@ -234,6 +239,7 @@ fn empty_message(list: &AttentionList, unknown: bool) -> &'static str {
         InboxView::Actions if unknown => "No confirmed actions. Some statuses are still unknown.",
         InboxView::Actions => "No action needed. Ongoing work is in Updates.",
         InboxView::Updates => "No progress updates to show.",
+        InboxView::Changes => "No new questions, stopped tasks or results.",
     }
 }
 
@@ -267,6 +273,8 @@ fn layout(
     if !compact {
         header.push(modal::caption(if list.view == InboxView::Actions {
             "Questions and stopped tasks that need your action in usagi."
+        } else if list.showing_changes() {
+            "Changes since you last checked. Enter opens the selected item."
         } else if summary.has_unknown() {
             "Progress and status updates."
         } else {

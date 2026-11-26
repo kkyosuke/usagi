@@ -144,6 +144,43 @@ pub fn presented_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(available)
 }
 
+/// Read only explicitly published paths. Pin the workspace directory and refuse
+/// symlink traversal through the session container or any artifact directory.
+///
+/// # Errors
+/// Returns an error for an inaccessible, unsafe or malformed artifact index.
+pub fn indexed_session_files(
+    workspace: &Path,
+    session: &str,
+    limit: usize,
+) -> io::Result<Vec<String>> {
+    if session.is_empty() || session == "." || session == ".." || session.contains('/') {
+        return Err(invalid());
+    }
+    let prefix = Path::new(STATE_DIR)
+        .join(SESSIONS_DIR)
+        .join(session)
+        .join(ARTIFACTS_DIR);
+    let mut index = match open_relative(workspace, &prefix.join(ARTIFACT_INDEX)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e),
+    };
+    if !index.metadata()?.is_file() {
+        return Err(invalid());
+    }
+    let mut paths = Vec::new();
+    for relative in read_index(&mut index)?.into_iter().take(limit) {
+        let Ok(file) = open_relative(workspace, &prefix.join(&relative)) else {
+            continue;
+        };
+        if file.metadata()?.is_file() {
+            paths.push(relative.to_string_lossy().into_owned());
+        }
+    }
+    Ok(paths)
+}
+
 fn read_index(input: &mut dyn Read) -> io::Result<BTreeSet<PathBuf>> {
     let mut bytes = Vec::new();
     input.take(MAX_INDEX_BYTES + 1).read_to_end(&mut bytes)?;
@@ -433,6 +470,37 @@ pub fn contains(relative: &str, all: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn indexed_session_files_use_the_pinned_workspace_and_only_offer_existing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let artifacts = root.join(".usagi/sessions/task/artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        assert!(super::indexed_session_files(root, "../task", 1).is_err());
+        assert!(super::indexed_session_files(root, "", 1).is_err());
+        assert_eq!(
+            super::indexed_session_files(root, "task", 20).unwrap(),
+            [] as [std::string::String; 0]
+        );
+        std::fs::write(
+            artifacts.join(".index.json"),
+            r#"["a.md","gone.txt","unsafe.txt"]"#,
+        )
+        .unwrap();
+        std::fs::write(artifacts.join("a.md"), "report").unwrap();
+        std::os::unix::fs::symlink(root, artifacts.join("unsafe.txt")).unwrap();
+        assert_eq!(
+            super::indexed_session_files(root, "task", 10).unwrap(),
+            ["a.md"]
+        );
+        assert_eq!(
+            super::indexed_session_files(root, "task", 0).unwrap(),
+            [] as [std::string::String; 0]
+        );
+        std::fs::remove_file(artifacts.join(".index.json")).unwrap();
+        std::fs::create_dir(artifacts.join(".index.json")).unwrap();
+        assert!(super::indexed_session_files(root, "task", 10).is_err());
+    }
     use super::*;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::symlink;

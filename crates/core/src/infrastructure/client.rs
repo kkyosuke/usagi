@@ -2602,6 +2602,7 @@ mod deadline_and_retry_tests {
             },
             DaemonRequest::WorkspaceAttention {
                 workspace: WorkspaceId::new(),
+                include_results: false,
             },
             DaemonRequest::SearchTerminalOutput {
                 workspace: WorkspaceId::new(),

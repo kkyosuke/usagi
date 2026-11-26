@@ -55,6 +55,7 @@ pub struct WorkspaceSlot {
     /// instead of claiming that an empty cached list means "no Agents".
     agents_observed: bool,
     attention: Option<usagi_core::domain::attention::WorkspaceAttention>,
+    checked_attention: attention::Checkpoint,
     attention_stale: bool,
     attention_observed_at: Option<std::time::Instant>,
     palette_tabs: Vec<palette::CachedTab>,
@@ -151,6 +152,7 @@ impl WorkspaceSlot {
             agents_observed: false,
             attention: None,
             attention_stale: false,
+            checked_attention: attention::Checkpoint::default(),
             attention_observed_at: None,
             palette_tabs: Vec::new(),
         }
@@ -228,6 +230,8 @@ pub enum OverlayIntent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionDestination {
+    Artifact(String),
+    ResultPr(PrIdentity),
     Decisions,
     Decision(UserDecisionId),
     PullRequests,
@@ -248,6 +252,7 @@ pub struct WorkspaceDeck {
     pending_closeup_path: Option<PathBuf>,
     /// Global terminal icon preference used by cached transition frames.
     icon_mode: IconMode,
+    attention_cache: Option<PathBuf>,
     attention_cursor: usize,
     pending_attention: Option<(PathBuf, Option<SessionId>, AttentionDestination)>,
     pending_palette: Option<(PathBuf, WorkspaceId, palette::Action)>,
@@ -281,6 +286,7 @@ impl WorkspaceDeck {
             pending_garden_visit: None,
             pending_closeup_path: None,
             icon_mode: IconMode::default(),
+            attention_cache: None,
             attention_cursor: 0,
             pending_attention: None,
             pending_palette: None,
@@ -526,6 +532,7 @@ impl WorkspaceDeck {
             return palette.handle(key, &self.slots, palette::page_size(height));
         }
         if let Some(DeckOverlay::Attention(list)) = self.overlay.as_mut() {
+            let was_changes = list.showing_changes();
             let intent = attention::handle_input(
                 list,
                 &self.slots,
@@ -534,7 +541,11 @@ impl WorkspaceDeck {
                 height,
                 width,
             );
+            let entered_changes = !was_changes && list.showing_changes();
             self.notice = None;
+            if entered_changes {
+                self.begin_attention_check();
+            }
             intent
         } else {
             self.handle_overlay_key(key)

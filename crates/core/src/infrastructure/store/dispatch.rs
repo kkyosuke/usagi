@@ -175,6 +175,8 @@ enum InboxLine {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Registry {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    results: BTreeMap<OperationId, crate::domain::attention::PrimaryResult>,
     agents: Vec<Agent>,
     runs: Vec<DispatchRun>,
     bindings: Vec<DispatchBinding>,
@@ -381,6 +383,7 @@ pub enum CredentialProvenance {
 impl Registry {
     fn remove_run_at(&mut self, index: usize) {
         let dropped = self.runs.remove(index).run_id;
+        self.results.remove(&dropped);
         self.bindings.retain(|binding| binding.run_id != dropped);
         self.admissions
             .retain(|admission| admission.operation_id != dropped);
@@ -1262,6 +1265,38 @@ impl DispatchStore {
         })
     }
 
+    /// Read published results for the exact live session identities in a human snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if the bounded dispatch registry is unreadable.
+    pub fn session_results(
+        &self,
+        sessions: &BTreeSet<SessionId>,
+    ) -> Result<
+        Vec<(
+            SessionId,
+            OperationId,
+            crate::domain::attention::PrimaryResult,
+        )>,
+    > {
+        let mut registry = self.load_registry()?;
+        Ok(registry
+            .bindings
+            .into_iter()
+            .filter_map(|binding| {
+                let session = binding
+                    .worker
+                    .session_id
+                    .filter(|id| sessions.contains(id))?;
+                Some((
+                    session,
+                    binding.run_id,
+                    registry.results.remove(&binding.run_id)?,
+                ))
+            })
+            .collect())
+    }
+
     /// Reads one run by its durable operation identity.
     ///
     /// # Errors
@@ -1522,6 +1557,7 @@ impl DispatchStore {
         run_status: RunStatus,
         agent_status: AgentStatus,
         ended_at: DateTime<Utc>,
+        primary: Option<crate::domain::attention::PrimaryResult>,
     ) -> Result<bool> {
         let _lock = StoreLock::acquire(&self.dir)?;
         let mut registry = self.load_registry()?;
@@ -1531,6 +1567,9 @@ impl DispatchStore {
         {
             run.status = run_status;
             run.ended_at = Some(ended_at);
+            if let Some(primary) = primary {
+                registry.results.insert(run_id, primary);
+            }
             changed = true;
         }
         if let Some(agent) = registry
@@ -2229,6 +2268,7 @@ mod tests {
             kind: InboxKind::Completed,
             summary: "done".into(),
             result: Some(StructuredResult {
+                artifact: None,
                 pr: Some("#321".into()),
                 commits: vec!["abc".into()],
                 changed_files: vec!["file".into()],
@@ -2494,6 +2534,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap()
         );
@@ -2509,6 +2550,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap(),
             "an already converged retry must not rewrite the registry"
@@ -2525,6 +2567,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap(),
             "the successor run fences its Agent state from the old report"
@@ -2544,6 +2587,7 @@ mod tests {
                     RunStatus::Completed,
                     AgentStatus::Idle,
                     now(),
+                    None,
                 )
                 .unwrap(),
             "the old run still converges without clearing its successor"
