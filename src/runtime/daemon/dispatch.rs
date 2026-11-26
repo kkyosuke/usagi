@@ -699,6 +699,19 @@ pub(super) fn dispatch_agent_tool(
                 let input = serde_json::from_value::<ReportPayload>(payload).map_err(|_| {
                     ProtocolError::new(ErrorCode::InvalidArgument, "invalid agent report payload")
                 })?;
+                if input
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.artifact.as_deref())
+                    .is_some_and(|p| {
+                        !usagi_core::domain::attention::PrimaryResult::valid_artifact(p)
+                    })
+                {
+                    return Err(ProtocolError::new(
+                        ErrorCode::InvalidArgument,
+                        "invalid primary artifact path",
+                    ));
+                }
                 if input.summary.trim().is_empty() {
                     return Err(ProtocolError::new(
                         ErrorCode::InvalidArgument,

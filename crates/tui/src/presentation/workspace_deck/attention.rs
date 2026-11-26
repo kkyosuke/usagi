@@ -1,7 +1,9 @@
 //! Process-level attention list. Snapshot failures never become zero work.
+mod checkpoint;
 mod view;
+pub(super) use checkpoint::Checkpoint;
 
-pub(super) use view::{handle_input, render};
+pub(super) use view::{can_record_check, handle_input, render};
 
 use super::{
     AttentionDestination, DeckOverlay, HashSet, Key, OverlayIntent, Path, PathBuf, Role, SessionId,
@@ -10,7 +12,7 @@ use super::{
 use crate::presentation::theme::Style;
 use crate::usecase::fuzzy::contiguous_match;
 use usagi_core::domain::{
-    attention::{AttentionKind, AttentionTarget, WorkspaceAttention},
+    attention::{AttentionKind, AttentionTarget, PrimaryResult, WorkspaceAttention},
     presentation_text::sanitize_presentation_line,
 };
 
@@ -19,6 +21,7 @@ enum InboxView {
     #[default]
     Actions,
     Updates,
+    Changes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,6 +32,7 @@ pub(super) struct AttentionList {
 }
 
 struct Row {
+    session: Option<SessionId>,
     identity: (WorkspaceId, String),
     context: String,
     reason: String,
@@ -44,10 +48,25 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
         let project = sanitize_presentation_line(&slot.label);
         if let Some(snapshot) = slot.attention.as_ref().filter(|_| !slot.attention_stale) {
             for item in &snapshot.items {
-                if item.kind.needs_action() != (view == InboxView::Actions) {
+                let is_result = matches!(item.target, Some(AttentionTarget::Result { .. }));
+                let include = match view {
+                    InboxView::Actions => item.kind.needs_action(),
+                    InboxView::Updates => !item.kind.needs_action(),
+                    InboxView::Changes => {
+                        (is_result || item.kind.needs_action())
+                            && !slot.checked_attention.contains(item)
+                    }
+                };
+                if !include {
                     continue;
                 }
                 let destination = match &item.target {
+                    Some(AttentionTarget::Result {
+                        primary: PrimaryResult::Artifact(path),
+                    }) => AttentionDestination::Artifact(path.clone()),
+                    Some(AttentionTarget::Result {
+                        primary: PrimaryResult::PullRequest(pr),
+                    }) => AttentionDestination::ResultPr(pr.clone()),
                     Some(AttentionTarget::Decision { decision_id }) => {
                         AttentionDestination::Decision(*decision_id)
                     }
@@ -61,16 +80,25 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
                     destination: destination.clone(),
                 };
                 rows.push(Row {
+                    session: item.session,
                     identity: (slot.workspace_id, item.key.clone()),
                     context: format!("{} / {}", project, sanitize_presentation_line(&item.label)),
                     reason: sanitize_presentation_line(&item.reason),
-                    action: match item.kind {
-                        AttentionKind::Decision => "Answer question",
-                        AttentionKind::Blocked => "Check stopped task",
-                        AttentionKind::System | AttentionKind::Review => "Waiting",
-                        AttentionKind::Running => "Running",
+                    action: if item.key.starts_with("artifact:") {
+                        "New artifact"
+                    } else if is_result {
+                        "Result ready"
+                    } else {
+                        match item.kind {
+                            AttentionKind::Decision => "Answer question",
+                            AttentionKind::Blocked => "Check stopped task",
+                            AttentionKind::System | AttentionKind::Review => "Waiting",
+                            AttentionKind::Running => "Running",
+                        }
                     },
                     open_label: match destination {
+                        AttentionDestination::Artifact(_) => "Open result",
+                        AttentionDestination::ResultPr(_) => "Open PR",
                         AttentionDestination::Decision(_) => "Answer question",
                         AttentionDestination::Decisions => "Open questions",
                         _ => "Open session",
@@ -85,6 +113,9 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
                 });
             }
         }
+    }
+    if view == InboxView::Changes {
+        rows = group_sessions(rows);
     }
     if filter.is_empty() {
         rows.sort_by_key(|row| row.rank);
@@ -107,7 +138,29 @@ fn rows(slots: &[WorkspaceSlot], filter: &str, view: InboxView) -> Vec<Row> {
     rows
 }
 
+fn group_sessions(mut rows: Vec<Row>) -> Vec<Row> {
+    rows.sort_by_key(|row| row.rank);
+    let mut grouped = Vec::<Row>::new();
+    let mut positions = std::collections::HashMap::new();
+    for row in rows {
+        let session = (row.identity.0, row.session);
+        if let Some(&index) = positions.get(&session) {
+            let first: &mut Row = &mut grouped[index];
+            first.reason.push_str(" · ");
+            first.reason.push_str(&row.reason);
+        } else {
+            positions.insert(session, grouped.len());
+            grouped.push(row);
+        }
+    }
+    grouped
+}
+
 impl AttentionList {
+    pub(super) fn showing_changes(&self) -> bool {
+        self.view == InboxView::Changes
+    }
+
     fn select_first(&mut self, slots: &[WorkspaceSlot]) {
         self.selected = rows(slots, &self.filter, self.view)
             .first()
@@ -128,12 +181,18 @@ impl AttentionList {
 
     pub(super) fn handle(&mut self, key: &Key, slots: &[WorkspaceSlot]) -> OverlayIntent {
         let next_view = match key {
-            Key::Left => Some(InboxView::Actions),
-            Key::Right => Some(InboxView::Updates),
-            Key::Tab => Some(if self.view == InboxView::Actions {
-                InboxView::Updates
-            } else {
-                InboxView::Actions
+            Key::Left => Some(match self.view {
+                InboxView::Changes => InboxView::Updates,
+                InboxView::Updates | InboxView::Actions => InboxView::Actions,
+            }),
+            Key::Right => Some(match self.view {
+                InboxView::Actions => InboxView::Updates,
+                InboxView::Updates | InboxView::Changes => InboxView::Changes,
+            }),
+            Key::Tab => Some(match self.view {
+                InboxView::Actions => InboxView::Updates,
+                InboxView::Updates => InboxView::Changes,
+                InboxView::Changes => InboxView::Actions,
             }),
             _ => None,
         };
@@ -386,6 +445,20 @@ fn valid_snapshot(workspace: WorkspaceId, snapshot: &WorkspaceAttention) -> bool
                 && (!item.status_unknown || !item.kind.needs_action())
                 && match &item.target {
                     None => true,
+                    Some(AttentionTarget::Result { primary }) => {
+                        item.kind == AttentionKind::System
+                            && item.session.is_some()
+                            && match primary {
+                                usagi_core::domain::attention::PrimaryResult::Artifact(path) => {
+                                    usagi_core::domain::attention::PrimaryResult::valid_artifact(
+                                        path,
+                                    )
+                                }
+                                usagi_core::domain::attention::PrimaryResult::PullRequest(_) => {
+                                    true
+                                }
+                            }
+                    }
                     Some(AttentionTarget::Decision { .. }) => item.kind == AttentionKind::Decision,
                     Some(AttentionTarget::PullRequest { identity }) => {
                         item.kind != AttentionKind::Decision
@@ -442,6 +515,126 @@ mod tests {
         deck.apply_attention(workspace, Ok(WorkspaceAttention { workspace, items }));
     }
 
+    #[test]
+    fn left_and_right_follow_adjacent_tabs_and_stop_at_the_edges() {
+        let mut list = AttentionList::default();
+        for (key, expected) in [
+            (Key::Left, InboxView::Actions),
+            (Key::Right, InboxView::Updates),
+            (Key::Right, InboxView::Changes),
+            (Key::Right, InboxView::Changes),
+            (Key::Left, InboxView::Updates),
+            (Key::Left, InboxView::Actions),
+        ] {
+            list.handle(&key, &[]);
+            assert_eq!(list.view, expected);
+        }
+    }
+
+    #[test]
+    fn entering_changes_with_a_hidden_list_keeps_the_previous_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deck = deck();
+        deck.set_attention_cache(Some(dir.path().to_owned()));
+        update(&mut deck, 0, vec![item("result", AttentionKind::Blocked)]);
+        for (key, height) in [(Key::Char('x'), 24), (Key::Other, 3)] {
+            deck.open_attention();
+            deck.handle_overlay_key_at(&key, height, 100);
+            for _ in 0..2 {
+                deck.handle_overlay_key_at(&Key::Tab, height, 100);
+            }
+            assert_eq!(dir.path().read_dir().unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn change_review_handles_an_empty_or_unreadable_checkpoint_and_artifact_targets() {
+        let mut deck = deck();
+        let workspace = deck.slots[0].workspace_id;
+        let temp = tempfile::tempdir().unwrap();
+        deck.begin_attention_check(false);
+        deck.set_attention_cache(Some(temp.path().to_owned()));
+        deck.begin_attention_check(false);
+        let bad = temp.path().join(format!("{workspace}.json"));
+        std::fs::write(&bad, "not a checkpoint").unwrap();
+        deck.begin_attention_check(true);
+        assert!(deck.notice.as_deref().unwrap().contains("previous check"));
+        std::fs::remove_file(bad).unwrap();
+        let mut file = item("artifact:test", AttentionKind::System);
+        file.target = Some(AttentionTarget::Result {
+            primary: PrimaryResult::Artifact("answer.md".into()),
+        });
+        update(&mut deck, 0, vec![file.clone()]);
+        assert_eq!(
+            rows(&deck.slots, "", InboxView::Changes)[0].action,
+            "New artifact"
+        );
+        let mut list = AttentionList::default();
+        for _ in 0..3 {
+            list.handle(&Key::Tab, &deck.slots);
+        }
+        assert_eq!(list.view, InboxView::Actions);
+        file.session = None;
+        assert!(!valid_snapshot(
+            workspace,
+            &WorkspaceAttention {
+                workspace,
+                items: vec![file]
+            }
+        ));
+        let mut unavailable = temp.path().join("missing");
+        unavailable.push("cache");
+        std::os::unix::fs::symlink("absent-target", temp.path().join("missing")).unwrap();
+        deck.set_attention_cache(Some(unavailable));
+        deck.begin_attention_check(true);
+        assert!(deck.notice.as_deref().unwrap().contains("save"));
+    }
+
+    #[test]
+    fn changes_survive_reopen_group_sessions_and_dispatch_exact_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut deck = deck();
+        deck.set_attention_cache(Some(temp.path().to_owned()));
+        let mut file = item("result:one", AttentionKind::System);
+        file.target = Some(AttentionTarget::Result {
+            primary: PrimaryResult::Artifact("report.md".into()),
+        });
+        let mut stopped = item("session:blocked", AttentionKind::Blocked);
+        stopped.session = file.session;
+        update(&mut deck, 0, vec![file.clone(), stopped.clone()]);
+        deck.open_attention();
+        let open_changes = |deck: &mut WorkspaceDeck| {
+            deck.handle_overlay_key_at(&Key::Tab, 24, 100);
+            deck.handle_overlay_key_at(&Key::Tab, 24, 100);
+        };
+        open_changes(&mut deck);
+        let changes = rows(&deck.slots, "", InboxView::Changes);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].action, "Check stopped task");
+        let mut reopened = deck.clone();
+        reopened.slots[0].checked_attention = Checkpoint::default();
+        reopened.open_attention();
+        open_changes(&mut reopened);
+        assert!(rows(&reopened.slots, "", InboxView::Changes).is_empty());
+        file.key = "result:two".into();
+        update(&mut reopened, 0, vec![file.clone(), stopped]);
+        let new = rows(&reopened.slots, "", InboxView::Changes);
+        assert_eq!(new.len(), 1);
+        assert!(
+            matches!(&new[0].intent,OverlayIntent::AttentionVisit{destination: AttentionDestination::Artifact(p),..} if p == "report.md")
+        );
+        file.target = Some(AttentionTarget::Result {
+            primary: PrimaryResult::PullRequest(
+                usagi_core::domain::pr_inventory::canonicalize("https://github.com/a/b/pull/1")
+                    .unwrap(),
+            ),
+        });
+        update(&mut reopened, 0, vec![file]);
+        assert_eq!(
+            rows(&reopened.slots, "", InboxView::Updates)[0].open_label,
+            "Open PR"
+        );
+    }
     #[test]
     fn attention_is_live_across_projects_and_never_turns_an_error_into_zero() {
         let mut deck = deck();
@@ -826,7 +1019,7 @@ mod tests {
 
         deck.handle_overlay_key(&Key::Paste("Session is being created".into()));
         assert_eq!(deck.handle_overlay_key(&Key::Enter), OverlayIntent::Stay);
-        deck.handle_overlay_key(&Key::Right);
+        deck.handle_overlay_key(&Key::Left);
         assert!(matches!(
             deck.handle_overlay_key(&Key::Enter),
             OverlayIntent::AttentionVisit {
