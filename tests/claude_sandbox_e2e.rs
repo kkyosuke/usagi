@@ -398,11 +398,17 @@ fn session_scope_can_commit_without_granting_the_main_ref() {
         git_dir.join("commondir").canonicalize().unwrap(),
         git_dir.join("gitdir").canonicalize().unwrap(),
     ];
+    let temp_refs = common.join("refs/heads/usagi-tmp/commit");
+    let temp_logs = common.join("logs/refs/heads/usagi-tmp/commit");
+    fs::create_dir_all(&temp_refs).unwrap();
+    fs::create_dir_all(&temp_logs).unwrap();
     let roots = [
         git_dir,
         common.join("objects").canonicalize().unwrap(),
         common.join("refs/heads/usagi").canonicalize().unwrap(),
         common.join("logs/refs/heads/usagi").canonicalize().unwrap(),
+        temp_refs,
+        temp_logs,
     ];
     let protected = protected.canonicalize().unwrap();
     let tamper = run_in_session_with_roots(
@@ -433,6 +439,23 @@ fn session_scope_can_commit_without_granting_the_main_ref() {
     );
     assert_ne!(git(&worktree, &["rev-parse", "HEAD"]), main_before);
     assert_eq!(git(&protected, &["rev-parse", "HEAD"]), main_before);
+    let topic = run_in_session_with_roots(
+        &protected,
+        &worktree,
+        &roots,
+        &read_only_roots,
+        "git switch -c usagi-tmp/commit/topic && git branch usagi-tmp/commit/other",
+        &[],
+    );
+    assert!(
+        topic.status.success(),
+        "{}",
+        String::from_utf8_lossy(&topic.stderr)
+    );
+    assert_eq!(
+        git(&worktree, &["branch", "--show-current"]),
+        "usagi-tmp/commit/topic"
+    );
 
     let _ = fs::remove_dir_all(&protected);
 }

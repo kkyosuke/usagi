@@ -5,3 +5,9 @@ pub const STATE_DIR: &str = ".usagi";
 
 /// The directory under [`STATE_DIR`] containing managed session worktrees.
 pub const SESSIONS_DIR: &str = "sessions";
+
+/// Local branch directory shared by Agent provisioning and session teardown.
+#[must_use]
+pub fn session_temporary_branch_directory(session: &str) -> String {
+    format!("usagi-tmp/{session}")
+}

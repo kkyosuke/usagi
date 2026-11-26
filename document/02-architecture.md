@@ -951,7 +951,7 @@ typed `RunOutcome` route を返す。通常 CLI の handler としてここに�
 - **OS sandbox launcher `claude-sandbox`**: 隠しコマンド `usagi claude-sandbox --mode <session|root>
   [--writable-root <path>]… -- <program> <args…>` は、fail-closed の platform sandbox の中で program を
   起動する。session の repository content 書き込みは own worktree に閉じ込め、Git workspace では linked worktree が
-  checkout 外に持つ own Git admin directory、共有 object store、`usagi/*` ref / reflog namespace だけを許可する。
+  checkout 外に持つ own Git admin directory、共有 object store、`usagi/*` と `usagi-tmp/<自セッション名>/*` の ref / reflog namespace だけを許可する。
   Git common directory 全体は許可しない。両 mode に普遍領域（`$TMPDIR` / `/tmp` / `/var/tmp`・
   [起動する agent CLI 自身の state](#agent-state-の-writable-root)、macOS は加えて Keychain と
   [MDS cache](#macos-の-mds-cache)）へ書ける。読み取りは許す。backend は macOS が
@@ -998,7 +998,7 @@ Claude の live な起動経路は、常に次の 3 層を同時に配線する�
   に留まる。
 - **`mode`**: managed session の起動は `session`、workspace root のコーディネータは `root`。
 - **起動固有 writable root**: session は own worktree に加え、linked worktree が commit に使う自分専用の Git
-  管理 directory、共有 object store、`usagi/*` branch の ref / reflog namespace だけを受け取る。Git common dir
+  管理 directory、共有 object store、`usagi/*` と `usagi-tmp/<自セッション名>/*` の branch ref / reflog namespace だけを受け取る。Git common dir
   全体、`main` / remote ref、repository config、workspace のそのほかの `.usagi`、data home は追加しない。
   worktree 内の `.git` pointer は writable な agent input なので grant の権威にはしない。daemon が選択した workspace の
   common directory と一致し、private admin directory がその common directory の direct `worktrees/*` child で、admin 側の
