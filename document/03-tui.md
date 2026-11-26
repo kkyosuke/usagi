@@ -230,7 +230,12 @@ Home の top-level `update` は event family の routing を担い、独立し�
 project bar 右端の `Action needed` または `Ctrl-O i` は、開いている全 project の受信箱を開く。
 この節が横断一覧の表示・観測契約の正本である。登録済みでも deck に開いていない workspace は対象外とする。
 
-受信箱は `Action needed`（要対応）と `Updates`（お知らせ）の 2 つの表示を持ち、開くたびに要対応を選ぶ。
+`Since last check`（狭幅では Δ）は、開いている project の前回確認以降の質問・停止・掲載済みの新しい成果物・代表成果を session 単位でまとめる。
+検索語が空で一覧を表示できる広さのときにこのタブに切り替えると、取得済み project の比較基準をローカルに保存する。端末の再起動後も引き継ぐ。
+初回は現在確認できる項目を表示する。Enter で先頭の質問・対象 session・成果物または PR へ移る。
+代表成果は Updates からも再度開ける。PR を成果に指定した完了報告は通常の CI・レビュー通知と別に扱う。
+
+受信箱は `Action needed`（要対応）、`Updates`（お知らせ）、`Since last check` の表示を持ち、開くたびに要対応を選ぶ。
 usagi 内で質問への回答や停止したタスクへの対応が必要な項目を最初に示し、実行中や作成・削除待ちなどの進行状況は
 Updates に表示する。GitHub の PR レビュー・マージ待ち、CI 失敗・待機、修正要求、PR 状態の取得中は
 受信箱の両方の表示・件数・確認中の判定から除外する。PR 状態は各 session の PR 一覧で確認する。

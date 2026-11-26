@@ -407,7 +407,7 @@ impl Tool for AgentComplete {
         "現在の run の成功を caller inbox へ配送する"
     }
     fn input_schema(&self) -> &'static str {
-        r#"{"type":"object","properties":{"summary":{"type":"string"},"result":{"type":"object","properties":{"pr":{"type":"string"},"commits":{"type":"array","items":{"type":"string"}},"changed_files":{"type":"array","items":{"type":"string"}},"verification":{"type":"string"}},"additionalProperties":false},"run_id":{"type":"string"}},"required":["summary"],"additionalProperties":false}"#
+        r#"{"type":"object","properties":{"summary":{"type":"string"},"result":{"type":"object","properties":{"artifact":{"type":"string","maxLength":512},"pr":{"type":"string"},"commits":{"type":"array","items":{"type":"string"}},"changed_files":{"type":"array","items":{"type":"string"}},"verification":{"type":"string"}},"additionalProperties":false},"run_id":{"type":"string"}},"required":["summary"],"additionalProperties":false}"#
     }
 }
 pub struct AgentFail;

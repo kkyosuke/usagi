@@ -938,6 +938,7 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         ErrorCode::OwnershipUnknown
     );
     let result = usagi_core::domain::agent::StructuredResult {
+        artifact: Some("report.md".into()),
         pr: Some("https://github.com/o/r/pull/1".into()),
         commits: vec!["abc".into()],
         ..Default::default()
@@ -986,6 +987,28 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         Some(&result)
     );
     let completed_run = OperationId::parse(&operation).unwrap();
+    assert_eq!(
+        runtime
+            .dispatch_store()
+            .session_results(&std::collections::BTreeSet::from([session]))
+            .unwrap(),
+        [(
+            session,
+            completed_run,
+            usagi_core::domain::attention::PrimaryResult::Artifact("report.md".into())
+        )]
+    );
+    assert_eq!(
+        runtime
+            .dispatch_store()
+            .session_results(&std::collections::BTreeSet::from([parent_session]))
+            .unwrap(),
+        [] as [(
+            usagi_core::domain::id::SessionId,
+            usagi_core::domain::id::OperationId,
+            usagi_core::domain::attention::PrimaryResult
+        ); 0]
+    );
     let completed_binding = runtime
         .dispatch_store()
         .binding(completed_run)
@@ -998,10 +1021,10 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         .unwrap()
         .ended_at;
     runtime
-        .reconcile_report_status(&completed_binding, InboxKind::Completed)
+        .reconcile_report_status(&completed_binding, InboxKind::Completed, None)
         .unwrap();
     runtime
-        .reconcile_report_status(&completed_binding, InboxKind::NoReport)
+        .reconcile_report_status(&completed_binding, InboxKind::NoReport, None)
         .unwrap();
     assert_eq!(
         runtime
@@ -1014,6 +1037,7 @@ fn completed_dispatch_does_not_receive_no_report_and_wrong_fence_is_noop() {
         "an already converged retry must preserve its completion time"
     );
     let replacement = usagi_core::domain::agent::StructuredResult {
+        artifact: None,
         pr: Some("https://github.com/o/r/pull/2".into()),
         ..Default::default()
     };

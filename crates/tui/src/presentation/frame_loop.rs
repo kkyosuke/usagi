@@ -1024,6 +1024,31 @@ pub(super) fn drive_workspace_controller(
                 let _ = runtime.apply_event(AppEvent::VisitSession(session));
             }
             let key = match destination {
+                AttentionDestination::ResultPr(identity) => {
+                    if runtime.state().active() == session {
+                        let effects = vec![
+                            crate::usecase::application::controller::Effect::OpenPullRequest {
+                                url: identity.as_url().to_owned(),
+                            },
+                        ];
+                        if let Some(step) = dispatch_reducer_effects(&mut backend, effects) {
+                            return Ok(step);
+                        }
+                    }
+                    None
+                }
+                AttentionDestination::Artifact(path) => {
+                    if let Some(id) = session.filter(|_| runtime.state().active() == session) {
+                        let effects = runtime.apply_event(AppEvent::OpenArtifact {
+                            target: crate::usecase::application::controller::Target::Session(id),
+                            path: format!("artifacts/{path}"),
+                        });
+                        if let Some(step) = dispatch_reducer_effects(&mut backend, effects) {
+                            return Ok(step);
+                        }
+                    }
+                    None
+                }
                 AttentionDestination::Decisions => Some(AppKey::OpenDecisions),
                 AttentionDestination::Decision(decision_id) => {
                     Some(AppKey::OpenDecision(decision_id))

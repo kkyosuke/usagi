@@ -2942,6 +2942,11 @@ fn enter_workspace_deck(
     backend_factory: &mut dyn ControllerBackendFactory,
     available_models: AvailableAgentModels,
 ) -> io::Result<Option<Exit>> {
+    deck.set_attention_cache(
+        usagi_core::infrastructure::paths::data_dir()
+            .ok()
+            .map(|dir| dir.join("attention-checks")),
+    );
     remember_unite(loader, &deck);
     // The lane outlives every composition this loop builds, which is what lets a
     // create started before a project switch still reach the user (#768).
