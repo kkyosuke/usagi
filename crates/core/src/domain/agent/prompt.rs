@@ -42,8 +42,8 @@ const SESSION_SCOPE: &str = r#"<context>
 追加のローカルブランチを作る場合は、すべて usagi-tmp/<セッション名>/<枝名> の配下に作成してください。セッション削除時に回収されます。
 ユーザーに確認・判断してほしいファイルがあるときは、TUI の Artifact 一覧で選んで Enter で開ける形にしてください。会話や PR で依頼が完結する場合、Artifact の作成は不要です。
 仕様の確認には spec.md、変更のレビューには対象範囲と実際の差分を diff コードブロックに載せた changes.md など、目的が伝わる名前と形式を選んでください。仕様やコードの正本はリポジトリで管理してください。
-調査用の .ss、生ログ、途中経過、補助スクリプト、一時設定、キャッシュは生成時から worktree 内の .work/ に置いてください。artifacts/ には提示するファイルだけを保存し、表示に必要な素材は artifacts/assets/ に置いてください。必要なディレクトリを作成し、artifacts/.gitignore と .work/.gitignore に * を記載して Git 追跡から除外してください。
-外部ツールで生成した成果物も、この worktree の artifacts/ に実ファイルを保存してから登録してください。artifacts/.index.json の JSON 配列には、ユーザーが直接開く項目だけを artifacts/ 基準の相対パスで追加し（例: ["spec.md", "changes.md"]）、既存の提示対象を保持してください。
+調査用の .ss、生ログ、途中経過、補助スクリプト、一時設定、キャッシュは生成時から worktree 内の .work/ に置いてください。公開に必要な素材は .work/ の本文の隣にある assets/ などへまとめ、手動登録の場合は artifacts/assets/ に置いてください。新規セッションには Git 対象外の両ディレクトリと空の一覧が用意されています。
+外部ツールで生成した成果物も .work/ に用意し、公開ツールが利用できる場合は確認点と必要な素材を指定して公開してください。手動登録の場合は実ファイルを artifacts/ に保存し、artifacts/.index.json の JSON 配列にユーザーが直接開く項目だけを artifacts/ 基準の相対パスで追加し（例: ["spec.md", "changes.md"]）、既存の提示対象を保持してください。
 成果物を報告する前に提示ファイルと index を読み直し、実在・可読性・登録を確認してください。報告には確認済みのファイルへのリンクと確認してほしい点を添えてください。
 </instructions>"#;
 
@@ -56,6 +56,7 @@ const TOOLS_CLOSE: &str = "</tools>";
 /// Session orchestration is never disabled, so its line is present whenever an
 /// MCP server is wired. It carries the pointer to the guide resource instead of
 /// the procedure itself, so the prompt does not restate what the guide owns.
+const ARTIFACT_TOOLS: &str = "- artifact: session の確認用ファイルは artifact_publish に source（.work/ 内）、purpose（確認点）、任意の assets（素材）を渡し、返された path を提示してください。";
 const SESSION_TOOLS: &str = "- session: session の作成・観測・委譲・完了報告は daemon が権威です。手順は resource usagi://guides/orchestration を読んでください。";
 const USER_DECISION_TOOLS: &str = "- user decision: 人への質問・確認・選択が必要な場合は usagi MCP の user_decision_request を使い、TUI で回答できるようにしてください。作成応答を失ったら user_decision_list で質問と未受信回答を回収してください。返された decision_id を user_decision_get で確認し、pending の間は回答に依存しない作業だけを進めてください。resolved の回答を受信したら user_decision_ack で受信確認してください。cancelled / expired を承認とみなさず、人の回答を代わりに送信しないでください。";
 const MEMORY_TOOLS: &str = "- memory: session をまたいで残す判断や制約を検索・保存できます。";
@@ -103,6 +104,7 @@ pub fn launch_system_prompt(
 fn tool_lines(families: McpToolFamilies) -> impl Iterator<Item = &'static str> {
     [
         Some(SESSION_TOOLS),
+        Some(ARTIFACT_TOOLS),
         Some(USER_DECISION_TOOLS),
         families.memory.then_some(MEMORY_TOOLS),
     ]
@@ -128,8 +130,8 @@ mod tests {
 追加のローカルブランチを作る場合は、すべて usagi-tmp/<セッション名>/<枝名> の配下に作成してください。セッション削除時に回収されます。
 ユーザーに確認・判断してほしいファイルがあるときは、TUI の Artifact 一覧で選んで Enter で開ける形にしてください。会話や PR で依頼が完結する場合、Artifact の作成は不要です。
 仕様の確認には spec.md、変更のレビューには対象範囲と実際の差分を diff コードブロックに載せた changes.md など、目的が伝わる名前と形式を選んでください。仕様やコードの正本はリポジトリで管理してください。
-調査用の .ss、生ログ、途中経過、補助スクリプト、一時設定、キャッシュは生成時から worktree 内の .work/ に置いてください。artifacts/ には提示するファイルだけを保存し、表示に必要な素材は artifacts/assets/ に置いてください。必要なディレクトリを作成し、artifacts/.gitignore と .work/.gitignore に * を記載して Git 追跡から除外してください。
-外部ツールで生成した成果物も、この worktree の artifacts/ に実ファイルを保存してから登録してください。artifacts/.index.json の JSON 配列には、ユーザーが直接開く項目だけを artifacts/ 基準の相対パスで追加し（例: ["spec.md", "changes.md"]）、既存の提示対象を保持してください。
+調査用の .ss、生ログ、途中経過、補助スクリプト、一時設定、キャッシュは生成時から worktree 内の .work/ に置いてください。公開に必要な素材は .work/ の本文の隣にある assets/ などへまとめ、手動登録の場合は artifacts/assets/ に置いてください。新規セッションには Git 対象外の両ディレクトリと空の一覧が用意されています。
+外部ツールで生成した成果物も .work/ に用意し、公開ツールが利用できる場合は確認点と必要な素材を指定して公開してください。手動登録の場合は実ファイルを artifacts/ に保存し、artifacts/.index.json の JSON 配列にユーザーが直接開く項目だけを artifacts/ 基準の相対パスで追加し（例: ["spec.md", "changes.md"]）、既存の提示対象を保持してください。
 成果物を報告する前に提示ファイルと index を読み直し、実在・可読性・登録を確認してください。報告には確認済みのファイルへのリンクと確認してほしい点を添えてください。
 </instructions>"#;
 
@@ -216,13 +218,18 @@ mod tests {
         assert!(boundary < tools && tools < role);
 
         // Every enabled family appears once, in the declared order.
-        let lines: Vec<usize> = [SESSION_TOOLS, USER_DECISION_TOOLS, MEMORY_TOOLS]
-            .iter()
-            .map(|line| {
-                assert_eq!(prompt.matches(line).count(), 1);
-                prompt.find(line).unwrap()
-            })
-            .collect();
+        let lines: Vec<usize> = [
+            SESSION_TOOLS,
+            ARTIFACT_TOOLS,
+            USER_DECISION_TOOLS,
+            MEMORY_TOOLS,
+        ]
+        .iter()
+        .map(|line| {
+            assert_eq!(prompt.matches(line).count(), 1);
+            prompt.find(line).unwrap()
+        })
+        .collect();
         assert!(lines.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(lines.iter().all(|line| *line > tools && *line < role));
     }

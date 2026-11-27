@@ -105,10 +105,40 @@ fn daemon_provisioned_mcp_attaches_without_taking_the_bootstrap_lock() {
 }
 
 #[test]
+fn production_artifact_publish_uses_the_authenticated_session_and_returns_an_openable_path() {
+    let mut mcp = McpHarness::start();
+    let request = json!({"source":".work/spec.md","purpose":"Check the interface"});
+    assert!(
+        mcp.tool("artifact_publish", &request)
+            .get("error")
+            .is_some()
+    );
+    let credential = mcp.launch_caller();
+    mcp.restart_with_credential(&credential);
+    let session = mcp.workspace().join(".usagi/sessions/mcp-caller");
+    fs::write(session.join(".work/spec.md"), "proposal").unwrap();
+    let result = tool_text(&mcp.tool("artifact_publish", &request));
+    let path = std::path::Path::new(result["path"].as_str().unwrap());
+    assert!(
+        path.starts_with(session.join("artifacts").canonicalize().unwrap()),
+        "{path:?} in {session:?}"
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), "proposal");
+    assert!(
+        mcp.tool(
+            "artifact_publish",
+            &json!({"source":"../outside","purpose":"test"})
+        )
+        .get("error")
+        .is_some()
+    );
+}
+
+#[test]
 fn production_tools_list_fixes_the_tool_schema_contract() {
     let mut mcp = McpHarness::start();
     let tools = mcp.tools();
-    assert_eq!(tools.len(), 44);
+    assert_eq!(tools.len(), 45);
     let mut names = std::collections::HashSet::new();
     for tool in &tools {
         assert!(names.insert(tool["name"].as_str().unwrap()));
@@ -155,7 +185,7 @@ fn production_settings_do_not_pass_disabled_tool_families_to_mcp() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
 
-    assert_eq!(names.len(), 40);
+    assert_eq!(names.len(), 41);
     assert!(names.iter().all(|name| !name.starts_with("memory_")));
     assert!(names.contains(&"session_list"));
     assert!(names.contains(&"terminal_list"));

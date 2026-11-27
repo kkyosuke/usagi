@@ -2532,6 +2532,7 @@ pub enum BackendEvent {
         /// Finder group that originated this request.
         filter: PreviewFileFilter,
         files: Vec<String>,
+        purposes: std::collections::BTreeMap<String, String>,
         /// Files changed from the integration base. Populated only for an All
         /// listing, which shows them as the finder's starting point.
         changed: Vec<String>,
@@ -3523,6 +3524,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             filter,
             files,
             changed,
+            purposes,
             lines,
         } => {
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
@@ -3555,6 +3557,10 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                             .collect::<Vec<_>>()
                     };
                     overlay.set_files(safe(files), safe(changed));
+                    overlay.purposes = purposes
+                        .iter()
+                        .map(|(path, purpose)| (path.clone(), sanitize_presentation_line(purpose)))
+                        .collect();
                 } else {
                     overlay.lines = lines
                         .iter()

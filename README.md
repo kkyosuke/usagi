@@ -61,6 +61,7 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 たとえば `review` セッションなら `git switch -c usagi-tmp/review/experiment` です。通常の削除では未マージの作業を保護します。
 [セッション削除の仕様](document/05-daemon.md#session-teardown-worker)
 
+確認用ファイルは Agent が `.work/` から `artifact_publish` で公開します。一覧でファイルを選ぶと、Agent が添えた確認点を読めます。
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
 Agent は成果物の保存・一覧登録を確認してから、実ファイルへのリンクを報告するよう指示されます。
 session 削除の `--force` は、保管に失敗した成果物も破棄します。

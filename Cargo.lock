@@ -1129,6 +1129,7 @@ dependencies = [
  "fs2",
  "libc",
  "rayon",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

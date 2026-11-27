@@ -121,7 +121,7 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 
 ### session artifacts と削除前の保管
 
-生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `artifacts/` を用意する。
+生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `.work/` と `artifacts/` を用意する。両方を Git から除外し、新規 session の `artifacts/.index.json` は空配列で初期化する。既存の index は保持する。
 新規の `artifacts/.gitignore` には `*` を書き、生成物を Git の未追跡差分から除外する。既存の ignore file は上書きしない。
 この準備に失敗した場合は、作成した Git worktree・branch と session tree を補償処理で取り消す。mirror 内の repository も対象とする。
 `artifacts/` はユーザーに提示する成果物の保存先であり、この節が保存対象と一覧への掲載規則の正本である。
@@ -131,9 +131,12 @@ Agent はユーザーに確認・判断してほしいファイルがあると�
 |---|---|
 | `artifacts/` | 確認用の仕様書、レビューする範囲と実際の差分を載せた Markdown、調査結果、表示用 HTML・画像、検証結果の要約 |
 | `artifacts/assets/` | HTML などの表示に必要な画像・font・補助データ。単独で提示しない素材は一覧へ登録しない |
-| worktree 内の `.work/` など Git 対象外の作業領域 | 調査用の `.ss`、生ログ、途中経過、補助スクリプト、一時設定、キャッシュを生成時から置く。Agent が `.work/.gitignore` に `*` を書く |
+| worktree 内の `.work/` など Git 対象外の作業領域 | 調査用の `.ss`、生ログ、途中経過、補助スクリプト、一時設定、キャッシュを生成時から置く |
 
-Agent は提示するファイルを保存した後、`artifacts/.index.json` を相対パスの JSON 配列として更新し、既存の提示対象を保持する。
+Agent は `.work/` の提示ファイル、確認点、必要な素材を `artifact_publish` に渡す。成功応答の `path` は公開ファイルの絶対パスである。
+index は JSON 配列で、手動登録の相対パス文字列と、公開ツールが追加する `{"path":"…","purpose":"…","assets":["assets/chart.png"]}` の両方を読める。
+公開ツールは既存項目を保持し、同じ source と内容を再公開すると目的を更新する。同じ source の内容を更新すると一覧では最新版に置き換わる。先に渡したリンクの実ファイルは保持する。
+素材のパスは本文の親ディレクトリを基準とする。公開・手動登録のいずれも素材は256件までで、成果物ルートからの深さは64までとする。各版はファイルと素材の相対配置を保つ。空配列の index だけの session は削除時に snapshot を作らない。
 外部ツールの生成物も session 内へ実ファイルを保存する。Agent の起動指示は、完了報告前に提示ファイルと index を読み直して
 実在・可読性・登録を確認し、確認済みファイルへのリンクと確認してほしい点を報告に含めるよう求める。保存や登録に失敗したものは作成済みと報告しない。
 たとえば仕様書と差分を確認してほしいときは `["spec.md", "changes.md"]` とし、この2件だけを sidebar の件数・一覧・統合検索へ出す。

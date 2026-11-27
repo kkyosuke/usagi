@@ -180,7 +180,7 @@ impl SessionWorktreeIo for SystemSessionWorktreeIo {
             )
         }
         .and_then(|()| {
-            usagi_core::infrastructure::artifacts::prepare(destination).map_err(Into::into)
+            usagi_core::infrastructure::artifacts::prepare_session(destination).map_err(Into::into)
         });
         if let Err(error) = result {
             let mut cleanup = Vec::new();
@@ -654,6 +654,12 @@ mod tests {
                 .unwrap();
             assert!(session.join("artifacts/.gitignore").is_file());
             std::fs::write(session.join("artifacts/report.md"), "retained result").unwrap();
+            assert!(session.join(".work/.gitignore").is_file());
+            assert_eq!(
+                usagi_core::infrastructure::artifacts::list(&session, false).unwrap(),
+                Vec::<String>::new()
+            );
+            std::fs::write(session.join("artifacts/.index.json"), r#"["report.md"]"#).unwrap();
             assert_eq!(
                 SystemGit
                     .run(&session, &["status", "--porcelain"])

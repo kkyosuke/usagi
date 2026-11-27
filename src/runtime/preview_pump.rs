@@ -197,6 +197,7 @@ mod tests {
                     vec![root.display().to_string()],
                     Vec::new(),
                     vec![path.unwrap_or_default().to_owned()],
+                    std::collections::BTreeMap::new(),
                 ))
             },
             Box::new(crate::runtime::preview_authority::AllowPreview),
@@ -220,7 +221,8 @@ mod tests {
             (
                 vec!["/repo".to_owned()],
                 Vec::new(),
-                vec!["README.md".to_owned()]
+                vec!["README.md".to_owned()],
+                std::collections::BTreeMap::new()
             )
         );
         assert!(pump.take().is_none());
@@ -242,6 +244,7 @@ mod tests {
                     Vec::new(),
                     Vec::new(),
                     vec![path.unwrap_or_default().to_owned()],
+                    std::collections::BTreeMap::new(),
                 ))
             },
             Box::new(crate::runtime::preview_authority::AllowPreview),

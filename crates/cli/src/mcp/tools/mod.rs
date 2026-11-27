@@ -7,6 +7,7 @@
 //! store usecase を直接呼び、session / agent / terminal route は usagi-core の
 //! IPC client 経由で daemon に委譲する（独自のビジネスロジックは持たない）。
 
+mod artifact;
 pub mod memory;
 pub mod session;
 pub mod terminal;
@@ -52,6 +53,10 @@ pub(super) fn registry_with_families(families: McpToolFamilies) -> Vec<Registere
     }
     tools.extend(session::tools());
     tools.extend(terminal::tools());
+    tools.push(ToolDescriptor::dispatch(
+        artifact::Publish,
+        usagi_core::infrastructure::ipc::DispatchToolAction::ArtifactPublish,
+    ));
     validate_registry(tools).expect("invalid MCP tool descriptor registry")
 }
 
@@ -210,7 +215,7 @@ mod tests {
     #[test]
     fn every_tool_has_valid_metadata() {
         let reg = registry();
-        assert_eq!(reg.len(), 44); // memory 4 + session 38 + terminal 2
+        assert_eq!(reg.len(), 45); // memory 4 + session 38 + terminal 2 + artifact 1
 
         let mut seen = std::collections::HashSet::new();
         for tool in &reg {
@@ -460,7 +465,7 @@ mod tests {
                 .iter()
                 .all(|tool| !tool.descriptor.name().starts_with("memory_"))
         );
-        assert_eq!(without_memory.len(), 40);
+        assert_eq!(without_memory.len(), 41);
         assert!(
             without_memory
                 .iter()
@@ -471,7 +476,7 @@ mod tests {
     #[test]
     fn every_advertised_tool_has_one_route_schema_validator_and_policy() {
         let registry = registry();
-        assert_eq!(registry.len(), 44);
+        assert_eq!(registry.len(), 45);
         for tool in &registry {
             let descriptor = &tool.descriptor;
             assert_ne!(descriptor.description(), "");
@@ -698,6 +703,11 @@ mod tests {
             (
                 "terminal_read",
                 ToolRoute::Dispatch(Dispatch::TerminalRead),
+                AgentCredential,
+            ),
+            (
+                "artifact_publish",
+                ToolRoute::Dispatch(Dispatch::ArtifactPublish),
                 AgentCredential,
             ),
         ];
