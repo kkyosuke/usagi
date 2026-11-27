@@ -2266,7 +2266,7 @@ fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
     assert_eq!(state.session_order_revision(), 0);
     assert_eq!(
         update(&mut state, AppEvent::Key(AppKey::Char('N'))),
-        [] as [Effect; 0]
+        vec![Effect::SaveSessionOrder(vec![b, a, c])]
     );
     assert_eq!(state.sessions(), &[b, a, c]);
     assert_eq!(state.selected(), Selection::Target(Target::Session(a)));
@@ -2297,6 +2297,19 @@ fn switch_session_reorder_tracks_identity_and_survives_membership_changes() {
     assert_eq!(state.sessions(), []);
     let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
     assert_eq!(state.sessions(), []);
+}
+
+#[test]
+fn delayed_session_order_read_preserves_a_newer_manual_move() {
+    let [a, b, c] = std::array::from_fn(|_| SessionId::new());
+    let mut state = AppState::home(WorkspaceId::new(), vec![a, b, c]);
+    let _ = update(&mut state, AppEvent::Key(AppKey::Char('N')));
+    assert_eq!(
+        update(&mut state, AppEvent::RestoreSessionOrder(vec![c, b, a])),
+        [] as [Effect; 0]
+    );
+    assert_eq!(state.sessions(), &[b, a, c]);
+    assert_eq!(state.session_order_revision(), 1);
 }
 
 #[test]
