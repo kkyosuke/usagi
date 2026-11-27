@@ -2337,7 +2337,7 @@ pub enum AppEvent {
     /// deck uses this when returning to a workspace whose controller was torn
     /// down during a project switch.
     FocusSession(SessionId),
-    /// Restore the process deck's manual display order on project re-entry.
+    /// Restore a saved sidebar order when entering a workspace.
     RestoreSessionOrder(Vec<SessionId>),
     /// Carry the daemon-wide decision observation through a project switch
     /// without treating its existing questions as newly arrived.
@@ -2532,6 +2532,7 @@ pub enum BackendEvent {
         /// Finder group that originated this request.
         filter: PreviewFileFilter,
         files: Vec<String>,
+        purposes: std::collections::BTreeMap<String, String>,
         /// Files changed from the integration base. Populated only for an All
         /// listing, which shows them as the finder's starting point.
         changed: Vec<String>,
@@ -2585,8 +2586,10 @@ pub enum Effect {
         request_id: RequestId,
         name: String,
     },
-    /// Read workspace-local favorite preferences.
-    LoadSessionFavorites,
+    /// Read workspace-local session favorites and manual display order.
+    LoadSessionPreferences,
+    /// Persist an explicit move, using stable session identities.
+    SaveSessionOrder(Vec<SessionId>),
     /// Toggle one exact session under the preference store lock.
     ToggleSessionFavorite {
         session: SessionId,
@@ -2865,7 +2868,15 @@ fn update_event(state: &mut AppState, event: AppEvent) -> Vec<Effect> {
             Vec::new()
         }
         AppEvent::FocusSession(session) => focus_session(state, session),
-        AppEvent::RestoreSessionOrder(order) => restore_session_order(state, &order),
+        AppEvent::RestoreSessionOrder(order) => {
+            // A cached deck order or a move made while the initial read was
+            // pending already reflects the rows the user is working with.
+            if state.session_order_revision == 0 {
+                restore_session_order(state, &order)
+            } else {
+                Vec::new()
+            }
+        }
         AppEvent::RestoreDecisions(snapshot) => decision::restore(state, snapshot),
         AppEvent::VisitSession(session) => visit_session(state, session),
         AppEvent::GardenUnavailable => {
@@ -3513,6 +3524,7 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
             filter,
             files,
             changed,
+            purposes,
             lines,
         } => {
             if let Some(overlay) = state.preview_overlay.as_mut().filter(|overlay| {
@@ -3545,6 +3557,10 @@ fn update_editor_backend(state: &mut AppState, event: &BackendEvent) -> bool {
                             .collect::<Vec<_>>()
                     };
                     overlay.set_files(safe(files), safe(changed));
+                    overlay.purposes = purposes
+                        .iter()
+                        .map(|(path, purpose)| (path.clone(), sanitize_presentation_line(purpose)))
+                        .collect();
                 } else {
                     overlay.lines = lines
                         .iter()
@@ -4555,6 +4571,7 @@ fn reorder_selected_session(state: &mut AppState, direction: TabDirection) -> Ve
         state.sessions.swap(index, next);
         state.session_order_revision = state.session_order_revision.saturating_add(1);
         state.pending_session_click = None;
+        return vec![Effect::SaveSessionOrder(state.sessions.clone())];
     }
     Vec::new()
 }

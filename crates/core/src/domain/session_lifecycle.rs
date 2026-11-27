@@ -192,6 +192,15 @@ impl SessionLifecycleProjection {
 pub struct SetupPlan {
     pub commands: Vec<String>,
 }
+/// Local branch namespace covered by an admitted removal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionBranchScope {
+    #[default]
+    SessionOnly,
+    IncludeTemporary,
+}
+
 /// Immutable delete targets captured before deletion begins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletePlan {
@@ -203,6 +212,9 @@ pub struct DeletePlan {
     /// Records written before this field existed preserve the branch.
     #[serde(default)]
     pub delete_branch: bool,
+    /// Older plans cover only their original session branch targets.
+    #[serde(default)]
+    pub branch_scope: SessionBranchScope,
     /// Exact local branch checked out by an adopted orphan worktree.
     ///
     /// Ordinary managed sessions omit this and derive `usagi/<name>`. An
@@ -1003,6 +1015,7 @@ mod tests {
                     targets: vec!["root".into()],
                     force: false,
                     delete_branch: false,
+                    branch_scope: SessionBranchScope::SessionOnly,
                     branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,
@@ -1072,6 +1085,15 @@ mod tests {
         assert_eq!(adopted.changed_at, now());
         assert!(adopted.operation_id.is_none());
     }
+    #[test]
+    fn legacy_delete_plan_keeps_its_original_branch_scope() {
+        let plan: DeletePlan = serde_json::from_value(serde_json::json!({
+            "targets": ["review"], "force": true, "delete_branch": true, "force_delete_branch": true
+        }))
+        .unwrap();
+        assert_eq!(plan.branch_scope, SessionBranchScope::SessionOnly);
+    }
+
     #[test]
     fn managed_session_role_is_stable_and_legacy_json_remains_compatible() {
         let legacy = ManagedSession::adopt_available("legacy".into(), now());
@@ -1268,6 +1290,7 @@ mod tests {
                     targets: vec!["x".into()],
                     force: false,
                     delete_branch: false,
+                    branch_scope: SessionBranchScope::SessionOnly,
                     branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,
@@ -1581,6 +1604,7 @@ mod tests {
                         targets: vec![],
                         force: false,
                         delete_branch: false,
+                        branch_scope: SessionBranchScope::SessionOnly,
                         branch_name: None,
                         force_delete_branch: false,
                         merged_head_oid: None,
@@ -1600,6 +1624,7 @@ mod tests {
                         targets: vec![],
                         force: false,
                         delete_branch: false,
+                        branch_scope: SessionBranchScope::SessionOnly,
                         branch_name: None,
                         force_delete_branch: false,
                         merged_head_oid: None,
@@ -1683,6 +1708,7 @@ mod tests {
                     targets: vec![],
                     force: true,
                     delete_branch: false,
+                    branch_scope: SessionBranchScope::SessionOnly,
                     branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,
@@ -1766,6 +1792,7 @@ mod tests {
                     targets: vec!["legacy".into()],
                     force: false,
                     delete_branch: false,
+                    branch_scope: SessionBranchScope::SessionOnly,
                     branch_name: None,
                     force_delete_branch: false,
                     merged_head_oid: None,

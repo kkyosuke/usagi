@@ -265,6 +265,7 @@ impl ArtifactOpenState {
 pub struct PreviewOverlay {
     pub(super) target: Target,
     pub(super) request_id: RequestId,
+    pub(super) purposes: std::collections::BTreeMap<String, String>,
     /// Loaded candidates of the current group. Private: every write must go
     /// through [`PreviewOverlay::set_files`] / [`PreviewOverlay::clear_files`]
     /// so the ranked rows below cannot index a list they were not built from.
@@ -305,6 +306,7 @@ impl PreviewOverlay {
             target,
             recent,
             request_id: RequestId::new(),
+            purposes: std::collections::BTreeMap::new(),
             files: Vec::new(),
             changed: Vec::new(),
             visible: Vec::new(),
@@ -346,6 +348,12 @@ impl PreviewOverlay {
     #[must_use]
     pub const fn file_filter(&self) -> PreviewFileFilter {
         self.file_filter
+    }
+
+    /// Review instructions for the selected artifact.
+    #[must_use]
+    pub fn selected_purpose(&self) -> Option<&str> {
+        self.purposes.get(self.selected_file()?).map(String::as_str)
     }
 
     /// Status of the explicit external-open request for the current artifact.
@@ -492,6 +500,7 @@ impl PreviewOverlay {
 
     /// Drop the loaded candidates while a new group is in flight.
     fn clear_files(&mut self) {
+        self.purposes.clear();
         self.files.clear();
         self.changed.clear();
         self.selected = 0;
@@ -1167,6 +1176,7 @@ mod tests {
             }
             let overlay = state.preview_overlay().unwrap();
             let late = BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target: overlay.target(),
                 request_id: overlay.request_id(),
                 path: overlay.path().map(str::to_owned),
@@ -1265,6 +1275,7 @@ mod tests {
         let _ = update(
             state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: path.map(str::to_owned),
@@ -1584,6 +1595,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1631,6 +1643,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1655,6 +1668,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1681,6 +1695,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1737,6 +1752,7 @@ mod tests {
         let effects = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id,
                 path: None,
@@ -1775,6 +1791,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target,
                 request_id: pane_request,
                 path: Some("src/lib.rs".into()),
@@ -1859,6 +1876,7 @@ mod tests {
             let _ = update(
                 &mut state,
                 AppEvent::Backend(BackendEvent::PreviewLoaded {
+                    purposes: std::collections::BTreeMap::new(),
                     target,
                     request_id: req,
                     path: p.clone(),

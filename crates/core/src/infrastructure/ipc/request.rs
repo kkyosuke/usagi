@@ -325,6 +325,7 @@ pub enum DispatchToolAction {
     AgentGet,
     TerminalList,
     TerminalRead,
+    ArtifactPublish,
     AgentComplete,
     AgentFail,
     AgentInbox,

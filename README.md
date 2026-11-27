@@ -56,6 +56,12 @@ AI エージェントを並列に使うと、branch、terminal、作業状況、
 `Ctrl-O` → `Ctrl-F` で統合検索を開き、`Tab` で検索対象を切り替えられます。
 小さい画面でも選択中の結果を優先して表示します。
 
+セッション削除時に片付けたいローカルブランチは `usagi-tmp/<セッション名>/<枝名>` で作れます。
+セッション内の Agent は追加のローカルブランチをすべてこの名前で作るように指示されます。
+たとえば `review` セッションなら `git switch -c usagi-tmp/review/experiment` です。通常の削除では未マージの作業を保護します。
+[セッション削除の仕様](document/05-daemon.md#session-teardown-worker)
+
+確認用ファイルは Agent が `.work/` から `artifact_publish` で公開します。一覧でファイルを選ぶと、Agent が添えた確認点を読めます。
 Artifacts は本人だけが読める状態で保管し、外部アプリでは閲覧用のコピーを開きます。
 Agent は成果物の保存・一覧登録を確認してから、実ファイルへのリンクを報告するよう指示されます。
 session 削除の `--force` は、保管に失敗した成果物も破棄します。
@@ -145,7 +151,7 @@ Config / Quit はメニューの直下、操作ヒントは画面最下部に表
 `o` の Open / add projects では登録済み project・Recent・Directory を切り替え、複数 project の選択や既存ディレクトリの追加ができます。
 フォルダが見つからない project は Projects に `⚠ Folder missing` と表示されます。その行で `Enter` を押すと、登録と履歴から取り除けます。
 Clone は `e`、全体の Config は `c` から開きます。
-サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。
+サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。ワークスペースを開き直しても、その順序を引き継ぎます。
 [Session Garden](document/assets/session-garden.gif) では、[Agent の状態に沿って動くうさぎ](document/03-tui.md#区画とうさぎ)と庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。
 
 削除した中断タブの[表示規則](document/03-tui.md#区画とうさぎ)は、Garden の右一覧・件数と左サイドバーで共通です。

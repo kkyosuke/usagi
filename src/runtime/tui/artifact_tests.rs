@@ -621,6 +621,7 @@ fn native_artifact_error_reaches_the_visible_home_and_text_preview_without_losin
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::PreviewLoaded {
+            purposes: std::collections::BTreeMap::new(),
             target: Target::Session(session),
             request_id,
             path: None,
@@ -670,7 +671,7 @@ fn native_artifact_error_reaches_the_visible_home_and_text_preview_without_losin
         [Effect::LoadPreview { request_id, .. }] => *request_id,
         _ => panic!("text preview missing"),
     };
-    let (_, _, lines) = load_preview(
+    let (_, _, lines, _) = load_preview(
         &row.root,
         Some("artifacts/tests.log"),
         PreviewFileFilter::Artifacts,
@@ -679,6 +680,7 @@ fn native_artifact_error_reaches_the_visible_home_and_text_preview_without_losin
     let _ = update(
         &mut state,
         AppEvent::Backend(BackendEvent::PreviewLoaded {
+            purposes: std::collections::BTreeMap::new(),
             target: Target::Session(session),
             request_id,
             path: Some("artifacts/tests.log".into()),

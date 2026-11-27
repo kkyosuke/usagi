@@ -1171,7 +1171,7 @@ Home sidebar は `session* → + new session` の順序と stable session identi
 1 行、各 session は固定 3 行（1 行目 まとめ / 2 行目 変更履歴 / 3 行目 Agent）で描画する。`main` 行・root divider・`Sessions` 見出しは表示しない。session が
 0 件なら `+ new session` が唯一の selectable row となる。作成中の skeleton は `+ new session` の直前に置く。session の 1 行目は cursor / active marker、表示名、常に幅を
 予約する note icon に加え、daemon projection に assignment がある場合だけ `◆ Manager` / `● Worker`（独自roleは `• role-id`）を描く。Director の直下には字下げを付けず、session の子には `└─` と深さに応じた字下げを表示名の前へ置く。既定では子孫は親の直後にまとめ、同じ親を持つ session と最上位の session 同士は snapshot の順序を保つ。キー操作の移動順もこの表示順と一致し、更新時は選択中・操作中の session identity を維持する。親が一覧に存在しない session は最上位に表示する。role icon と階層は表示専用で、attach / remove の可否は従来どおり lifecycle capability だけから決める。
-Switch では選択中 session を上下に並べ替えられる（[キーバインド](11-keybindings.md#workspace-画面)）。並べ替えは1行単位で、親子関係を変更せず手動の表示順を優先する。選択中・操作中の identity は変わらず、`+ new session` 行は末尾に固定する。手動順はその workspace を開いている間保持し、daemon 更新や project 切り替えでも維持する。削除された identity は取り除き、新しい identity は末尾へ追加する。workspace を閉じて開き直すと既定順に戻る。
+Switch では選択中 session を上下に並べ替えられる（[キーバインド](11-keybindings.md#workspace-画面)）。並べ替えは1行単位で、親子関係を変更せず手動の表示順を優先する。選択中・操作中の identity は変わらず、`+ new session` 行は末尾に固定する。手動順は並べ替えのたびに workspace ごとに保存し、daemon 更新、project 切り替え、TUI の再起動後も維持する。削除された identity は取り除き、新しい identity は末尾へ追加する。手動順が未設定の workspace は既定順で表示する。
 
 予約する note icon を表示する。note icon は既存の text overlay を開く入力を増やさず、内容の有無だけを示す。
 
@@ -1906,7 +1906,7 @@ png / jpg / jpeg / gif / webp / svg で、実行ファイルや application bund
 一覧の Tab は File Preview のテキスト本文を開き、本文の Tab は関連付けアプリで開く。
 本文の検索入力中は Tab で外部表示せず、Enter / Esc で検索入力を終えてから受け付ける。
 外部表示は専用 worker が検証済み file を、本人だけが読める OS temporary directory へコピーして開く。
-HTML / Markdown / SVG は相対参照を保つため、同じ Artifact directory の file も同じ配置へコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。
+公開ツールで登録した項目を選ぶと一覧に確認点を表示する。HTML / Markdown / SVG の外部表示は登録時に指定された素材だけを同じ相対配置へコピーする。従来のパス文字列だけの項目は相対参照を保つため同じ Artifact directory をコピーする。画像・PDF・通常テキスト等は選択 file だけをコピーする。
 元の file の差し替えや session 削除で、外部アプリが別の path を開かないようにする。directory は `0700`、file は `0600` とする。
 1 回のコピーは asset を含めて 64 MiB までで、実行中 1 件・待機 1 件を超える要求は一覧へ再試行の案内を返す。
 アプリは helper 終了や TUI 終了後にも読み込むため、成功・未確認のコピーは OS の temporary 領域へ残す。

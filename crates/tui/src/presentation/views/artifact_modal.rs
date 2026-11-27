@@ -44,6 +44,12 @@ fn row(path: &str, filter: PreviewFileFilter, selected: bool, inner: usize) -> S
         Role::Success.style()
     }
     .paint(&format!("{status:<9}"));
+    let name = name
+        .split_once('/')
+        .filter(|(directory, _)| {
+            usagi_core::domain::workspace_layout::is_artifact_bundle(directory)
+        })
+        .map_or(name, |(_, filename)| filename);
     let name = Role::Accent.style().bold().paint(name);
     modal::content_line(
         &format!(
@@ -97,8 +103,13 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
         }
     }
     let detail = height >= 7 && state.selected_file().is_some();
+    let purpose = state.selected_purpose().filter(|_| detail && height >= 8);
     let capacity = height.saturating_sub(
-        lines.len() + usize::from(footer) + usize::from(detail) + usize::from(feedback.is_some()),
+        lines.len()
+            + usize::from(purpose.is_some())
+            + usize::from(footer)
+            + usize::from(detail)
+            + usize::from(feedback.is_some()),
     );
     if capacity > 0 {
         if state.is_loading() {
@@ -136,6 +147,9 @@ fn body(state: &PreviewOverlay, height: usize, inner: usize) -> Vec<String> {
             &Style::new().dim().paint(state.selected_file().unwrap()),
             inner,
         ));
+    }
+    if let Some(purpose) = purpose {
+        lines.push(modal::content_line(&format!("Review: {purpose}"), inner));
     }
     if footer {
         lines.push(modal::footer(
@@ -188,6 +202,7 @@ mod tests {
         let _ = update(
             &mut state,
             AppEvent::Backend(BackendEvent::PreviewLoaded {
+                purposes: std::collections::BTreeMap::new(),
                 target: Target::Root(workspace),
                 request_id,
                 path: None,
@@ -215,6 +230,27 @@ mod tests {
             .map(|line| strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn published_file_shows_its_name_and_selected_review_purpose() {
+        let path = format!("artifacts/review-{}/spec.md", "a".repeat(64));
+        let mut state = loaded(Vec::new());
+        let overlay = state.preview_overlay().unwrap();
+        let event = BackendEvent::PreviewLoaded {
+            target: overlay.target(),
+            request_id: overlay.request_id(),
+            path: None,
+            filter: PreviewFileFilter::AllArtifacts,
+            files: vec![path.clone()],
+            changed: vec![],
+            lines: vec![],
+            purposes: [(path, "Check permissions".to_owned())].into(),
+        };
+        let _ = update(&mut state, AppEvent::Backend(event));
+        let screen = text(&state);
+        assert!(screen.contains("spec.md"));
+        assert!(screen.contains("Review: Check permissions"));
     }
 
     #[test]

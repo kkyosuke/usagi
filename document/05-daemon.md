@@ -121,7 +121,7 @@ workspace 直下の `.usagi` 配下で daemon が使う node は次のとおり�
 
 ### session artifacts と削除前の保管
 
-生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `artifacts/` を用意する。
+生成物の保存・保管はこの節を正本とする。session tree の構築後、setup command より前に `.work/` と `artifacts/` を用意する。両方を Git から除外し、新規 session の `artifacts/.index.json` は空配列で初期化する。既存の index は保持する。
 新規の `artifacts/.gitignore` には `*` を書き、生成物を Git の未追跡差分から除外する。既存の ignore file は上書きしない。
 この準備に失敗した場合は、作成した Git worktree・branch と session tree を補償処理で取り消す。mirror 内の repository も対象とする。
 `artifacts/` はユーザーに提示する成果物の保存先であり、この節が保存対象と一覧への掲載規則の正本である。
@@ -131,9 +131,12 @@ Agent はユーザーに確認・判断してほしいファイルがあると�
 |---|---|
 | `artifacts/` | 確認用の仕様書、レビューする範囲と実際の差分を載せた Markdown、調査結果、表示用 HTML・画像、検証結果の要約 |
 | `artifacts/assets/` | HTML などの表示に必要な画像・font・補助データ。単独で提示しない素材は一覧へ登録しない |
-| worktree 内の `.work/` など Git 対象外の作業領域 | 調査用の `.ss`、生ログ、途中経過、補助スクリプト、一時設定、キャッシュを生成時から置く。Agent が `.work/.gitignore` に `*` を書く |
+| worktree 内の `.work/` など Git 対象外の作業領域 | 調査用の `.ss`、生ログ、途中経過、補助スクリプト、一時設定、キャッシュを生成時から置く |
 
-Agent は提示するファイルを保存した後、`artifacts/.index.json` を相対パスの JSON 配列として更新し、既存の提示対象を保持する。
+Agent は `.work/` の提示ファイル、確認点、必要な素材を `artifact_publish` に渡す。成功応答の `path` は公開ファイルの絶対パスである。
+index は JSON 配列で、手動登録の相対パス文字列と、公開ツールが追加する `{"path":"…","purpose":"…","assets":["assets/chart.png"]}` の両方を読める。
+公開ツールは既存項目を保持し、同じ source と内容を再公開すると目的を更新する。同じ source の内容を更新すると一覧では最新版に置き換わる。先に渡したリンクの実ファイルは保持する。
+素材のパスは本文の親ディレクトリを基準とする。公開・手動登録のいずれも素材は256件までで、成果物ルートからの深さは64までとする。各版はファイルと素材の相対配置を保つ。空配列の index だけの session は削除時に snapshot を作らない。
 外部ツールの生成物も session 内へ実ファイルを保存する。Agent の起動指示は、完了報告前に提示ファイルと index を読み直して
 実在・可読性・登録を確認し、確認済みファイルへのリンクと確認してほしい点を報告に含めるよう求める。保存や登録に失敗したものは作成済みと報告しない。
 たとえば仕様書と差分を確認してほしいときは `["spec.md", "changes.md"]` とし、この2件だけを sidebar の件数・一覧・統合検索へ出す。
@@ -1551,6 +1554,7 @@ client ── session_list ─────▶ deleting 行 → 完了で消滅�
 | 失敗 | `failed` + 原因を含む safe summary（`could not remove the session worktree "<name>": <理由>`）を durable に残す。名前は保持されるため同名 create を local validation で拒否する。未コミット変更の commit/stash や未マージ branch の merge など原因を解消してから失敗 record を remove すると、同名 create が再び通る |
 | path confinement | request と `sessions.json` read の両方で canonical session name を検証する。worker は physical tree と owner repository の登録を除去する直前にも target が canonical repository の `.usagi/sessions/` 直下であり、session container/target に symlink escape がなく、repository root・data home・filesystem root 自体ではないことを再検証する。不正・解決不能なら以後の effect を実行しない |
 | branch | client の通常の `session_remove` は worktree 撤去後に `git branch -d -- usagi/<name>` で branch も削除する。daemon-owned PR inventory に merged PR の exact `headRefOid` があり、撤去後に完全修飾した `refs/heads/usagi/<name>` の HEAD と一致する場合だけ squash merge 済みと証明して `git branch -D` を使う（同名 tag は証明に使わない）。PR inventory を読めない場合は証明なしとして安全な `-d` に退避する。PR 後の commit や OID 不明・不一致は Git が拒否し、session は safe summary を持つ `failed` 行として残るため成果は失われず、同名作成フォームの live validation にも反映される。client が worktree force と `DeletePlan.force_delete_branch` を対で送った remove だけは `git branch -D` で削除する。TUI では Switch の `Ctrl-X`、Closeup の `close -f`、Overview の `session remove <name> --force` と `session remove -s --force`、削除失敗行を Enter で選んで破棄確認へ Yes と答えた recovery がこれを送る。plain `x` / `X` は remove 自体を送らない。`session cleanup`、`--force` を付けない Overview の `session remove`、`--purge-orphan` を伴わない CLI・MCP の force remove は対を送らないため安全な `-d` のままである。daemon 所有の compensating teardown も、dispatch 前で成果がないことが確定しているため同じ `DeletePlan.force_delete_branch` を使う（checkout 中の branch は削除できない） |
+| 手動で作る一時 branch | session の削除に合わせて回収したい local branch は `usagi-tmp/<session-name>/<topic>` で作る。通常の remove は各対象 repository でこの接頭辞の枝を `git branch -d` で削除する。worktree force と branch 破棄を対で指定すると `-D` を使う。別 worktree で使用中の枝は Git が保護し、拒否された場合は原因を解消して再試行できる。任意名の枝・tag・remote ref は回収対象外。旧版で受理した削除、orphan recovery、作成の補償削除は元の削除範囲を保つ |
 | Agent | worker は対象 `SessionId` の live Agent を fenced terminal identity で terminate/reap する（[reap の上限](#terminate-後の-reap-の上限)）。終了済み・interrupted を含む全対象について、まず terminal state を durable inventory へ保存して global allocator の capacity claim を解放し、その後に Agent runtime record を除去してから worktree を撤去する。Agent の終了またはどちらかの保存に失敗した場合は worktree を残して retry する |
 | generic terminal | Agent と同じ順序で、対象 `SessionId` の generic terminal も worktree 撤去より前に terminate/reap して record を除去する。session の shell terminal も worktree 内に cwd を持つ child と capacity claim を握るため、残すと `git worktree remove` が使用中で失敗し、claim は daemon の生存中ずっと pool を占有する。reap に失敗した場合は record を残して retry する。`SessionId` を持たない workspace-root terminal は対象外である |
 

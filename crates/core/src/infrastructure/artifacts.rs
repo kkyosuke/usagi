@@ -3,7 +3,10 @@
 //! Archives are independent of session worktrees and never removed by session
 //! teardown. Failed snapshots leave the original artifacts intact.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+mod publish;
+pub use publish::{Publication, publish};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -22,6 +25,7 @@ pub const ARTIFACT_INDEX: &str = ".index.json";
 const MAX_INDEX_BYTES: u64 = 1024 * 1024;
 const MAX_ENTRIES: usize = 20_000;
 const MAX_DEPTH: usize = 64;
+const MAX_ASSETS: usize = 256;
 
 fn invalid() -> io::Error {
     io::Error::other(
@@ -51,55 +55,86 @@ fn directory(path: &Path) -> io::Result<()> {
 pub fn prepare(session: &Path) -> io::Result<()> {
     let root = session.join(ARTIFACTS_DIR);
     directory(&root)?;
-    let ignore = root.join(".gitignore");
-    match OpenOptions::new().write(true).create_new(true).open(ignore) {
-        Ok(mut file) => {
-            file.write_all(b"# Generated artifacts are retained separately from Git.\n*\n")
+    write_new(
+        &root.join(".gitignore"),
+        b"# Generated artifacts are retained separately from Git.\n*\n",
+    )
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => file.write_all(bytes),
+        Err(error)
+            if error.kind() == io::ErrorKind::AlreadyExists
+                && fs::symlink_metadata(path)?.is_file() =>
+        {
+            Ok(())
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
         Err(error) => Err(error),
     }
 }
 
+/// Prepare a newly created session before its setup commands run.
+///
+/// # Errors
+/// Returns an error if the ignored directories or initial index cannot be created.
+pub fn prepare_session(session: &Path) -> io::Result<()> {
+    prepare(session)?;
+    let work = session.join(".work");
+    directory(&work)?;
+    write_new(&work.join(".gitignore"), b"*\n")?;
+    write_new(&session.join(ARTIFACTS_DIR).join(ARTIFACT_INDEX), b"[]\n")
+}
+
+#[derive(Default)]
+struct Inventory {
+    files: BTreeSet<PathBuf>,
+    directories: BTreeSet<PathBuf>,
+    visited: usize,
+}
+
 /// Walk bounded, regular artifact files only. Symlinks and special files are
 /// refused instead of dereferenced or silently lost during archiving.
-fn walk(
-    root: &Path,
-    relative: &Path,
-    files: &mut Vec<PathBuf>,
-    visited: &mut usize,
-) -> io::Result<()> {
+fn walk(directory: &File, relative: &Path, inventory: &mut Inventory) -> io::Result<()> {
+    use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, openat, statat};
     if relative.components().count() > MAX_DEPTH {
         return Err(invalid());
     }
-    let path = root.join(relative);
-    let metadata = fs::symlink_metadata(&path)?;
-    if metadata.is_dir() {
-        let mut entries = Vec::new();
-        for entry in fs::read_dir(path)?.take(MAX_ENTRIES + 1) {
-            entries.push(entry?);
+    for entry in Dir::read_from(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
         }
-        if entries.len() > MAX_ENTRIES {
+        inventory.visited += 1;
+        if inventory.visited > MAX_ENTRIES {
             return Err(invalid());
         }
-        entries.sort_by_key(fs::DirEntry::file_name);
-        for entry in entries {
-            *visited += 1;
-            if *visited > MAX_ENTRIES {
-                return Err(invalid());
-            }
-            let name = entry.file_name();
-            if relative.as_os_str().is_empty() && name == ".gitignore" {
-                continue;
-            }
-            walk(root, &relative.join(name), files, visited)?;
+        if relative.as_os_str().is_empty() && name.to_bytes() == b".gitignore" {
+            continue;
         }
-    } else if metadata.is_file() {
-        files.push(relative.to_path_buf());
-    } else {
-        return Err(invalid());
+        let path = relative.join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        let stat = statat(directory, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        match FileType::from_raw_mode(stat.st_mode) {
+            FileType::Directory => {
+                let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+                let child = File::from(openat(directory, name, flags, Mode::empty())?);
+                walk(&child, &path, inventory)?;
+                inventory.directories.insert(path);
+            }
+            FileType::RegularFile if path.components().count() <= MAX_DEPTH => {
+                inventory.files.insert(path);
+            }
+            _ => return Err(invalid()),
+        }
     }
     Ok(())
+}
+
+fn directory_inventory(directory: &File) -> io::Result<Inventory> {
+    let mut result = Inventory::default();
+    walk(directory, Path::new(""), &mut result)?;
+    Ok(result)
 }
 
 /// Discover bounded regular files relative to one artifact directory.
@@ -107,15 +142,11 @@ fn walk(
 /// # Errors
 /// Refuses links, special entries, inaccessible files, and traversal limits.
 pub fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
-    match fs::symlink_metadata(root) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-        Ok(metadata) if !metadata.is_dir() => return Err(invalid()),
-        Ok(_) => {}
+    match open_relative(root, Path::new("")) {
+        Ok(directory) => Ok(directory_inventory(&directory)?.files.into_iter().collect()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error),
     }
-    let mut result = Vec::new();
-    walk(root, Path::new(""), &mut result, &mut 0)?;
-    Ok(result)
 }
 
 /// Discover the deliverables offered in the sidebar, finder, and search.
@@ -126,22 +157,76 @@ pub fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
 /// # Errors
 /// Refuses unsafe files, invalid indexes, and the same traversal limits as files.
 pub fn presented_files(root: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut available = files(root)?;
-    available.retain(|path| displayable_path(path));
-    match open_relative(root, Path::new(ARTIFACT_INDEX)) {
-        Ok(mut file) => {
-            if !file.metadata()?.is_file() {
-                return Err(invalid());
-            }
-            let selected = read_index(&mut file)?;
-            available.retain(|path| selected.contains(path));
+    Ok(presented_entries(root)?.into_keys().collect())
+}
+
+type Index = BTreeMap<PathBuf, Entry>;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum Entry {
+    Path(PathBuf),
+    Review(Review),
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Review {
+    path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<PathBuf>,
+    purpose: String,
+    #[serde(default)]
+    assets: Vec<PathBuf>,
+}
+
+impl Entry {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Path(path) => path,
+            Self::Review(review) => &review.path,
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            available.retain(|path| legacy_deliverable(path));
-        }
-        Err(error) => return Err(error),
     }
-    Ok(available)
+}
+
+fn presented_entries(root: &Path) -> io::Result<Index> {
+    let available = files(root)?;
+    let mut index = load_index(root)?;
+    Ok(available
+        .into_iter()
+        .filter(|p| displayable_path(p))
+        .filter_map(|path| {
+            let entry = match &mut index {
+                Some(entries) => entries.remove(&path)?,
+                None if legacy_deliverable(&path) => Entry::Path(path.clone()),
+                None => return None,
+            };
+            Some((path, entry))
+        })
+        .collect())
+}
+
+fn load_index(root: &Path) -> io::Result<Option<Index>> {
+    match open_relative(root, Path::new(ARTIFACT_INDEX)) {
+        Ok(mut file) if file.metadata()?.is_file() => read_index(&mut file).map(Some),
+        Ok(_) => Err(invalid()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn valid_path(path: &Path) -> bool {
+    path.components().next().is_some()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && displayable_path(path)
+}
+
+fn valid_purpose(purpose: &str) -> bool {
+    !purpose.trim().is_empty()
+        && purpose.len() <= 512
+        && purpose.chars().all(presentation_character_is_safe)
 }
 
 /// Read only explicitly published paths. Pin the workspace directory and refuse
@@ -170,7 +255,7 @@ pub fn indexed_session_files(
         return Err(invalid());
     }
     let mut paths = Vec::new();
-    for relative in read_index(&mut index)?.into_iter().take(limit) {
+    for relative in read_index(&mut index)?.into_keys().take(limit) {
         let Ok(file) = open_relative(workspace, &prefix.join(&relative)) else {
             continue;
         };
@@ -181,27 +266,34 @@ pub fn indexed_session_files(
     Ok(paths)
 }
 
-fn read_index(input: &mut dyn Read) -> io::Result<BTreeSet<PathBuf>> {
+fn read_index(input: &mut dyn Read) -> io::Result<Index> {
     let mut bytes = Vec::new();
     input.take(MAX_INDEX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_INDEX_BYTES {
+    let entries: Vec<Entry> = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if bytes.len() as u64 > MAX_INDEX_BYTES || entries.len() > MAX_ENTRIES {
         return Err(invalid());
     }
-    let paths: Vec<PathBuf> = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    if paths.len() > MAX_ENTRIES
-        || paths.iter().any(|path| {
-            path.as_os_str().is_empty()
-                || path == Path::new(ARTIFACT_INDEX)
-                || path == Path::new(".gitignore")
-                || path
-                    .components()
-                    .any(|part| !matches!(part, Component::Normal(_)))
-                || !displayable_path(path)
-        })
-    {
-        return Err(invalid());
+    let mut result = Index::new();
+    for entry in entries {
+        let path = entry.path();
+        if !valid_path(path) || path == Path::new(ARTIFACT_INDEX) || path == Path::new(".gitignore")
+        {
+            return Err(invalid());
+        }
+        if let Entry::Review(review) = &entry
+            && (!valid_purpose(&review.purpose)
+                || path.components().count() > MAX_DEPTH
+                || review.assets.len() > MAX_ASSETS
+                || review.assets.iter().any(|asset| {
+                    !valid_path(asset)
+                        || path.components().count() - 1 + asset.components().count() > MAX_DEPTH
+                }))
+        {
+            return Err(invalid());
+        }
+        result.insert(path.to_owned(), entry);
     }
-    Ok(paths.into_iter().collect())
+    Ok(result)
 }
 
 fn displayable_path(path: &Path) -> bool {
@@ -247,10 +339,39 @@ fn legacy_deliverable(path: &Path) -> bool {
 /// # Errors
 /// Returns an error if the manifest cannot be safely opened or decoded.
 pub fn published_selection(root: &File, directory: &Path, selected: &Path) -> io::Result<bool> {
+    Ok(selected_entry(root, directory, selected)?.is_some())
+}
+
+/// Resolve the supporting files for a currently published document in one
+/// manifest read. Legacy documents keep their original relative references.
+///
+/// # Errors
+/// Rejects unreadable manifests and unsafe directories.
+pub fn published_document_files(
+    root: &File,
+    directory: &Path,
+    selected: &Path,
+) -> io::Result<Option<Vec<PathBuf>>> {
+    let pinned = open_from_directory(root.try_clone()?, directory)?;
+    match selected_entry(&pinned, Path::new(""), selected)? {
+        Some(Entry::Path(_)) => Ok(Some(
+            directory_inventory(&pinned)?.files.into_iter().collect(),
+        )),
+        Some(Entry::Review(review)) => {
+            let parent = selected.parent().ok_or_else(invalid)?;
+            Ok(Some(review.assets.iter().map(|p| parent.join(p)).collect()))
+        }
+        None => Ok(None),
+    }
+}
+
+fn selected_entry(root: &File, directory: &Path, selected: &Path) -> io::Result<Option<Entry>> {
     match open_from_directory(root.try_clone()?, &directory.join(ARTIFACT_INDEX)) {
-        Ok(mut file) if file.metadata()?.is_file() => Ok(read_index(&mut file)?.contains(selected)),
+        Ok(mut file) if file.metadata()?.is_file() => Ok(read_index(&mut file)?.remove(selected)),
         Ok(_) => Err(invalid()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(legacy_deliverable(selected)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Ok(legacy_deliverable(selected).then(|| Entry::Path(selected.to_owned())))
+        }
         Err(error) => Err(error),
     }
 }
@@ -301,7 +422,11 @@ fn open_from_directory(mut directory: File, relative: &Path) -> io::Result<File>
 pub fn archive(session: &Path) -> io::Result<Option<PathBuf>> {
     let source = session.join(ARTIFACTS_DIR);
     let entries = files(&source)?;
-    if entries.is_empty() {
+    if entries.is_empty()
+        || (entries.as_slice() == [Path::new(ARTIFACT_INDEX)]
+            && load_index(&source)
+                .is_ok_and(|index| index.is_some_and(|entries| entries.is_empty())))
+    {
         return Ok(None);
     }
     let container = session.parent().ok_or_else(invalid)?;
@@ -397,12 +522,22 @@ fn sync_directories(root: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns an error for unsafe entries, traversal limits, or inaccessible files.
 pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
-    let mut paths = Vec::new();
+    Ok(list_reviews(root, all)?.into_keys().collect())
+}
+
+/// Listed artifact paths and their optional human review instructions.
+///
+/// # Errors
+/// Returns an error when artifact discovery fails.
+pub fn list_reviews(root: &Path, all: bool) -> io::Result<BTreeMap<String, Option<String>>> {
+    let mut paths = BTreeMap::new();
     if all {
         let state = root.join(STATE_DIR);
         match fs::symlink_metadata(&state) {
             Ok(metadata) if !metadata.is_dir() => return Err(invalid()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return list(root, false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return list_reviews(root, false);
+            }
             Err(error) => return Err(error),
             Ok(_) => {}
         }
@@ -439,18 +574,27 @@ pub fn list(root: &Path, all: bool) -> io::Result<Vec<String>> {
         }
     }
     append(root, &root.join(ARTIFACTS_DIR), &mut paths)?;
-    paths.sort();
     Ok(paths)
 }
 
-fn append(root: &Path, directory: &Path, paths: &mut Vec<String>) -> io::Result<()> {
-    for relative in presented_files(directory)? {
+fn append(
+    root: &Path,
+    directory: &Path,
+    paths: &mut BTreeMap<String, Option<String>>,
+) -> io::Result<()> {
+    for (relative, entry) in presented_entries(directory)? {
         let path = directory.join(relative);
         let relative = path.strip_prefix(root).map_err(|_| invalid())?;
         if let Some(text) = relative.to_str()
             && text.chars().all(presentation_character_is_safe)
         {
-            paths.push(text.to_owned());
+            paths.insert(
+                text.to_owned(),
+                match entry {
+                    Entry::Path(_) => None,
+                    Entry::Review(review) => Some(review.purpose),
+                },
+            );
         }
         if paths.len() > MAX_ENTRIES {
             return Err(invalid());
@@ -503,15 +647,17 @@ mod tests {
         );
         std::fs::write(
             artifacts.join(".index.json"),
-            r#"["a.md","folder","gone.txt","unsafe.txt"]"#,
+            r#"["a.md",{"path":"spec.md","purpose":"Review the API","assets":["chart.svg"]},"folder","gone.txt","unsafe.txt"]"#,
         )
         .unwrap();
         std::fs::create_dir(artifacts.join("folder")).unwrap();
         std::fs::write(artifacts.join("a.md"), "report").unwrap();
+        std::fs::write(artifacts.join("spec.md"), "spec").unwrap();
+        std::fs::write(artifacts.join("chart.svg"), "image").unwrap();
         std::os::unix::fs::symlink(root, artifacts.join("unsafe.txt")).unwrap();
         assert_eq!(
             super::indexed_session_files(root, "task", 10).unwrap(),
-            ["a.md"]
+            ["a.md", "spec.md"]
         );
         assert_eq!(
             super::indexed_session_files(root, "task", 0).unwrap(),
@@ -696,6 +842,7 @@ mod tests {
             r#"["./report.md"]"#,
             r#"[".index.json"]"#,
             r#"[".gitignore"]"#,
+            r#"[{"path":"spec.md","purpose":"review","assets":["../private"]}]"#,
             r#"["report\u001b.md"]"#,
         ] {
             assert!(read_index(&mut input.as_bytes()).is_err(), "{input}");
@@ -750,6 +897,21 @@ mod tests {
             [".usagi/sessions/safe/artifacts/report.md"]
         );
         assert_eq!(fs::read_to_string(unsafe_file).unwrap(), "retained");
+    }
+
+    #[test]
+    fn teardown_preserves_user_index_data_when_no_document_remains() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = session(temp.path(), "index-only");
+        let index = session.join(ARTIFACTS_DIR).join(ARTIFACT_INDEX);
+        for content in [r#"["missing.md"]"#, "incomplete index"] {
+            fs::write(&index, content).unwrap();
+            let snapshot = archive(&session).unwrap().unwrap();
+            assert_eq!(
+                fs::read_to_string(snapshot.join(ARTIFACT_INDEX)).unwrap(),
+                content
+            );
+        }
     }
 
     #[test]
@@ -968,14 +1130,26 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("a.txt"), "a").unwrap();
         assert!(
-            walk(temp.path(), Path::new(""), &mut Vec::new(), &mut {
-                MAX_ENTRIES
-            })
+            walk(
+                &File::open(temp.path()).unwrap(),
+                Path::new(""),
+                &mut Inventory {
+                    visited: MAX_ENTRIES,
+                    ..Inventory::default()
+                }
+            )
             .is_err()
         );
         let deep = PathBuf::from(vec!["a"; MAX_DEPTH + 1].join("/"));
-        assert!(walk(temp.path(), &deep, &mut Vec::new(), &mut 0).is_err());
-        let mut existing = vec![String::new(); MAX_ENTRIES];
+        assert!(
+            walk(
+                &File::open(temp.path()).unwrap(),
+                &deep,
+                &mut Inventory::default()
+            )
+            .is_err()
+        );
+        let mut existing = (0..MAX_ENTRIES).map(|n| (n.to_string(), None)).collect();
         assert!(append(temp.path(), temp.path(), &mut existing).is_err());
     }
     #[test]
@@ -988,7 +1162,7 @@ mod tests {
         assert!(list(&blocked.join("child"), true).is_err());
         assert!(copy_regular(File::open(temp.path()).unwrap(), &temp.path().join("copy")).is_err());
         fs::write(temp.path().join("other.txt"), "other").unwrap();
-        assert!(append(&blocked, temp.path(), &mut Vec::new()).is_err());
+        assert!(append(&blocked, temp.path(), &mut BTreeMap::new()).is_err());
         let session = session(temp.path(), "many");
         let many = session.join(ARTIFACTS_DIR);
         for index in 0..=MAX_ENTRIES {

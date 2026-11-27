@@ -1,4 +1,4 @@
-//! User-owned session favorites, separate from daemon lifecycle authority.
+//! Workspace-local session favorites and sidebar display order.
 
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
@@ -13,11 +13,11 @@ use crate::infrastructure::paths::project_data_dir;
 use crate::infrastructure::persistence::{json_file, store_lock::StoreLock};
 
 #[derive(Default, Serialize, Deserialize)]
-struct Favorites {
-    sessions: BTreeSet<SessionId>,
+struct SessionList<T> {
+    sessions: T,
 }
 
-const MAX_FAVORITES_BYTES: u64 = 1024 * 1024;
+const MAX_PREFERENCE_BYTES: usize = 1024 * 1024;
 
 /// Workspace-local preferences keyed by session incarnation, never by name.
 pub struct SessionFavoritesStore {
@@ -39,43 +39,26 @@ impl SessionFavoritesStore {
     /// or uses a newer schema.
     pub fn load(&self) -> Result<BTreeSet<SessionId>> {
         let path = self.dir.join("session-favorites.json");
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // A FIFO must not wait for a writer before its type can be checked.
-            options.custom_flags(libc::O_NONBLOCK);
-        }
-        let file = match options.open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(BTreeSet::new());
-            }
-            Err(error) => {
-                return Err(error).context(format!("failed to read {}", path.display()));
-            }
-        };
-        // Inspect and read the same descriptor so a path replacement cannot
-        // substitute a pipe or device after validation.
-        anyhow::ensure!(
-            file.metadata()
-                .context(format!("failed to inspect {}", path.display()))?
-                .is_file(),
-            "session favorites is not a regular file: {}",
-            path.display()
-        );
-        let mut text = String::new();
-        file.take(MAX_FAVORITES_BYTES + 1)
-            .read_to_string(&mut text)
-            .context(format!("failed to read {}", path.display()))?;
-        anyhow::ensure!(
-            text.len() as u64 <= MAX_FAVORITES_BYTES,
-            "session favorites exceeds the {MAX_FAVORITES_BYTES}-byte limit: {}",
-            path.display()
-        );
-        let favorites: Favorites = json_file::decode_supported_version(&path, &text)?;
-        Ok(favorites.sessions)
+        read_session_list(&path)
+    }
+
+    /// Read the last manually arranged sidebar order for this workspace.
+    ///
+    /// # Errors
+    /// Returns an error for an unreadable or unsupported preference file.
+    pub fn load_order(&self) -> Result<Vec<SessionId>> {
+        read_session_list(&self.dir.join("session-order.json"))
+    }
+
+    /// Atomically replace the entire display preference on an explicit move.
+    ///
+    /// # Errors
+    /// Returns an error if the existing order is unreadable or the write fails.
+    pub fn save_order(&self, sessions: &[SessionId]) -> Result<()> {
+        let path = self.dir.join("session-order.json");
+        self.load_order()?;
+        let list = SessionList { sessions };
+        json_file::write_versioned_bounded(&self.dir, &path, &list, MAX_PREFERENCE_BYTES)
     }
 
     /// Toggle only this identity while preserving concurrent writers' choices.
@@ -110,12 +93,52 @@ impl SessionFavoritesStore {
         json_file::write_versioned(
             &self.dir,
             &self.dir.join("session-favorites.json"),
-            &Favorites {
+            &SessionList {
                 sessions: favorites.clone(),
             },
         )?;
         Ok(favorites)
     }
+}
+
+fn read_session_list<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // A FIFO must not wait for a writer before its type can be checked.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(T::default());
+        }
+        Err(error) => {
+            return Err(error).context(format!("failed to read {}", path.display()));
+        }
+    };
+    // Inspect and read the same descriptor so a path replacement cannot
+    // substitute a pipe or device after validation.
+    anyhow::ensure!(
+        file.metadata()
+            .context(format!("failed to inspect {}", path.display()))?
+            .is_file(),
+        "session preference is not a regular file: {}",
+        path.display()
+    );
+    let mut text = String::new();
+    file.take(MAX_PREFERENCE_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .context(format!("failed to read {}", path.display()))?;
+    anyhow::ensure!(
+        text.len() <= MAX_PREFERENCE_BYTES,
+        "session preference exceeds the {MAX_PREFERENCE_BYTES}-byte limit: {}",
+        path.display()
+    );
+    let list: SessionList<T> = json_file::decode_supported_version(path, &text)?;
+    Ok(list.sessions)
 }
 
 #[cfg(test)]
@@ -139,6 +162,33 @@ mod tests {
         assert_eq!(store.toggle(first).unwrap(), BTreeSet::from([second]));
         assert!(!other.load().unwrap().contains(&SessionId::new()));
         assert!(other.toggle(second).unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_order_is_workspace_local_and_failed_writes_preserve_the_last_order() {
+        use crate::infrastructure::persistence::json_file::{
+            AtomicWriteStage, fail_next_atomic_write,
+        };
+
+        let workspace = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let store = SessionFavoritesStore::new(workspace.path());
+        let [first, second] = std::array::from_fn(|_| SessionId::new());
+        store.save_order(&[second, first]).unwrap();
+        store.toggle(first).unwrap();
+        assert_eq!(
+            SessionFavoritesStore::new(other.path())
+                .load_order()
+                .unwrap(),
+            [] as [SessionId; 0]
+        );
+        fail_next_atomic_write(
+            &store.dir.join("session-order.json"),
+            AtomicWriteStage::Rename,
+        );
+        assert!(store.save_order(&[first, second]).is_err());
+        assert_eq!(store.load_order().unwrap(), [second, first]);
+        assert_eq!(store.load().unwrap(), BTreeSet::from([first]));
     }
 
     #[test]
@@ -206,7 +256,7 @@ mod tests {
 
         std::fs::File::create(&path)
             .unwrap()
-            .set_len(MAX_FAVORITES_BYTES + 1)
+            .set_len(MAX_PREFERENCE_BYTES as u64 + 1)
             .unwrap();
         assert!(store.load().is_err());
     }

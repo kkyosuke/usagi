@@ -1897,6 +1897,7 @@ fn preview_loaded(
     lines: &[&str],
 ) -> AppEvent {
     AppEvent::Backend(BackendEvent::PreviewLoaded {
+        purposes: std::collections::BTreeMap::new(),
         target,
         request_id: state.preview_overlay().unwrap().request_id(),
         path: path.map(str::to_owned),
@@ -2208,6 +2209,7 @@ fn coverage_contract_exercises_reducer_noop_error_and_reconcile_paths() {
             error: safe_error("prs"),
         },
         BackendEvent::PreviewLoaded {
+            purposes: std::collections::BTreeMap::new(),
             target: Target::Session(session),
             request_id: RequestId::new(),
             path: None,

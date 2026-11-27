@@ -291,8 +291,11 @@ fn line_enables_checkout_filter(line: &str) -> bool {
 /// A lookup through a damaged checkout does not prove its owning repository has
 /// released the registration: managed teardown must also remove the exact path
 /// through that stable repository before deleting its branch.
-fn repository_unresolved(stderr: &str) -> bool {
-    stderr.contains("not a git repository")
+#[must_use]
+pub fn repository_unresolved(stderr: &str) -> bool {
+    let message = stderr.trim_start();
+    message.starts_with("fatal: not a git repository")
+        || message.starts_with("fatal: gitfile does not point to a valid repository:")
 }
 
 /// Remove the worktree at `worktree` (with `--force` when `force`).
@@ -351,7 +354,8 @@ pub fn delete_branch(runner: &dyn GitRunner, repo: &Path, branch: &str, force: b
     let delete_flag = if force { "-D" } else { "-d" };
     let output = runner.run(repo, &["branch", delete_flag, "--", branch])?;
     if output.success
-        || output.stderr.contains("not found")
+        || output.stderr.trim().trim_end_matches('.')
+            == format!("error: branch '{branch}' not found")
         || repository_unresolved(&output.stderr)
     {
         return Ok(());
@@ -778,6 +782,17 @@ mod tests {
         )]);
         remove_worktree(&orphan, Path::new("/dest"), Path::new("/dest"), true).unwrap();
 
+        let stale_gitfile = FakeGitRunner::new(vec![fail(
+            "fatal: gitfile does not point to a valid repository: /repo/.git",
+        )]);
+        remove_worktree(
+            &stale_gitfile,
+            Path::new("/repo"),
+            Path::new("/dest"),
+            false,
+        )
+        .unwrap();
+
         let gone = FakeGitRunner::new(vec![fail(
             "fatal: not a git repository (or any of the parent directories): .git",
         )]);
@@ -826,7 +841,7 @@ mod tests {
     #[test]
     fn delete_branch_surfaces_other_failures() {
         let git = FakeGitRunner::new(vec![fail(
-            "error: cannot delete branch 'usagi/x' used by worktree",
+            "error: cannot delete branch 'usagi/x' used by worktree at '/tmp/not found'",
         )]);
         let err = delete_branch(&git, Path::new("/repo"), "usagi/x", true)
             .unwrap_err()
