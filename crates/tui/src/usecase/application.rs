@@ -147,6 +147,14 @@ impl WorkspaceSnapshot {
     }
 }
 
+/// One registry read for the entry screens. Missing folders remain manageable in Projects.
+#[derive(Default)]
+pub struct EntryProjects {
+    pub available: Vec<Workspace>,
+    pub missing: Vec<Workspace>,
+    pub recent: Vec<usagi_core::domain::recent::Recent>,
+}
+
 /// Workspace を開く application port。
 ///
 /// path の検証・登録・最終利用時刻の更新・state 読み込みは実 IO を持つ合成側が実装する。
@@ -214,9 +222,7 @@ pub trait WorkspaceLoader: Send {
     ///
     /// # Errors
     /// Returns an error if the history projection cannot be read.
-    fn entry_projects(
-        &mut self,
-    ) -> io::Result<(Vec<Workspace>, Vec<usagi_core::domain::recent::Recent>)>;
+    fn entry_projects(&mut self) -> io::Result<EntryProjects>;
 
     /// Save tab order and the active project after a successful deck change.
     ///

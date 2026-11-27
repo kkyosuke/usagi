@@ -123,7 +123,7 @@ project 3 / 5 を番号で選ぶ場合は `Ctrl-O` の後に `Ctrl` を離して
 | Open | 文字 / paste / `Backspace` / `Delete` | filter または Directory の path 編集 |
 | Open | `Tab` | Projects / Recent / Directory |
 | Open | `Space` | Projects で複数 project を mark |
-| Open | `Enter` | open |
+| Open | `Enter` | project を開く。Projects の `⚠ Folder missing` 行では、その project の登録と履歴を削除 |
 | Open | `Ctrl-X` | 選択workspaceの登録解除確認 |
 | Open | `C` | 存在しない登録のcleanup確認 |
 | Open | `Esc` | Welcomeへ戻る |

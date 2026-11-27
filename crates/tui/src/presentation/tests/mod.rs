@@ -69,6 +69,7 @@ use crate::presentation::views::workspace::HomeProjection;
 use crate::presentation::views::{director_drawer, root_terminal_drawer};
 use crate::presentation::widgets::strip_ansi;
 use crate::presentation::workspace_runtime::PaneRestoreTarget;
+use crate::usecase::application::EntryProjects;
 use crate::usecase::application::agent_tab_intent::{
     AgentTabIntent, AgentTabIntentError, AgentTabIntentMutation, AgentTabProjection,
     AgentTabSlotIntent, AgentTabTargetProjection, reconcile_agent_tab_intent_mutation,
@@ -2591,6 +2592,7 @@ struct FakeLoader {
     open_snapshot: FakeOpenSnapshot,
     activate_error: Option<&'static str>,
     cleanup_removed: Vec<PathBuf>,
+    cleanup_error: Option<&'static str>,
     cleanup_calls: usize,
     cleanup_candidates: Vec<Vec<PathBuf>>,
     missing: Vec<PathBuf>,
@@ -2708,11 +2710,15 @@ impl WorkspaceLoader for FakeLoader {
         Ok(())
     }
 
-    fn entry_projects(&mut self) -> io::Result<(Vec<Workspace>, Vec<Recent>)> {
+    fn entry_projects(&mut self) -> io::Result<EntryProjects> {
         if let Some(error) = self.recent_projects_error {
             return Err(io::Error::other(error));
         }
-        Ok((self.entry_registry.clone(), self.recent_projects.clone()))
+        Ok(EntryProjects {
+            available: self.entry_registry.clone(),
+            recent: self.recent_projects.clone(),
+            ..EntryProjects::default()
+        })
     }
 
     fn record_unite(&mut self, _paths: &[PathBuf]) -> io::Result<()> {
@@ -2768,7 +2774,10 @@ impl WorkspaceLoader for FakeLoader {
         if let Some(paths) = paths {
             self.cleanup_candidates.push(paths.to_vec());
         }
-        Ok(self.cleanup_removed.clone())
+        self.cleanup_error.map_or_else(
+            || Ok(self.cleanup_removed.clone()),
+            |error| Err(io::Error::other(error)),
+        )
     }
 
     fn unregister(&mut self, paths: &[PathBuf]) -> io::Result<Vec<PathBuf>> {

@@ -224,6 +224,19 @@ impl WorkspaceRegistryTransaction for LockedWorkspaceRegistry<'_> {
     fn save_unites(&self, unites: &[Unite]) -> Result<()> {
         self.storage.save_unites(unites)
     }
+    fn last_projects(&self) -> Result<Option<LastProjectSet>> {
+        self.storage.load_last_projects()
+    }
+
+    fn replace_last_projects(&self, projects: Option<&LastProjectSet>) -> Result<()> {
+        let path = self.storage.dir.join("last-projects.json");
+        if let Some(projects) = projects {
+            json_file::write_versioned(&self.storage.dir, &path, projects)
+        } else {
+            std::fs::remove_file(path)?;
+            Ok(())
+        }
+    }
 }
 
 impl WorkspaceRepository for Storage {

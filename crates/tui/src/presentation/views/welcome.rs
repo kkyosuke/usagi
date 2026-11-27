@@ -320,7 +320,8 @@ pub fn render(
         }
     }
     // Reserve utilities and the footer before admitting optional notice rows.
-    let budget = height.saturating_sub(2);
+    let top = mascot_screen::header_top_padding(height);
+    let budget = height.saturating_sub(top + 2);
     content.truncate(budget);
     if let Some(notice) = welcome.notice() {
         let available = budget.saturating_sub(content.len());
@@ -341,10 +342,6 @@ pub fn render(
             Style::new(),
         ));
     }
-    // Centre the whole group near the upper third, saturating on short screens.
-    let top = (height / 3)
-        .saturating_sub(content.len() / 2)
-        .min(height.saturating_sub(content.len() + 1));
     let mut frame = vec![String::new(); top];
     frame.extend(content);
     frame.resize(height.saturating_sub(1), String::new());
@@ -398,6 +395,11 @@ mod tests {
             .collect();
         let mut welcome = Welcome::new(vec![
             Recent::Unite(UniteOverview::new(members)),
+            Recent::Unite(UniteOverview::new(vec![WorkspaceOverview::new(
+                Workspace::new("beta", "/tmp/beta"),
+                0,
+                0,
+            )])),
             Recent::Unite(UniteOverview::new(Vec::new())),
         ]);
         welcome.remove_paths(&["/tmp/alpha".into()]);
@@ -471,7 +473,7 @@ mod tests {
                 .iter()
                 .position(|line| line.contains("Clone repository"))
                 .unwrap();
-            assert!(usize::midpoint(first, utilities).abs_diff(height / 3) <= 1);
+            assert_eq!(first, mascot_screen::header_top_padding(height));
             assert_eq!(utilities - clone, 3);
             assert!(utilities < height - 2);
             assert!(plain.last().unwrap().contains("Enter open"));

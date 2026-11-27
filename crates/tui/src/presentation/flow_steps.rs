@@ -481,6 +481,9 @@ pub(super) fn step_open(open: &mut Open, key: Key) -> OpenStep {
         Key::Escape => OpenStep::Back,
         Key::Quit | Key::CtrlQ => OpenStep::Quit,
         Key::Enter => {
+            if let Some(path) = open.selected_missing() {
+                return OpenStep::RemoveMissing(path.to_owned());
+            }
             let paths = open.chosen_paths();
             if paths.is_empty() {
                 OpenStep::Stay

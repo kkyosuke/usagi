@@ -245,7 +245,7 @@ use crate::usecase::application::runtime_ports::{
     SessionCommandPort, SessionCommandResult, SessionRefreshPort, SessionWorktreeScanPort,
 };
 use crate::usecase::application::{
-    WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
+    EntryProjects, WorkspaceCreateEffect, WorkspaceCreateToken, WorkspaceLoader, WorkspaceSnapshot,
     runtime_identities_are_valid,
 };
 
@@ -757,6 +757,7 @@ enum OpenStep {
     Back,
     Choose(Vec<PathBuf>),
     ConfirmCleanup,
+    RemoveMissing(PathBuf),
     ConfirmUnregister(PathBuf),
 }
 
@@ -1278,7 +1279,7 @@ fn render_open(height: usize, width: usize, open: &Open, now: DateTime<Utc>) -> 
                 &title,
                 52,
                 heading,
-                "Registry entries whose folder is gone are removed.",
+                "Remove missing projects from registration and history.",
             )
             .compact("y: remove   n/Esc: cancel"),
         );
@@ -2695,7 +2696,16 @@ pub(crate) fn run_workspace_controller(
 /// 現れない registry entry は 0 件 overview として必ず補う（projection は Welcome カードの
 /// 表示枠で切られていることがあり、それをそのまま一覧にすると `usagi open` で登録した
 /// workspace が一覧から消える）。
-fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
+fn open_from_registry(
+    mut workspaces: Vec<Workspace>,
+    recent: &[Recent],
+    missing: Vec<Workspace>,
+) -> Open {
+    let missing_paths = missing
+        .iter()
+        .map(|workspace| workspace.path.clone())
+        .collect();
+    workspaces.extend(missing);
     // Unite card の member も集計済みなので、単体 recent が無い workspace はそちらから拾う
     // （0 件で補うのは、どちらの形でも projection に現れなかった entry だけにする）。
     let mut open_overviews = Vec::new();
@@ -2714,7 +2724,9 @@ fn open_from_registry(workspaces: Vec<Workspace>, recent: &[Recent]) -> Open {
             .filter(|workspace| !projected.contains(&workspace.path))
             .map(|workspace| WorkspaceOverview::new(workspace, 0, 0)),
     );
-    Open::with_overviews(open_overviews).with_history(recent.to_vec())
+    Open::with_overviews(open_overviews)
+        .with_history(recent.to_vec())
+        .with_missing_paths(missing_paths)
 }
 
 fn refresh_entry_projects(
@@ -2724,10 +2736,10 @@ fn refresh_entry_projects(
     registry: &mut Vec<Workspace>,
 ) {
     match loader.entry_projects() {
-        Ok((workspaces, recent)) => {
-            *registry = workspaces;
-            *open = open_from_registry(registry.clone(), &recent);
-            welcome.set_recent(recent);
+        Ok(projects) => {
+            *registry = projects.available;
+            *open = open_from_registry(registry.clone(), &projects.recent, projects.missing);
+            welcome.set_recent(projects.recent);
         }
         Err(error) => welcome.set_notice(Some(format!("Could not read recent projects: {error}"))),
     }
@@ -2742,6 +2754,7 @@ fn refresh_entry_projects(
 }
 
 fn prune_recent_paths(recent: &mut Vec<Recent>, paths: &[PathBuf]) {
+    let mut groups = HashSet::new();
     *recent = recent
         .drain(..)
         .filter_map(|recent| match recent {
@@ -2763,6 +2776,8 @@ fn prune_recent_paths(recent: &mut Vec<Recent>, paths: &[PathBuf]) {
                 })
             }
         })
+        // Recent is newest first. Keep the newest of groups that now have the same members.
+        .filter(|entry| matches!(entry, Recent::Workspace(_)) || groups.insert(recent_paths(entry)))
         .collect();
 }
 
@@ -3166,9 +3181,9 @@ fn render_missing_workspace_prompt(
         )
     };
     let message = if prompt.paths.len() == 1 {
-        "Remove its registry entry? No workspace data is deleted."
+        "Remove its registration and history? Project files stay."
     } else {
-        "Remove their registry entries? No workspace data is deleted."
+        "Remove their registrations and history? Project files stay."
     };
     let mut view = ConfirmationView::confirmation("Workspace not found", 64, heading, message);
     view.confirm_label = "remove";
@@ -3184,8 +3199,7 @@ fn render_missing_workspace_prompt(
 /// loop. Collecting the dependencies here keeps one public entry point, and
 /// makes adding a dependency a field rather than a new function.
 pub struct ScreenGraphRun<'a> {
-    workspaces: Vec<Workspace>,
-    recent: Vec<Recent>,
+    projects: EntryProjects,
     now: DateTime<Utc>,
     start: Start,
     loader: &'a mut dyn WorkspaceLoader,
@@ -3199,8 +3213,7 @@ impl<'a> ScreenGraphRun<'a> {
     /// The dependencies every screen graph run needs. Optional ones are added
     /// with the `with_*` methods.
     pub fn new(
-        workspaces: Vec<Workspace>,
-        recent: Vec<Recent>,
+        projects: EntryProjects,
         now: DateTime<Utc>,
         start: Start,
         loader: &'a mut dyn WorkspaceLoader,
@@ -3208,8 +3221,7 @@ impl<'a> ScreenGraphRun<'a> {
         backend_factory: &'a mut dyn ControllerBackendFactory,
     ) -> Self {
         Self {
-            workspaces,
-            recent,
+            projects,
             now,
             start,
             loader,
@@ -3248,8 +3260,7 @@ impl<'a> ScreenGraphRun<'a> {
 /// Returns workspace loading, settings, or terminal IO failures.
 pub fn run_screen_graph(term: &mut dyn Terminal, run: ScreenGraphRun<'_>) -> io::Result<Exit> {
     let ScreenGraphRun {
-        workspaces,
-        recent,
+        projects,
         now,
         start,
         loader,
@@ -3260,8 +3271,7 @@ pub fn run_screen_graph(term: &mut dyn Terminal, run: ScreenGraphRun<'_>) -> io:
     } = run;
     run_screen_graph_with_backend_and_notice(
         term,
-        workspaces,
-        recent,
+        projects,
         now,
         start,
         loader,
@@ -3359,8 +3369,11 @@ pub(crate) fn run_screen_graph_with_backend(
 ) -> io::Result<Exit> {
     run_screen_graph_with_backend_and_notice(
         term,
-        workspaces,
-        recent,
+        EntryProjects {
+            available: workspaces,
+            recent,
+            ..EntryProjects::default()
+        },
         now,
         start,
         loader,

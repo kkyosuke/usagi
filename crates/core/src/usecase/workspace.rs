@@ -13,7 +13,7 @@
 //! broken repository-local store degrades only that workspace's figures to zero;
 //! corruption of the global registry itself is still reported to the caller.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -133,6 +133,61 @@ pub fn remove(
     })
 }
 
+/// Forget the selected registrations whose directories are still missing, including their
+/// saved group and resume history. A bulk cleanup supplies no path selection.
+///
+/// # Errors
+/// Returns classification or persistence failures. The registry is written last, so a
+/// failed history update leaves the registration available for a retry.
+pub fn forget_missing(
+    storage: &impl WorkspaceRepository,
+    selected: Option<&[std::path::PathBuf]>,
+    missing: impl Fn(&Path) -> std::io::Result<bool>,
+) -> Result<Vec<std::path::PathBuf>> {
+    storage.transact(|tx| {
+        let mut registered = tx.load_workspaces()?;
+        let mut removed = Vec::new();
+        for workspace in &registered {
+            if selected.is_none_or(|paths| paths.contains(&workspace.path))
+                && missing(&workspace.path)?
+            {
+                removed.push(workspace.path.clone());
+            }
+        }
+        if removed.is_empty() {
+            return Ok(removed);
+        }
+        let mut groups = tx.load_unites()?;
+        let last = tx.last_projects()?;
+        if groups
+            .iter()
+            .any(|g| g.paths.iter().any(|p| removed.contains(p)))
+        {
+            retain_unite_members(&mut groups, |p| !removed.contains(p));
+            tx.save_unites(&groups)?;
+        }
+        if let Some(mut last) = last
+            && last.paths.iter().any(|p| removed.contains(p))
+        {
+            last.retain_paths(|p| !removed.iter().any(|removed| removed == p));
+            tx.replace_last_projects((!last.paths.is_empty()).then_some(&last))?;
+        }
+        registered.retain(|w| !removed.contains(&w.path));
+        tx.save_workspaces(&registered)?;
+        Ok(removed)
+    })
+}
+
+/// Two distinct saved decks can become the same ordered deck after a member goes away.
+fn retain_unite_members(groups: &mut Vec<Unite>, keep: impl Fn(&std::path::PathBuf) -> bool) {
+    let mut seen = HashSet::new();
+    groups.sort_by_key(|group| std::cmp::Reverse(group.updated_at));
+    groups.retain_mut(|group| {
+        group.paths.retain(&keep);
+        !group.paths.is_empty() && seen.insert(group.paths.clone())
+    });
+}
+
 /// Build recent-list entries for all registered workspaces, ordered by
 /// `updated_at` descending.
 ///
@@ -160,28 +215,24 @@ pub fn recent_for_workspaces(
         .into_iter()
         .map(|workspace| overview_for(storage, workspace))
         .collect::<Vec<_>>();
-    let mut unites = Vec::new();
-    // Unite storage is an optional enhancement to the workspace registry. A
-    // hand-edited, corrupt, or future-version file must not hide healthy single
-    // workspace recents.
-    for unite in storage.load_unites().unwrap_or_default() {
-        let members = unite
-            .paths
-            .iter()
-            .filter_map(|path| {
-                overviews
-                    .iter()
-                    .find(|overview| &overview.workspace.path == path)
-                    .cloned()
-            })
-            .collect::<Vec<_>>();
-        if !members.is_empty() {
-            unites.push(Recent::Unite(UniteOverview::with_updated_at(
-                members,
-                unite.updated_at,
-            )));
-        }
-    }
+    let by_path = overviews
+        .iter()
+        .map(|overview| (&overview.workspace.path, overview))
+        .collect::<HashMap<_, _>>();
+    // Unite storage is optional: a damaged file still leaves single-workspace recents usable.
+    let mut groups = storage.load_unites().unwrap_or_default();
+    retain_unite_members(&mut groups, |path| by_path.contains_key(path));
+    let unites = groups
+        .into_iter()
+        .map(|group| {
+            let members = group
+                .paths
+                .iter()
+                .map(|path| by_path[path].clone())
+                .collect();
+            Recent::Unite(UniteOverview::with_updated_at(members, group.updated_at))
+        })
+        .collect::<Vec<_>>();
     let mut recent = overviews
         .into_iter()
         .map(Recent::Workspace)
@@ -585,6 +636,92 @@ mod tests {
         fs::write(storage.dir().join("workspaces.json"), "{ broken").unwrap();
 
         assert!(open(&storage, tmp.path(), ts(12)).is_err());
+    }
+
+    const MISSING_DIRECTORY: fn(&Path) -> std::io::Result<bool> = |_| Ok(true);
+
+    #[test]
+    fn forgetting_a_missing_project_prunes_stored_history_and_preserves_other_members() {
+        use crate::domain::recent::LastProjectSet;
+        let (_tmp, storage) = storage();
+        let keep = workspace("keep", "/keep", ts(1));
+        let gone = workspace("gone", "/gone", ts(2));
+        let group = Unite::new(vec![gone.path.clone(), keep.path.clone()], ts(3));
+        let last = LastProjectSet {
+            paths: group.paths.clone(),
+            active: gone.path.clone(),
+        };
+        storage
+            .save_workspaces(&[keep.clone(), gone.clone()])
+            .unwrap();
+        storage
+            .save_unites(&[group, Unite::new(vec![keep.path.clone()], ts(4))])
+            .unwrap();
+        let projected = super::recent_for_workspaces(&storage, vec![keep.clone()]);
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].updated_at(), Some(ts(4)));
+        storage.save_last_projects(&last).unwrap();
+
+        let selected = std::slice::from_ref(&gone.path);
+        assert!(
+            super::forget_missing(&storage, Some(selected), |_| Err(
+                std::io::ErrorKind::PermissionDenied.into()
+            ))
+            .is_err()
+        );
+        assert_eq!(storage.load_last_projects().unwrap(), Some(last));
+        assert_eq!(
+            super::forget_missing(&storage, Some(selected), MISSING_DIRECTORY).unwrap(),
+            selected
+        );
+        let surviving = vec![keep.path.clone()];
+        assert_eq!(
+            storage.load_unites().unwrap(),
+            vec![Unite::new(surviving.clone(), ts(4))]
+        );
+        assert_eq!(
+            storage.load_last_projects().unwrap(),
+            Some(LastProjectSet {
+                paths: surviving,
+                active: keep.path.clone()
+            })
+        );
+        assert_eq!(storage.load_workspaces().unwrap(), vec![keep.clone()]);
+        super::forget_missing(&storage, None, MISSING_DIRECTORY).unwrap();
+        assert_eq!(storage.load_last_projects().unwrap(), None);
+        assert_eq!(storage.load_unites().unwrap(), Vec::<Unite>::new());
+    }
+
+    #[test]
+    fn forgetting_a_project_outside_the_saved_deck_preserves_unrelated_history() {
+        use crate::domain::recent::LastProjectSet;
+        let (_tmp, storage) = storage();
+        let gone = workspace("gone", "/gone", ts(2));
+        let alpha = workspace("alpha", "/alpha", ts(1));
+        let beta = workspace("beta", "/beta", ts(1));
+        storage
+            .save_workspaces(&[alpha.clone(), beta.clone(), gone.clone()])
+            .unwrap();
+        let group = Unite::new(vec!["/alpha".into(), "/beta".into()], ts(1));
+        storage.save_unites(std::slice::from_ref(&group)).unwrap();
+        let deck = LastProjectSet {
+            paths: group.paths.clone(),
+            active: "/beta".into(),
+        };
+        storage.save_last_projects(&deck).unwrap();
+
+        let selected = Some(std::slice::from_ref(&gone.path));
+        assert_eq!(
+            super::forget_missing(&storage, selected, MISSING_DIRECTORY).unwrap(),
+            vec![gone.path.clone()]
+        );
+        assert_eq!(
+            super::forget_missing(&storage, selected, MISSING_DIRECTORY).unwrap(),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(storage.load_workspaces().unwrap(), vec![alpha, beta]);
+        assert_eq!(storage.load_unites().unwrap(), vec![group]);
+        assert_eq!(storage.load_last_projects().unwrap(), Some(deck));
     }
 
     #[test]

@@ -149,7 +149,7 @@ Welcome はロゴとメニューを画面の上から約 1/3 にまとめ、選�
 Config / Quit はメニューの直下、操作ヒントは画面最下部に表示します。
 次回からは `usagi` の Welcome で `Enter` を押すと、前回の project タブ構成と選択中の project を開けます。
 `o` の Open / add projects では登録済み project・Recent・Directory を切り替え、複数 project の選択や既存ディレクトリの追加ができます。
-削除したディレクトリは一覧と再開候補から自動で外れ、元の場所に復元すると再び表示されます。
+フォルダが見つからない project は Projects に `⚠ Folder missing` と表示されます。その行で `Enter` を押すと、登録と履歴から取り除けます。
 Clone は `e`、全体の Config は `c` から開きます。
 サイドバーでは、既定で子 session を親の直下にまとめ、Switch で[表示順を並べ替え](document/03-tui.md#session-sidebar-rows)られます。ワークスペースを開き直しても、その順序を引き継ぎます。
 [Session Garden](document/assets/session-garden.gif) では、[Agent の状態に沿って動くうさぎ](document/03-tui.md#区画とうさぎ)と庭、project ごとの一覧から作業状況を確認できます。うさぎへマウスを重ねると対応する行を強調し、クリックで Agent を開けます。PR のマージ時には短いお祝いを表示します。

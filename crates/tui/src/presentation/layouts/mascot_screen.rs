@@ -36,25 +36,17 @@ fn header_lines(width: usize, title: &str) -> Vec<String> {
     lines
 }
 
-/// ヘッダ（マスコット＋タイトル）を置く上余白。**ボディの高さに依存させない**のが要点で、
-/// 端末高さの一定割合（約 1/5）に固定する。これで open と config のようにボディの高さが違う
-/// 画面をまたいでもマスコットが同じ行に来る（画面遷移でうさぎが飛ばない）。ただしボディが高くて
-/// 収まらない画面ではフッタを画面外へ押し出さないよう、コンテンツが収まる範囲まで余白を詰める。
-fn header_top_padding(height: usize, content_lines: usize) -> usize {
-    (height / 5).min(height.saturating_sub(content_lines + 1))
+/// Anchor the mascot by terminal height alone. Keep the first 24 rows available
+/// for controls on a short terminal.
+pub(crate) const fn header_top_padding(height: usize) -> usize {
+    height.saturating_sub(24) / 5
 }
 
-/// ボディに使える行数。`render` が必ず置くヘッダ（マスコット＋空行＋タイトル）・その下の
-/// 余白 1 行・最下行のフッタを端末高さから引いた値である。
-///
-/// ボディが高い画面では [`header_top_padding`] が 0 に詰まるので、この値がそのままボディの
-/// 上限になる。**行数が端末に収まらないボディは `Frame::from_lines` が末尾を黙って捨てる**ので、
-/// 一覧を出す view はこの予算で表示件数を決め、溢れる分を scroll させる。
+/// Rows between the fixed header and the footer available to scrollable content.
 #[must_use]
 pub fn body_budget(raw_height: usize, raw_width: usize) -> usize {
     let (height, _) = widgets::normalize_size(raw_height, raw_width);
-    // マスコット行＋空行＋タイトル＋ヘッダとボディの間の空行＋フッタ。
-    height.saturating_sub(icon::height() + 4)
+    height.saturating_sub(header_top_padding(height) + icon::height() + 4)
 }
 
 /// マスコット＋タイトルを頂く全画面フレームを組む。
@@ -81,7 +73,7 @@ pub fn render(
     let footer_line = centered_line(width, footer, Style::new().dim());
 
     let mut lines = Vec::with_capacity(height);
-    let top_padding = header_top_padding(height, content.len());
+    let top_padding = header_top_padding(height);
     for _ in 0..top_padding {
         lines.push(String::new());
     }
@@ -156,7 +148,7 @@ mod tests {
     #[test]
     fn body_budget_is_what_render_leaves_for_the_body() {
         // ヘッダ（3 行＋空行＋タイトル）＋間の空行＋フッタを引いた残り。
-        assert_eq!(body_budget(40, 80), 40 - 7);
+        assert_eq!(body_budget(40, 80), 40 - 3 - 7);
         // サイズ 0 は render と同じ 80×24 にフォールバックする。
         assert_eq!(body_budget(0, 0), 24 - 7);
         // ボディが予算ちょうどなら、フレームは端末高さに収まる。
@@ -174,7 +166,7 @@ mod tests {
         // ボディの高さが違っても、マスコットは同じ行に来る（画面遷移で飛ばない）。
         let short = render(40, 80, "T", "f", |_w| vec!["one".to_string()]);
         let tall = render(40, 80, "T", "f", |_w| {
-            (0..12).map(|i| i.to_string()).collect()
+            (0..80).map(|i| i.to_string()).collect()
         });
         let mascot_row = |frame: &[String]| {
             frame
